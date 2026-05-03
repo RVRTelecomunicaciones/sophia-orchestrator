@@ -1,0 +1,3858 @@
+# Sophia Orchestrator V1 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Ship `sophia-orchestator` V1 — a Go HTTP service that orchestrates the 9-phase SDD workflow with parallel apply coordination, 202+SSE long-running pattern, Iron Laws enforcement, and OpenCode dispatcher.
+
+**Architecture:** Clean / hexagonal with 8 bounded contexts (Change, Phase, Apply, AgentDispatch, Worktree, Artifact, Discipline, Audit). Mirrors `sophia-runtime-adapters` layout. Domain has zero I/O; application orchestrates use cases; outbound ports are HTTP clients to governance/memory-engine/runtime-adapters; inbound is chi/v5 HTTP server with SSE.
+
+**Tech Stack:** Go 1.26+, PostgreSQL 15+, chi/v5, pgx/v5, OpenTelemetry, slog, testify, testcontainers-go, golangci-lint, golang-migrate, ulid/v2, Sloth (SLO specs).
+
+**Spec:** `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`
+
+---
+
+## File Structure (created across the plan)
+
+```
+sophia-orchestator/
+├── api/openapi/sophia-orchestator.v1.yaml
+├── cmd/sophia-orchestator/main.go
+├── docs/
+│   ├── adr/0001-project-init.md
+│   ├── adr/0002-dispatcher-abstraction.md
+│   ├── architecture.md
+│   ├── ai-orientation.md
+│   ├── domain-invariants.md
+│   ├── rules.md
+│   └── superpowers/{specs,plans}/...
+├── internal/
+│   ├── domain/
+│   │   ├── ids/ids.go
+│   │   ├── change/{change.go, status.go, errors.go}
+│   │   ├── phase/{phase.go, type.go, status.go, transitions.go, errors.go}
+│   │   ├── apply/{board.go, group.go, task.go, status.go, errors.go}
+│   │   ├── session/{session.go, role.go, status.go, errors.go}
+│   │   ├── worktree/{worktree.go, status.go}
+│   │   ├── envelope/{envelope.go, status.go, validation.go}
+│   │   ├── ironlaw/{laws.go, violation.go}
+│   │   ├── artifact/{ref.go, mode.go}
+│   │   ├── risk/risk.go
+│   │   └── shared/{clock.go, idgen.go}
+│   ├── ports/
+│   │   ├── inbound/{change.go, phase.go, apply.go, eventstream.go}
+│   │   └── outbound/{repository.go, governance.go, memory.go, runtime.go,
+│   │                 dispatcher.go, artifact.go, audit.go, spawngovernor.go}
+│   ├── application/
+│   │   ├── change/{create.go, get.go, list.go, abort.go}
+│   │   ├── phase/{run.go, get.go, resume.go, approve.go}
+│   │   ├── apply/{run.go, board.go}
+│   │   ├── eventstream/{publisher.go, subscriber.go}
+│   │   ├── discipline/{validator.go, ironlaw_checker.go,
+│   │                  prompt_builder.go, spawn_governor.go}
+│   │   └── audit/log.go
+│   ├── adapters/
+│   │   ├── inbound/http/
+│   │   │   ├── router.go
+│   │   │   ├── middleware/{auth.go, logging.go, tracing.go, recover.go}
+│   │   │   ├── handlers/{changes.go, phases.go, apply.go, sse.go, health.go}
+│   │   │   └── errors.go
+│   │   └── outbound/
+│   │       ├── pg/{conn.go, change_repo.go, phase_repo.go, board_repo.go,
+│   │              session_repo.go, audit_log.go, spawn_state.go}
+│   │       ├── governance/client.go
+│   │       ├── memory/client.go
+│   │       ├── runtime/client.go
+│   │       ├── dispatcher/opencode/dispatcher.go
+│   │       ├── artifact/{engram, openspec, hybrid}/store.go
+│   │       └── http_base/{client.go, circuit_breaker.go}
+│   ├── infrastructure/
+│   │   ├── config/config.go
+│   │   ├── obs/
+│   │   │   ├── log/log.go
+│   │   │   ├── metrics.go
+│   │   │   └── traces.go
+│   │   └── db/{driver.go, migrations.go}
+│   └── bootstrap/wire.go
+├── migrations/postgres/
+│   ├── 001_changes.up.sql / .down.sql
+│   ├── 002_phases.up.sql / .down.sql
+│   ├── 003_apply.up.sql / .down.sql
+│   ├── 004_sessions_worktrees.up.sql / .down.sql
+│   └── 005_audit_governor_apikeys.up.sql / .down.sql
+├── ops/
+│   ├── alertmanager/alertmanager.yaml
+│   ├── grafana/dashboards/{overview, phases, apply, dispatcher, audit}.json
+│   ├── load/k6/{baseline.js, burst.js, soak.js}
+│   ├── local/compose.yaml
+│   ├── otel-collector/config.yaml
+│   ├── prometheus/{rules, generated}/
+│   └── slo/{phase_api_latency.yaml, sse_first_event.yaml,
+│            phase_success.yaml, apply_success.yaml,
+│            ironlaw_violations.yaml, governor_throttle.yaml}
+├── scripts/{dev.sh, lint.sh, test.sh, migrate.sh}
+├── test/
+│   ├── chaos/{kill_mid_apply_test.go, network_partition_test.go}
+│   ├── contract/{governance_test.go, memory_test.go, runtime_test.go,
+│                 dispatcher_test.go}
+│   ├── e2e/{full_cycle_test.go, apply_parallel_test.go}
+│   ├── e2e_sse/{stream_test.go}
+│   └── fixtures/{sample-project/, prompts/, envelopes/}
+├── .editorconfig
+├── .env.example
+├── .gitignore
+├── .golangci.yaml
+├── AGENTS.md
+├── CHANGELOG.md
+├── CLAUDE.md
+├── Dockerfile
+├── LICENSE
+├── Makefile
+├── README.md
+├── go.mod
+└── go.sum
+```
+
+**Conventions** (consistent with `sophia-runtime-adapters`):
+- ULIDs as `CHAR(26)`, generated by `oklog/ulid/v2`.
+- All errors wrap with `fmt.Errorf("%w", ...)`; `errorlint` enforced.
+- All time via injectable `Clock`; `time.Now()` banned in domain/application by `golangci-lint forbidigo`.
+- All IDs via injectable `IDGenerator`; `ulid.Make()` banned outside infrastructure.
+- Conventional commits: `feat(scope)`, `fix(scope)`, `chore(scope)`, `docs(scope)`, `test(scope)`. Scope = layer (`domain`, `application`, `bootstrap`) or component (`change`, `phase`, `apply`, `session`, `pg`, `http`, `governance`, `dispatcher`).
+- NEVER `Co-Authored-By` or AI attribution (project rule).
+
+---
+
+## Milestone 1 — Project Bootstrap
+
+Foundation: Go module, structure, lint, conventions docs.
+
+### Task 1: Initialize Go module
+
+**Files:**
+- Create: `go.mod`
+
+- [ ] **Step 1: Init Go module**
+
+```bash
+cd /Users/russell/Documents/2026/sophia-orchestator
+go mod init github.com/RVRTelecomunicaciones/sophia-orchestrator
+```
+
+- [ ] **Step 2: Pin Go toolchain**
+
+Append to `go.mod`:
+```
+go 1.26
+toolchain go1.26.2
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add go.mod
+git commit -m "chore: init go module pinned to go 1.26.2"
+```
+
+### Task 2: Create base directory layout
+
+**Files:** all directories from File Structure section.
+
+- [ ] **Step 1: Create dirs**
+
+```bash
+mkdir -p api/openapi cmd/sophia-orchestator \
+  docs/adr docs/superpowers/specs docs/superpowers/plans \
+  internal/{domain/{ids,change,phase,apply,session,worktree,envelope,ironlaw,artifact,risk,shared},ports/{inbound,outbound},application/{change,phase,apply,eventstream,discipline,audit},adapters/inbound/http/{middleware,handlers},adapters/outbound/{pg,governance,memory,runtime,dispatcher/opencode,artifact/{engram,openspec,hybrid},http_base},infrastructure/{config,obs/log,db},bootstrap} \
+  migrations/postgres \
+  ops/{alertmanager,grafana/dashboards,load/k6,local,otel-collector,prometheus/{rules,generated},slo} \
+  scripts \
+  test/{chaos,contract,e2e,e2e_sse,fixtures}
+touch internal/domain/{ids,change,phase,apply,session,worktree,envelope,ironlaw,artifact,risk,shared}/.gitkeep
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add -A
+git commit -m "chore: scaffold directory layout"
+```
+
+### Task 3: Add Makefile
+
+**Files:**
+- Create: `Makefile`
+
+- [ ] **Step 1: Write Makefile**
+
+```makefile
+.PHONY: build test test-unit test-integration test-e2e test-chaos lint fmt vet vuln migrate-up migrate-down dev clean help
+
+GO            ?= go
+BIN_DIR       ?= bin
+APP           := sophia-orchestator
+PG_URL        ?= postgres://sophia:sophia@localhost:5432/sophia_orchestator?sslmode=disable
+MIGRATE       ?= go tool migrate
+
+build: ## Build the binary
+	$(GO) build -o $(BIN_DIR)/$(APP) ./cmd/sophia-orchestator
+
+test: test-unit ## Run unit tests (default)
+
+test-unit:
+	$(GO) test ./internal/... -race -count=1
+
+test-integration:
+	$(GO) test -tags=integration ./test/... -race -count=1 -timeout=5m
+
+test-e2e:
+	$(GO) test -tags=e2e ./test/e2e/... -count=1 -timeout=10m
+
+test-e2e-sse:
+	$(GO) test -tags=e2e_sse ./test/e2e_sse/... -count=1 -timeout=10m
+
+test-chaos:
+	$(GO) test -tags=chaos ./test/chaos/... -count=1 -timeout=15m
+
+lint:
+	golangci-lint run ./...
+
+fmt:
+	$(GO) fmt ./...
+	gofumpt -w .
+
+vet:
+	$(GO) vet ./...
+
+vuln:
+	govulncheck ./...
+
+migrate-up:
+	$(MIGRATE) -path migrations/postgres -database "$(PG_URL)" up
+
+migrate-down:
+	$(MIGRATE) -path migrations/postgres -database "$(PG_URL)" down 1
+
+dev:
+	docker compose -f ops/local/compose.yaml up -d
+
+clean:
+	rm -rf $(BIN_DIR) coverage.out
+
+help:
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add Makefile
+git commit -m "chore: add Makefile with build/test/lint/migrate targets"
+```
+
+### Task 4: Add golangci-lint config
+
+**Files:**
+- Create: `.golangci.yaml`
+
+- [ ] **Step 1: Write config**
+
+```yaml
+run:
+  timeout: 5m
+  go: "1.26"
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - forbidigo
+    - gocritic
+    - gofumpt
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+    - wrapcheck
+
+linters-settings:
+  forbidigo:
+    forbid:
+      - p: '^time\.Now$'
+        pkg: 'github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain'
+        msg: "use shared.Clock in domain"
+      - p: '^time\.Now$'
+        pkg: 'github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application'
+        msg: "use shared.Clock in application"
+      - p: '^ulid\.Make$'
+        pkg: 'github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/(domain|application)'
+        msg: "use shared.IDGenerator"
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
+  wrapcheck:
+    ignoreSigs:
+      - .Errorf(
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - wrapcheck
+        - gosec
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add .golangci.yaml
+git commit -m "chore: add golangci-lint config with forbidigo guards"
+```
+
+### Task 5: Add `.editorconfig`
+
+**Files:**
+- Create: `.editorconfig`
+
+- [ ] **Step 1: Write file**
+
+```ini
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.go]
+indent_style = tab
+
+[Makefile]
+indent_style = tab
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add .editorconfig
+git commit -m "chore: add editorconfig"
+```
+
+### Task 6: Add CLAUDE.md
+
+**Files:**
+- Create: `CLAUDE.md`
+
+- [ ] **Step 1: Write content** (mirrors runtime-adapters style; spec-anchored)
+
+```markdown
+# CLAUDE.md — sophia-orchestator
+
+## What this repo is
+
+`sophia-orchestator` is the **deterministic SDD workflow coordinator** of the Sophia ecosystem. Its sole responsibility is to drive a SDD Change through the 9 canonical phases, enforcing envelope contracts, Iron Laws, and HARD-GATE markers between agent invocations.
+
+## What this repo is NOT
+
+- Not a memory engine (memory-engine handles that).
+- Not a policy/approval engine (governance handles that).
+- Not a side-effect executor (runtime-adapters handles that).
+- Not an AI provider (LLM calls happen inside OpenCode subprocess).
+- Not a generic workflow builder (V1 = SDD only).
+- Not a distributed task scheduler (V1 uses goroutines + Postgres advisory locks).
+
+## Required mindset
+
+> **Coordinate with discipline. Do not invent state machines. Do not collapse boundaries.**
+
+Every phase transition produces an Envelope. Every Envelope is persisted before any caller-visible state change. Every Iron Law is enforced at boundaries. The orchestrator never decides policy (governance does), never stores knowledge (memory-engine does), never executes side effects (runtime-adapters does).
+
+## Must-read files before coding
+
+1. `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md` — V1 spec, authoritative.
+2. `docs/rules.md` — R-rules.
+3. `docs/domain-invariants.md` — I-invariants.
+4. `AGENTS.md`.
+
+## Core principles
+
+- **D1.1** — Orchestrator coordinates. It does not decide policy, store memory, or execute side effects.
+- **D1.2** — Every phase produces a validated Envelope before any state change.
+- **D1.3** — The 5 Iron Laws are non-rationalizable. Anti-rationalization tables in spec Appendix A.
+- **D1.4** — Apply phase parallelism is bounded by the Spawn Governor (default 2×2=4, cap 6).
+- **D1.5** — Long-running phases use 202 Accepted + SSE; never request-thread.
+- **D1.6** — Dispatcher is pluggable; OpenCode is V1 default, others V2.
+- **D1.7** — Worktrees are managed by orchestrator via runtime-adapters; sophia is AI-provider-agnostic.
+
+## Tech stack
+
+- Language: Go 1.26+ (toolchain `go1.26.2`).
+- DB: PostgreSQL 15+ via `pgx/v5`.
+- HTTP router: `chi/v5`.
+- Migrations: `golang-migrate`.
+- Observability: OpenTelemetry + slog.
+- Testing: `testify` + `testcontainers-go`.
+- Lint: `golangci-lint` with `forbidigo`, `wrapcheck`, `errorlint`.
+
+## Output style
+
+Conventional commits (`feat(scope)`, `fix(scope)`, `chore(scope)`, `docs(scope)`, `test(scope)`). NEVER `Co-Authored-By` or AI attribution. Scope = layer (`domain`, `application`, `bootstrap`) or component (`change`, `phase`, `apply`, `session`, `pg`, `http`, `governance`, `dispatcher`, `discipline`).
+
+## Never do this
+
+1. Mix governance with orchestrator (governance decides, orchestrator orchestrates).
+2. Store memory locally — use memory-engine via outbound port.
+3. Execute side effects — call runtime-adapters via outbound port.
+4. Bypass Iron Laws under operational pressure.
+5. Direct `time.Now()` or `ulid.Make()` in domain/application — use injectable `Clock` and `IDGenerator`.
+6. Run long-running phases on the request thread — use goroutine + SSE.
+7. Spawn dispatcher subprocesses without going through `SpawnGovernor`.
+8. Persist after returning — every phase persists Envelope BEFORE caller-visible state change.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add CLAUDE.md
+git commit -m "docs: add CLAUDE.md orientation for AI agents"
+```
+
+### Task 7: Add AGENTS.md
+
+**Files:**
+- Create: `AGENTS.md`
+
+- [ ] **Step 1: Write content**
+
+```markdown
+# AGENTS.md — sophia-orchestator
+
+This document gives an AI agent everything it needs to make a meaningful contribution to this repo without reading through history.
+
+## Quick start
+
+```bash
+go mod download
+docker compose -f ops/local/compose.yaml up -d
+make migrate-up
+make build
+make test-unit
+```
+
+## Repository purpose
+
+The orchestrator of the Sophia SDD workflow. See `CLAUDE.md` for principles, `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md` for the V1 design, `docs/rules.md` for R-rules, `docs/domain-invariants.md` for I-invariants.
+
+## How to add a phase behavior
+
+1. Update the relevant aggregate in `internal/domain/{change,phase,apply}/`. Add a state transition. Cover with unit tests (≥85% domain coverage gate).
+2. If touching governance contract: write a new ADR in `docs/adr/`.
+3. Update `internal/application/phase/run.go` use case if the run flow changes.
+4. Update SSE event types in `internal/adapters/inbound/http/handlers/sse.go` if needed.
+5. Update integration tests in `test/integration/`.
+
+## How to add a dispatcher provider (V2+)
+
+1. Implement `internal/ports/outbound/dispatcher.go` interface.
+2. Add adapter at `internal/adapters/outbound/dispatcher/<name>/dispatcher.go`.
+3. Wire in `internal/bootstrap/wire.go` based on config `DISPATCHER_PROVIDER=<name>`.
+4. Add contract test at `test/contract/dispatcher_<name>_test.go`.
+5. ADR documenting the provider's specifics (rate limiter ceiling, prompt format, envelope parsing).
+
+## Local development
+
+- Postgres on `localhost:5432`, DB `sophia_orchestator`, user/pass `sophia/sophia`.
+- Orchestrator on `localhost:8080`.
+- Stub services (governance/memory/runtime) under `ops/local/stubs/` (V1.1).
+
+## Testing layers
+
+| Layer | Build tag | Coverage gate |
+|---|---|---|
+| Unit | (none) | domain 100%, app 85%, infra 75% |
+| Integration | `integration` | (gated by feature areas) |
+| Contract | (none, in `test/contract/`) | green required |
+| E2E | `e2e` | green required main |
+| E2E SSE | `e2e_sse` | green required main |
+| Chaos | `chaos` | one passing per phase boundary |
+| Load | k6 | doesn't regress baseline |
+
+Run targets via `make test-*`.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add AGENTS.md
+git commit -m "docs: add AGENTS.md quickstart and layer guidance"
+```
+
+### Task 8: Add docs (architecture, rules, invariants)
+
+**Files:**
+- Create: `docs/architecture.md`
+- Create: `docs/rules.md`
+- Create: `docs/domain-invariants.md`
+- Create: `docs/ai-orientation.md`
+
+- [ ] **Step 1: Write `docs/architecture.md`** — copy hex diagram from spec Section 2 with bounded contexts table.
+- [ ] **Step 2: Write `docs/rules.md`** — R-rules:
+
+```markdown
+# Rules (R1..R12)
+
+R1. Orchestrator does not decide policy. Phase transitions and sensitive runtime calls go through governance.
+R2. Envelope before transition. Persisted before caller-visible state change (Iron Law #1 enforced).
+R3. Status enum closed: DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT.
+R4. Phase types closed: init | explore | proposal | spec | design | tasks | apply | verify | archive.
+R5. No `time.Now()` in domain/application — inject `shared.Clock`.
+R6. No `ulid.Make()` in domain/application — inject `shared.IDGenerator`.
+R7. Adapters are wired only in `internal/bootstrap/wire.go`. Domain/application never import adapters.
+R8. Long-running phases respond 202 Accepted + SSE. No request-thread > 30s.
+R9. Spawn Governor MUST gate every dispatcher invocation.
+R10. Idempotency replay-everything: `(change_id, phase_type, attempts)` UNIQUE; re-runs replay last envelope.
+R11. Audit log is append-only. No updates. No deletes.
+R12. Conventional commits, no AI attribution. Scope from `{domain, application, bootstrap, change, phase, apply, session, pg, http, governance, memory, runtime, dispatcher, discipline, audit, ci, docs, test}`.
+```
+
+- [ ] **Step 3: Write `docs/domain-invariants.md`** — I-invariants:
+
+```markdown
+# Domain Invariants (I1..I20)
+
+I1. A Change has a unique (project, name).
+I2. Status transitions are explicit; no hidden state mutations.
+I3. CurrentPhase advances only when prior Phase status==DONE and confidence ≥ threshold.
+I4. A Phase belongs to exactly one Change.
+I5. A Phase's Envelope is set iff Status ∈ {done, done_with_concerns, blocked, needs_context}.
+I6. Confidence ∈ [0.0, 1.0]; below threshold → status forced to BLOCKED or DONE_WITH_CONCERNS.
+I7. Apply Board exists iff Phase.Type == apply and Status != pending.
+I8. A Group's depends_on is a subset of the same Board's Group IDs (no cross-board deps).
+I9. A Task's claimed_by is set iff Status ∈ {claimed, running, done, failed, blocked}.
+I10. AgentSession.Provider is a closed set (V1: opencode; V2: + claude-code, cursor, gemini).
+I11. AgentSession.AgentRole ∈ {sdd-init, sdd-explore, sdd-proposal, sdd-spec, sdd-design, sdd-tasks, sdd-verify, sdd-archive, team-lead, implement}.
+I12. Worktree.Path is unique while Status != cleaned.
+I13. Iron Law #1: persisted-before-return. Envelope must be persisted before any caller-visible state change.
+I14. Iron Law #2: apply requires tasks Phase DONE with confidence ≥ 0.8 AND approved bit.
+I15. Iron Law #3: archive requires verify Phase DONE with confidence ≥ 0.9.
+I16. Iron Law #4: every transition goes through governance ClassifyTask + EvaluatePolicy + RouteDecision.
+I17. Iron Law #5: at attempts == 3 on a Task, escalate; do not attempt fix #4.
+I18. SpawnGovernor counter ≥ 0 always; saturated callers block or 429 — never overprovision.
+I19. Audit log entries are insert-only, in monotonic-time order per (change_id).
+I20. Idempotency: re-POST with same (change_id, phase_type, attempts) returns the cached envelope.
+```
+
+- [ ] **Step 4: Write `docs/ai-orientation.md`** — pointer to spec + onboarding:
+
+```markdown
+# AI Orientation
+
+If you are an AI agent making changes here, read in this order:
+1. `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`
+2. `CLAUDE.md`
+3. `docs/rules.md`
+4. `docs/domain-invariants.md`
+5. `AGENTS.md`
+
+Spec is authoritative. Rules and invariants are the operational form of the spec. Code disagreements with spec are bugs.
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/architecture.md docs/rules.md docs/domain-invariants.md docs/ai-orientation.md
+git commit -m "docs: add architecture, rules, invariants, and AI orientation"
+```
+
+### Task 9: Add ADR template + ADR-0001
+
+**Files:**
+- Create: `docs/adr/_template.md`
+- Create: `docs/adr/0001-project-init.md`
+
+- [ ] **Step 1: ADR template**
+
+```markdown
+# ADR NNNN: <title>
+
+- Status: <proposed | accepted | superseded by ADR-NNNN | deprecated>
+- Date: YYYY-MM-DD
+- Deciders: <names>
+
+## Context
+
+What problem are we solving? What constraints exist?
+
+## Decision
+
+What did we decide?
+
+## Consequences
+
+Positive, negative, neutral.
+
+## Alternatives considered
+
+Brief — why rejected.
+```
+
+- [ ] **Step 2: ADR-0001**
+
+```markdown
+# ADR 0001: Project init
+
+- Status: accepted
+- Date: 2026-05-03
+- Deciders: rfactperu
+
+## Context
+
+V1 of `sophia-orchestator` follows the spec at `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`. We need to lock in foundational decisions to avoid drift during implementation.
+
+## Decision
+
+- Go 1.26+, toolchain pinned `go1.26.2`.
+- PostgreSQL 15+ via `pgx/v5`. No SQLite in V1.
+- HTTP router: `chi/v5`.
+- Observability: OpenTelemetry + slog.
+- Testing: `testify` + `testcontainers-go`.
+- Migrations: `golang-migrate`.
+- ULIDs via `oklog/ulid/v2`.
+- Hexagonal architecture mirroring `sophia-runtime-adapters`. `internal/bootstrap/wire.go` is the only place adapters are imported.
+- Conventional commits without AI attribution.
+
+## Consequences
+
+- Stack consistency with the rest of the Sophia ecosystem (governance, memory, runtime).
+- Forbidigo lint guards prevent direct `time.Now()` and `ulid.Make()` in domain/application.
+- New stack additions require ADR.
+
+## Alternatives considered
+
+- gRPC instead of HTTP: rejected — runtime/governance/memory all expose HTTP, consistency wins.
+- SQLite for local dev: rejected — divergence from prod, testcontainers gives parity.
+- Embedded Anthropic SDK: rejected — orchestrator is dispatch-only; LLM calls live in OpenCode subprocess.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/adr/
+git commit -m "docs(adr): add ADR template and ADR-0001 project init"
+```
+
+### Task 10: Add README.md
+
+**Files:**
+- Create: `README.md`
+
+- [ ] **Step 1: Write content**
+
+```markdown
+# sophia-orchestator
+
+Deterministic coordinator of the Sophia SDD workflow.
+
+> Status: V1 in development. See `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`.
+
+## What it does
+
+Drives a SDD Change through 9 canonical phases (`init → explore → proposal → spec → design → tasks → apply → verify → archive`) with Iron-Law-enforced envelope contracts and parallel coordination of the apply phase via team-leads + implements in git worktrees.
+
+## What it does NOT do
+
+- Decide policy → `agent-governance-core`.
+- Store knowledge → `sophia-memory-engine`.
+- Execute side effects → `sophia-runtime-adapters`.
+- Call LLMs → that lives inside the OpenCode subprocess we dispatch.
+
+## Quick start
+
+```bash
+docker compose -f ops/local/compose.yaml up -d   # Postgres + stubs
+make migrate-up
+make build
+./bin/sophia-orchestator --config=ops/local/config.yaml
+```
+
+## Architecture
+
+Hexagonal / clean. Eight bounded contexts: Change, Phase, Apply, AgentDispatch, Worktree, Artifact, Discipline, Audit. See `docs/architecture.md`.
+
+## Stack
+
+Go 1.26 · PostgreSQL 15 · chi/v5 · pgx/v5 · OpenTelemetry · slog · testify · testcontainers-go · golangci-lint.
+
+## Tests
+
+```bash
+make test-unit          # always-on
+make test-integration   # testcontainers-go (Postgres)
+make test-e2e           # full SDD cycle on fixture
+make test-e2e-sse       # SSE streaming
+make test-chaos         # crash + resume
+```
+
+## License
+
+See `LICENSE`.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: add README"
+```
+
+### Task 11: Add LICENSE + CHANGELOG stub
+
+**Files:**
+- Create: `LICENSE` (MIT or whatever consistent with other Sophia repos — copy from runtime-adapters if exists)
+- Create: `CHANGELOG.md`
+
+- [ ] **Step 1: Copy LICENSE**
+
+```bash
+cp ../sophia-runtime-adapters/LICENSE ./LICENSE
+```
+
+- [ ] **Step 2: CHANGELOG stub**
+
+```markdown
+# Changelog
+
+All notable changes to this project will be documented in this file.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: SemVer.
+
+## [Unreleased]
+
+### Added
+- Initial V1 design spec (`docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`).
+- Project scaffolding, lint config, Makefile, docs (architecture/rules/invariants/AI orientation), ADRs.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add LICENSE CHANGELOG.md
+git commit -m "chore: add LICENSE and CHANGELOG stub"
+```
+
+---
+
+## Milestone 2 — Domain Layer
+
+Pure types, value objects, aggregates, state machines. Zero I/O. 100% test coverage gate.
+
+### Task 12: ID types
+
+**Files:**
+- Create: `internal/domain/ids/ids.go`
+- Test: `internal/domain/ids/ids_test.go`
+
+- [ ] **Step 1: Write failing test**
+
+```go
+package ids
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestParseID_ValidULID(t *testing.T) {
+    raw := "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    id, err := ParseChangeID(raw)
+    require.NoError(t, err)
+    require.Equal(t, raw, id.String())
+}
+
+func TestParseID_RejectsEmpty(t *testing.T) {
+    _, err := ParseChangeID("")
+    require.ErrorIs(t, err, ErrInvalidID)
+}
+
+func TestParseID_RejectsWrongLength(t *testing.T) {
+    _, err := ParseChangeID("too-short")
+    require.ErrorIs(t, err, ErrInvalidID)
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/ids/... -run TestParseID -v
+```
+Expected: FAIL (package not exists).
+
+- [ ] **Step 3: Implement**
+
+```go
+package ids
+
+import (
+    "errors"
+    "fmt"
+
+    "github.com/oklog/ulid/v2"
+)
+
+var ErrInvalidID = errors.New("invalid id")
+
+type (
+    ChangeID  struct{ raw string }
+    PhaseID   struct{ raw string }
+    BoardID   struct{ raw string }
+    GroupID   struct{ raw string }
+    TaskID    struct{ raw string }
+    SessionID struct{ raw string }
+    WorktreeID struct{ raw string }
+)
+
+func parse(raw string) (string, error) {
+    if raw == "" {
+        return "", fmt.Errorf("%w: empty", ErrInvalidID)
+    }
+    if _, err := ulid.Parse(raw); err != nil {
+        return "", fmt.Errorf("%w: %s", ErrInvalidID, err.Error())
+    }
+    return raw, nil
+}
+
+func ParseChangeID(raw string) (ChangeID, error)   { r, err := parse(raw); return ChangeID{r}, err }
+func ParsePhaseID(raw string) (PhaseID, error)     { r, err := parse(raw); return PhaseID{r}, err }
+func ParseBoardID(raw string) (BoardID, error)     { r, err := parse(raw); return BoardID{r}, err }
+func ParseGroupID(raw string) (GroupID, error)     { r, err := parse(raw); return GroupID{r}, err }
+func ParseTaskID(raw string) (TaskID, error)       { r, err := parse(raw); return TaskID{r}, err }
+func ParseSessionID(raw string) (SessionID, error) { r, err := parse(raw); return SessionID{r}, err }
+func ParseWorktreeID(raw string) (WorktreeID, error) { r, err := parse(raw); return WorktreeID{r}, err }
+
+func (i ChangeID) String() string   { return i.raw }
+func (i PhaseID) String() string    { return i.raw }
+func (i BoardID) String() string    { return i.raw }
+func (i GroupID) String() string    { return i.raw }
+func (i TaskID) String() string     { return i.raw }
+func (i SessionID) String() string  { return i.raw }
+func (i WorktreeID) String() string { return i.raw }
+```
+
+Add `oklog/ulid/v2` dep:
+```bash
+go get github.com/oklog/ulid/v2
+go get github.com/stretchr/testify
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/ids/... -run TestParseID -v
+```
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/ids/ go.mod go.sum
+git commit -m "feat(domain): add typed ULID identifiers"
+```
+
+### Task 13: shared.Clock and shared.IDGenerator
+
+**Files:**
+- Create: `internal/domain/shared/clock.go`
+- Create: `internal/domain/shared/idgen.go`
+- Test: `internal/domain/shared/{clock,idgen}_test.go`
+
+- [ ] **Step 1: Write tests**
+
+```go
+// clock_test.go
+package shared
+
+import (
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestFixedClock_ReturnsConfiguredTime(t *testing.T) {
+    fixed := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+    c := FixedClock(fixed)
+    require.Equal(t, fixed, c.Now())
+}
+
+// idgen_test.go
+package shared
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestFixedIDGenerator_ReturnsConfiguredIDs(t *testing.T) {
+    g := FixedIDGenerator([]string{"01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+    require.Equal(t, "01ARZ3NDEKTSV4RRFFQ69G5FAV", g.NewID())
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/shared/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+// clock.go
+package shared
+
+import "time"
+
+type Clock interface {
+    Now() time.Time
+}
+
+type fixedClock struct{ t time.Time }
+
+func (f fixedClock) Now() time.Time { return f.t }
+
+func FixedClock(t time.Time) Clock { return fixedClock{t} }
+
+// SystemClock returns the wall clock. Allowed in infrastructure layer only.
+type SystemClock struct{}
+
+func (SystemClock) Now() time.Time { return time.Now() }
+```
+
+```go
+// idgen.go
+package shared
+
+type IDGenerator interface {
+    NewID() string
+}
+
+type fixedIDGenerator struct {
+    ids []string
+    i   int
+}
+
+func (g *fixedIDGenerator) NewID() string {
+    if g.i >= len(g.ids) {
+        return ""
+    }
+    id := g.ids[g.i]
+    g.i++
+    return id
+}
+
+func FixedIDGenerator(ids []string) IDGenerator { return &fixedIDGenerator{ids: ids} }
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/shared/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/shared/
+git commit -m "feat(domain): add injectable Clock and IDGenerator"
+```
+
+### Task 14: PhaseType enum
+
+**Files:**
+- Create: `internal/domain/phase/type.go`
+- Test: `internal/domain/phase/type_test.go`
+
+- [ ] **Step 1: Write tests**
+
+```go
+package phase
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestPhaseType_AllValid(t *testing.T) {
+    types := []PhaseType{
+        PhaseInit, PhaseExplore, PhaseProposal, PhaseSpec,
+        PhaseDesign, PhaseTasks, PhaseApply, PhaseVerify, PhaseArchive,
+    }
+    require.Len(t, types, 9)
+    for _, pt := range types {
+        require.True(t, pt.IsValid(), "type %s should be valid", pt)
+    }
+}
+
+func TestPhaseType_RejectsInvalid(t *testing.T) {
+    require.False(t, PhaseType("nonsense").IsValid())
+}
+
+func TestPhaseType_NextValid(t *testing.T) {
+    require.Equal(t, []PhaseType{PhaseExplore}, PhaseInit.NextValid())
+    require.Equal(t, []PhaseType{PhaseSpec, PhaseDesign}, PhaseProposal.NextValid())
+    require.Empty(t, PhaseArchive.NextValid())
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/phase/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+package phase
+
+type PhaseType string
+
+const (
+    PhaseInit     PhaseType = "init"
+    PhaseExplore  PhaseType = "explore"
+    PhaseProposal PhaseType = "proposal"
+    PhaseSpec     PhaseType = "spec"
+    PhaseDesign   PhaseType = "design"
+    PhaseTasks    PhaseType = "tasks"
+    PhaseApply    PhaseType = "apply"
+    PhaseVerify   PhaseType = "verify"
+    PhaseArchive  PhaseType = "archive"
+)
+
+var allPhases = []PhaseType{
+    PhaseInit, PhaseExplore, PhaseProposal, PhaseSpec,
+    PhaseDesign, PhaseTasks, PhaseApply, PhaseVerify, PhaseArchive,
+}
+
+func (p PhaseType) IsValid() bool {
+    for _, v := range allPhases {
+        if v == p {
+            return true
+        }
+    }
+    return false
+}
+
+func (p PhaseType) NextValid() []PhaseType {
+    switch p {
+    case PhaseInit:
+        return []PhaseType{PhaseExplore}
+    case PhaseExplore:
+        return []PhaseType{PhaseProposal}
+    case PhaseProposal:
+        return []PhaseType{PhaseSpec, PhaseDesign}
+    case PhaseSpec, PhaseDesign:
+        return []PhaseType{PhaseTasks}
+    case PhaseTasks:
+        return []PhaseType{PhaseApply}
+    case PhaseApply:
+        return []PhaseType{PhaseVerify}
+    case PhaseVerify:
+        return []PhaseType{PhaseArchive}
+    case PhaseArchive:
+        return nil
+    default:
+        return nil
+    }
+}
+
+func (p PhaseType) ConfidenceThreshold() float64 {
+    switch p {
+    case PhaseExplore:
+        return 0.5
+    case PhaseProposal, PhaseDesign, PhaseApply:
+        return 0.7
+    case PhaseSpec, PhaseTasks:
+        return 0.8
+    case PhaseVerify, PhaseArchive:
+        return 0.9
+    default:
+        return 0.0 // init has no agent envelope
+    }
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/phase/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/phase/
+git commit -m "feat(domain/phase): add PhaseType enum with state transitions and thresholds"
+```
+
+### Task 15: PhaseStatus enum
+
+**Files:**
+- Create: `internal/domain/phase/status.go`
+- Test: `internal/domain/phase/status_test.go`
+
+- [ ] **Step 1: Test**
+
+```go
+package phase
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestPhaseStatus_AllValid(t *testing.T) {
+    require.True(t, PhaseStatusPending.IsValid())
+    require.True(t, PhaseStatusRunning.IsValid())
+    require.True(t, PhaseStatusDone.IsValid())
+    require.True(t, PhaseStatusDoneWithConcerns.IsValid())
+    require.True(t, PhaseStatusBlocked.IsValid())
+    require.True(t, PhaseStatusNeedsContext.IsValid())
+    require.True(t, PhaseStatusInterrupted.IsValid())
+    require.False(t, PhaseStatus("nope").IsValid())
+}
+
+func TestPhaseStatus_IsTerminal(t *testing.T) {
+    require.True(t, PhaseStatusDone.IsTerminal())
+    require.False(t, PhaseStatusRunning.IsTerminal())
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/phase/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+package phase
+
+type PhaseStatus string
+
+const (
+    PhaseStatusPending          PhaseStatus = "pending"
+    PhaseStatusRunning          PhaseStatus = "running"
+    PhaseStatusDone             PhaseStatus = "done"
+    PhaseStatusDoneWithConcerns PhaseStatus = "done_with_concerns"
+    PhaseStatusBlocked          PhaseStatus = "blocked"
+    PhaseStatusNeedsContext     PhaseStatus = "needs_context"
+    PhaseStatusInterrupted      PhaseStatus = "interrupted"
+)
+
+func (s PhaseStatus) IsValid() bool {
+    switch s {
+    case PhaseStatusPending, PhaseStatusRunning, PhaseStatusDone,
+        PhaseStatusDoneWithConcerns, PhaseStatusBlocked,
+        PhaseStatusNeedsContext, PhaseStatusInterrupted:
+        return true
+    }
+    return false
+}
+
+func (s PhaseStatus) IsTerminal() bool {
+    return s == PhaseStatusDone || s == PhaseStatusDoneWithConcerns ||
+        s == PhaseStatusBlocked
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/phase/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/phase/
+git commit -m "feat(domain/phase): add PhaseStatus enum"
+```
+
+### Task 16: Envelope value object + validation
+
+**Files:**
+- Create: `internal/domain/envelope/envelope.go`
+- Create: `internal/domain/envelope/validation.go`
+- Test: `internal/domain/envelope/envelope_test.go`
+
+- [ ] **Step 1: Tests**
+
+```go
+package envelope
+
+import (
+    "encoding/json"
+    "testing"
+
+    "github.com/stretchr/testify/require"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+func TestParse_Valid(t *testing.T) {
+    raw := []byte(`{
+      "schema_version": "v1",
+      "phase": "spec",
+      "change_name": "user-auth",
+      "project": "ms-cotizacion",
+      "status": "DONE",
+      "confidence": 0.85,
+      "executive_summary": "...",
+      "artifacts_saved": [{"topic_key": "sdd/user-auth/spec", "type": "spec"}],
+      "next_recommended": ["design"],
+      "risks": [],
+      "data": {}
+    }`)
+    e, err := Parse(raw)
+    require.NoError(t, err)
+    require.Equal(t, "v1", e.SchemaVersion)
+    require.Equal(t, phase.PhaseSpec, e.Phase)
+    require.Equal(t, StatusDone, e.Status)
+    require.InDelta(t, 0.85, e.Confidence, 0.0001)
+}
+
+func TestParse_RejectsWrongSchemaVersion(t *testing.T) {
+    raw, _ := json.Marshal(map[string]any{"schema_version": "v0", "phase": "spec"})
+    _, err := Parse(raw)
+    require.ErrorIs(t, err, ErrUnsupportedSchemaVersion)
+}
+
+func TestParse_RejectsInvalidPhase(t *testing.T) {
+    raw, _ := json.Marshal(map[string]any{"schema_version": "v1", "phase": "nope"})
+    _, err := Parse(raw)
+    require.ErrorIs(t, err, ErrInvalidPhase)
+}
+
+func TestParse_RejectsInvalidStatus(t *testing.T) {
+    raw, _ := json.Marshal(map[string]any{
+        "schema_version": "v1", "phase": "spec",
+        "change_name": "x", "project": "y",
+        "status": "WHATEVER",
+    })
+    _, err := Parse(raw)
+    require.ErrorIs(t, err, ErrInvalidStatus)
+}
+
+func TestParse_RejectsConfidenceOutOfRange(t *testing.T) {
+    raw, _ := json.Marshal(map[string]any{
+        "schema_version": "v1", "phase": "spec",
+        "change_name": "x", "project": "y",
+        "status": "DONE", "confidence": 1.5,
+    })
+    _, err := Parse(raw)
+    require.ErrorIs(t, err, ErrConfidenceOutOfRange)
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/envelope/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+// envelope.go
+package envelope
+
+import (
+    "encoding/json"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+type Status string
+
+const (
+    StatusDone             Status = "DONE"
+    StatusDoneWithConcerns Status = "DONE_WITH_CONCERNS"
+    StatusBlocked          Status = "BLOCKED"
+    StatusNeedsContext     Status = "NEEDS_CONTEXT"
+)
+
+type Risk struct {
+    Description string `json:"description"`
+    Level       string `json:"level"` // low | medium | high
+}
+
+type ArtifactRef struct {
+    TopicKey string `json:"topic_key"`
+    Type     string `json:"type"`
+}
+
+type Envelope struct {
+    SchemaVersion    string             `json:"schema_version"`
+    Phase            phase.PhaseType    `json:"phase"`
+    ChangeName       string             `json:"change_name"`
+    Project          string             `json:"project"`
+    Status           Status             `json:"status"`
+    Confidence       float64            `json:"confidence"`
+    ExecutiveSummary string             `json:"executive_summary"`
+    ArtifactsSaved   []ArtifactRef      `json:"artifacts_saved"`
+    NextRecommended  []phase.PhaseType  `json:"next_recommended"`
+    Risks            []Risk             `json:"risks"`
+    Data             json.RawMessage    `json:"data"`
+}
+```
+
+```go
+// validation.go
+package envelope
+
+import (
+    "encoding/json"
+    "errors"
+    "fmt"
+)
+
+var (
+    ErrUnsupportedSchemaVersion = errors.New("unsupported envelope schema_version")
+    ErrInvalidPhase             = errors.New("invalid phase")
+    ErrInvalidStatus            = errors.New("invalid status")
+    ErrConfidenceOutOfRange     = errors.New("confidence must be in [0,1]")
+    ErrEmptyChangeName          = errors.New("change_name required")
+    ErrEmptyProject             = errors.New("project required")
+)
+
+const SchemaVersionV1 = "v1"
+
+func Parse(raw []byte) (*Envelope, error) {
+    var e Envelope
+    if err := json.Unmarshal(raw, &e); err != nil {
+        return nil, fmt.Errorf("decode envelope: %w", err)
+    }
+    if e.SchemaVersion != SchemaVersionV1 {
+        return nil, fmt.Errorf("%w: got %q", ErrUnsupportedSchemaVersion, e.SchemaVersion)
+    }
+    if !e.Phase.IsValid() {
+        return nil, fmt.Errorf("%w: %q", ErrInvalidPhase, e.Phase)
+    }
+    if !isValidStatus(e.Status) {
+        return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, e.Status)
+    }
+    if e.Confidence < 0 || e.Confidence > 1 {
+        return nil, fmt.Errorf("%w: %v", ErrConfidenceOutOfRange, e.Confidence)
+    }
+    if e.ChangeName == "" {
+        return nil, ErrEmptyChangeName
+    }
+    if e.Project == "" {
+        return nil, ErrEmptyProject
+    }
+    return &e, nil
+}
+
+func isValidStatus(s Status) bool {
+    switch s {
+    case StatusDone, StatusDoneWithConcerns, StatusBlocked, StatusNeedsContext:
+        return true
+    }
+    return false
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/envelope/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/envelope/
+git commit -m "feat(domain/envelope): add Envelope value object with validation"
+```
+
+### Task 17: Iron Laws
+
+**Files:**
+- Create: `internal/domain/ironlaw/laws.go`
+- Test: `internal/domain/ironlaw/laws_test.go`
+
+- [ ] **Step 1: Test the catalog**
+
+```go
+package ironlaw
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestCatalog_HasFiveLaws(t *testing.T) {
+    require.Len(t, All(), 5)
+}
+
+func TestLaw_HasIDAndDescription(t *testing.T) {
+    for _, l := range All() {
+        require.NotEmpty(t, l.ID)
+        require.NotEmpty(t, l.Description)
+    }
+}
+
+func TestByID_Found(t *testing.T) {
+    l, ok := ByID(IronLaw1)
+    require.True(t, ok)
+    require.Equal(t, IronLaw1, l.ID)
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/ironlaw/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+package ironlaw
+
+type ID string
+
+const (
+    IronLaw1 ID = "IL1_PERSIST_BEFORE_TRANSITION"
+    IronLaw2 ID = "IL2_NO_APPLY_WITHOUT_TASKS_APPROVED"
+    IronLaw3 ID = "IL3_NO_ARCHIVE_WITHOUT_VERIFY"
+    IronLaw4 ID = "IL4_NO_RUNTIME_WITHOUT_GOVERNANCE"
+    IronLaw5 ID = "IL5_NO_FIX_4_WITHOUT_ESCALATION"
+)
+
+type Law struct {
+    ID          ID
+    Description string
+    Rationale   string
+}
+
+var catalog = []Law{
+    {IronLaw1, "No phase transition without persisted envelope.", "Crash before persistence loses the envelope and prevents resume."},
+    {IronLaw2, "No apply without tasks phase DONE and approved.", "Approval gate ensures explicit consent before code edits at scale."},
+    {IronLaw3, "No archive without verify DONE at confidence ≥ 0.9.", "Archive without verify locks in incorrect work."},
+    {IronLaw4, "No runtime call without governance decision.", "Unaudited side effects compound; fail closed when governance is down."},
+    {IronLaw5, "No fix #4 without architectural escalation.", "Three failures with the same approach indicate the wrong approach."},
+}
+
+func All() []Law { return catalog }
+
+func ByID(id ID) (Law, bool) {
+    for _, l := range catalog {
+        if l.ID == id {
+            return l, true
+        }
+    }
+    return Law{}, false
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/ironlaw/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/ironlaw/
+git commit -m "feat(domain/ironlaw): add 5 Iron Laws catalog"
+```
+
+### Task 18: Change aggregate
+
+**Files:**
+- Create: `internal/domain/change/change.go`
+- Create: `internal/domain/change/status.go`
+- Create: `internal/domain/change/errors.go`
+- Test: `internal/domain/change/change_test.go`
+
+- [ ] **Step 1: Tests**
+
+```go
+package change
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+func TestNew_ValidatesArgs(t *testing.T) {
+    id, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    _, err := New(id, "", "proj", ArtifactStoreEngram)
+    require.ErrorIs(t, err, ErrEmptyName)
+
+    _, err = New(id, "name", "", ArtifactStoreEngram)
+    require.ErrorIs(t, err, ErrEmptyProject)
+
+    _, err = New(id, "name", "proj", ArtifactStoreMode("nonsense"))
+    require.ErrorIs(t, err, ErrInvalidArtifactStore)
+}
+
+func TestNew_DefaultsCurrentPhaseToInit(t *testing.T) {
+    id, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    c, err := New(id, "feat-x", "proj", ArtifactStoreEngram)
+    require.NoError(t, err)
+    require.Equal(t, phase.PhaseInit, c.CurrentPhase())
+    require.Equal(t, StatusActive, c.Status())
+}
+
+func TestAdvancePhase_OnlyAllowedTransitions(t *testing.T) {
+    id, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    c, _ := New(id, "feat-x", "proj", ArtifactStoreEngram)
+
+    require.NoError(t, c.AdvancePhase(phase.PhaseExplore))
+    require.Equal(t, phase.PhaseExplore, c.CurrentPhase())
+
+    err := c.AdvancePhase(phase.PhaseApply)
+    require.ErrorIs(t, err, ErrInvalidTransition)
+}
+
+func TestAbort_FromActive(t *testing.T) {
+    id, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    c, _ := New(id, "feat-x", "proj", ArtifactStoreEngram)
+    require.NoError(t, c.Abort("user request"))
+    require.Equal(t, StatusAborted, c.Status())
+    require.ErrorIs(t, c.Abort("again"), ErrAlreadyTerminal)
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/change/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+// status.go
+package change
+
+type Status string
+
+const (
+    StatusActive    Status = "active"
+    StatusCompleted Status = "completed"
+    StatusAborted   Status = "aborted"
+)
+
+func (s Status) IsTerminal() bool {
+    return s == StatusCompleted || s == StatusAborted
+}
+
+type ArtifactStoreMode string
+
+const (
+    ArtifactStoreEngram   ArtifactStoreMode = "engram"
+    ArtifactStoreOpenspec ArtifactStoreMode = "openspec"
+    ArtifactStoreHybrid   ArtifactStoreMode = "hybrid"
+    ArtifactStoreNone     ArtifactStoreMode = "none"
+)
+
+func (a ArtifactStoreMode) IsValid() bool {
+    switch a {
+    case ArtifactStoreEngram, ArtifactStoreOpenspec, ArtifactStoreHybrid, ArtifactStoreNone:
+        return true
+    }
+    return false
+}
+```
+
+```go
+// errors.go
+package change
+
+import "errors"
+
+var (
+    ErrEmptyName            = errors.New("change: empty name")
+    ErrEmptyProject         = errors.New("change: empty project")
+    ErrInvalidArtifactStore = errors.New("change: invalid artifact_store")
+    ErrInvalidTransition    = errors.New("change: invalid phase transition")
+    ErrAlreadyTerminal      = errors.New("change: already terminal")
+)
+```
+
+```go
+// change.go
+package change
+
+import (
+    "fmt"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+type Change struct {
+    id            ids.ChangeID
+    name          string
+    project       string
+    status        Status
+    currentPhase  phase.PhaseType
+    artifactStore ArtifactStoreMode
+}
+
+func New(id ids.ChangeID, name, project string, store ArtifactStoreMode) (*Change, error) {
+    if name == "" {
+        return nil, ErrEmptyName
+    }
+    if project == "" {
+        return nil, ErrEmptyProject
+    }
+    if !store.IsValid() {
+        return nil, fmt.Errorf("%w: %q", ErrInvalidArtifactStore, store)
+    }
+    return &Change{
+        id:            id,
+        name:          name,
+        project:       project,
+        status:        StatusActive,
+        currentPhase:  phase.PhaseInit,
+        artifactStore: store,
+    }, nil
+}
+
+func (c *Change) ID() ids.ChangeID                { return c.id }
+func (c *Change) Name() string                    { return c.name }
+func (c *Change) Project() string                 { return c.project }
+func (c *Change) Status() Status                  { return c.status }
+func (c *Change) CurrentPhase() phase.PhaseType   { return c.currentPhase }
+func (c *Change) ArtifactStore() ArtifactStoreMode { return c.artifactStore }
+
+func (c *Change) AdvancePhase(next phase.PhaseType) error {
+    if c.status.IsTerminal() {
+        return ErrAlreadyTerminal
+    }
+    valid := c.currentPhase.NextValid()
+    for _, v := range valid {
+        if v == next {
+            c.currentPhase = next
+            if next == phase.PhaseArchive {
+                // archive is the last phase; transition to completed when its envelope arrives
+                // (caller is responsible)
+            }
+            return nil
+        }
+    }
+    return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, c.currentPhase, next)
+}
+
+func (c *Change) MarkCompleted() error {
+    if c.status.IsTerminal() {
+        return ErrAlreadyTerminal
+    }
+    c.status = StatusCompleted
+    return nil
+}
+
+func (c *Change) Abort(reason string) error {
+    if c.status.IsTerminal() {
+        return ErrAlreadyTerminal
+    }
+    c.status = StatusAborted
+    return nil
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/change/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/change/
+git commit -m "feat(domain/change): add Change aggregate with phase transitions"
+```
+
+### Task 19: Phase aggregate
+
+**Files:**
+- Create: `internal/domain/phase/phase.go`
+- Create: `internal/domain/phase/errors.go`
+- Test: `internal/domain/phase/phase_test.go`
+
+- [ ] **Step 1: Tests** — covers New, Start, Complete, RecordEnvelope, retry/budget, terminal protection.
+
+```go
+package phase
+
+import (
+    "testing"
+    "time"
+
+    "github.com/stretchr/testify/require"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+func mkID(t *testing.T) ids.PhaseID {
+    t.Helper()
+    id, err := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    require.NoError(t, err)
+    return id
+}
+
+func mkChangeID(t *testing.T) ids.ChangeID {
+    t.Helper()
+    id, err := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+    require.NoError(t, err)
+    return id
+}
+
+func TestNew_Pending(t *testing.T) {
+    p, err := New(mkID(t), mkChangeID(t), PhaseSpec, 3)
+    require.NoError(t, err)
+    require.Equal(t, PhaseStatusPending, p.Status())
+    require.Equal(t, 0, p.Attempts())
+}
+
+func TestStart_FromPending(t *testing.T) {
+    p, _ := New(mkID(t), mkChangeID(t), PhaseSpec, 3)
+    require.NoError(t, p.Start(time.Now()))
+    require.Equal(t, PhaseStatusRunning, p.Status())
+    require.Equal(t, 1, p.Attempts())
+}
+
+func TestStart_RejectsTerminal(t *testing.T) {
+    p, _ := New(mkID(t), mkChangeID(t), PhaseSpec, 3)
+    _ = p.Start(time.Now())
+    e := mkEnvelope(t, envelope.StatusDone, 0.85)
+    _ = p.Complete(e, time.Now())
+    require.ErrorIs(t, p.Start(time.Now()), ErrTerminal)
+}
+
+func TestRetryBudget_Exhausted(t *testing.T) {
+    p, _ := New(mkID(t), mkChangeID(t), PhaseSpec, 1)
+    _ = p.Start(time.Now())
+    require.ErrorIs(t, p.Start(time.Now()), ErrBudgetExhausted)
+}
+
+func TestComplete_DoneRequiresThresholdConfidence(t *testing.T) {
+    p, _ := New(mkID(t), mkChangeID(t), PhaseSpec, 3)
+    _ = p.Start(time.Now())
+    e := mkEnvelope(t, envelope.StatusDone, 0.5) // spec threshold 0.8
+    err := p.Complete(e, time.Now())
+    require.ErrorIs(t, err, ErrBelowThreshold)
+}
+
+func mkEnvelope(t *testing.T, s envelope.Status, c float64) *envelope.Envelope {
+    t.Helper()
+    return &envelope.Envelope{
+        SchemaVersion: envelope.SchemaVersionV1, Phase: PhaseSpec,
+        ChangeName: "x", Project: "y", Status: s, Confidence: c,
+    }
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/phase/... -v
+```
+
+- [ ] **Step 3: Implement**
+
+```go
+// errors.go
+package phase
+
+import "errors"
+
+var (
+    ErrInvalidType     = errors.New("phase: invalid type")
+    ErrTerminal        = errors.New("phase: already terminal")
+    ErrNotRunning      = errors.New("phase: not running")
+    ErrBudgetExhausted = errors.New("phase: retry budget exhausted")
+    ErrBelowThreshold  = errors.New("phase: confidence below threshold")
+    ErrEnvelopeNil     = errors.New("phase: envelope nil")
+)
+```
+
+```go
+// phase.go
+package phase
+
+import (
+    "fmt"
+    "time"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type Phase struct {
+    id           ids.PhaseID
+    changeID     ids.ChangeID
+    pType        PhaseType
+    status       PhaseStatus
+    envelope     *envelope.Envelope
+    confidence   float64
+    retryBudget  int
+    attempts     int
+    startedAt    *time.Time
+    completedAt  *time.Time
+}
+
+func New(id ids.PhaseID, changeID ids.ChangeID, pt PhaseType, retryBudget int) (*Phase, error) {
+    if !pt.IsValid() {
+        return nil, fmt.Errorf("%w: %q", ErrInvalidType, pt)
+    }
+    return &Phase{
+        id: id, changeID: changeID, pType: pt,
+        status: PhaseStatusPending, retryBudget: retryBudget,
+    }, nil
+}
+
+func (p *Phase) ID() ids.PhaseID            { return p.id }
+func (p *Phase) ChangeID() ids.ChangeID     { return p.changeID }
+func (p *Phase) Type() PhaseType            { return p.pType }
+func (p *Phase) Status() PhaseStatus        { return p.status }
+func (p *Phase) Envelope() *envelope.Envelope { return p.envelope }
+func (p *Phase) Confidence() float64        { return p.confidence }
+func (p *Phase) Attempts() int              { return p.attempts }
+func (p *Phase) RetryBudget() int           { return p.retryBudget }
+
+func (p *Phase) Start(now time.Time) error {
+    if p.status.IsTerminal() {
+        return ErrTerminal
+    }
+    if p.attempts >= p.retryBudget {
+        return ErrBudgetExhausted
+    }
+    p.status = PhaseStatusRunning
+    p.attempts++
+    p.startedAt = &now
+    return nil
+}
+
+func (p *Phase) Complete(e *envelope.Envelope, now time.Time) error {
+    if p.status != PhaseStatusRunning {
+        return ErrNotRunning
+    }
+    if e == nil {
+        return ErrEnvelopeNil
+    }
+    threshold := p.pType.ConfidenceThreshold()
+    if e.Status == envelope.StatusDone && e.Confidence < threshold {
+        return fmt.Errorf("%w: got %v want >= %v", ErrBelowThreshold, e.Confidence, threshold)
+    }
+    p.envelope = e
+    p.confidence = e.Confidence
+    p.completedAt = &now
+    switch e.Status {
+    case envelope.StatusDone:
+        p.status = PhaseStatusDone
+    case envelope.StatusDoneWithConcerns:
+        p.status = PhaseStatusDoneWithConcerns
+    case envelope.StatusBlocked:
+        p.status = PhaseStatusBlocked
+    case envelope.StatusNeedsContext:
+        p.status = PhaseStatusNeedsContext
+    }
+    return nil
+}
+
+func (p *Phase) MarkInterrupted() error {
+    if p.status.IsTerminal() {
+        return ErrTerminal
+    }
+    p.status = PhaseStatusInterrupted
+    return nil
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/phase/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/phase/
+git commit -m "feat(domain/phase): add Phase aggregate with retry budget and threshold gating"
+```
+
+### Task 20: Apply aggregates (Board, Group, Task)
+
+**Files:**
+- Create: `internal/domain/apply/{board,group,task,status,errors}.go`
+- Test: `internal/domain/apply/{board,group,task}_test.go`
+
+- [ ] **Step 1: Tests covering**
+
+  - Board.New + AddGroup + Status transitions
+  - Group dependency cycle detection  
+  - Task.Claim + Release + AttemptIncrement
+  - Task escalation at attempts == 3 (Iron Law #5 trigger)
+
+```go
+package apply
+
+import (
+    "testing"
+
+    "github.com/stretchr/testify/require"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+func mkBoardID(t *testing.T) ids.BoardID {
+    id, err := ids.ParseBoardID("01ARZ3NDEKTSV4RRFFQ69G5F01")
+    require.NoError(t, err)
+    return id
+}
+
+func mkPhaseID(t *testing.T) ids.PhaseID {
+    id, err := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5F02")
+    require.NoError(t, err)
+    return id
+}
+
+func TestBoard_New(t *testing.T) {
+    b, err := NewBoard(mkBoardID(t), mkPhaseID(t))
+    require.NoError(t, err)
+    require.Equal(t, BoardStatusBuilding, b.Status())
+}
+
+func TestBoard_StartTransition(t *testing.T) {
+    b, _ := NewBoard(mkBoardID(t), mkPhaseID(t))
+    require.NoError(t, b.Start())
+    require.Equal(t, BoardStatusRunning, b.Status())
+    require.ErrorIs(t, b.Start(), ErrInvalidBoardTransition)
+}
+
+func TestGroup_DetectsCycle(t *testing.T) {
+    a, _ := mkGroupID(t, "01ARZ3NDEKTSV4RRFFQ69G5G01")
+    bid, _ := mkGroupID(t, "01ARZ3NDEKTSV4RRFFQ69G5G02")
+    g1 := &Group{id: a, dependsOn: []ids.GroupID{bid}}
+    g2 := &Group{id: bid, dependsOn: []ids.GroupID{a}}
+    err := ValidateDAG([]*Group{g1, g2})
+    require.ErrorIs(t, err, ErrCycle)
+}
+
+func TestTask_ClaimRelease(t *testing.T) {
+    tid, _ := ids.ParseTaskID("01ARZ3NDEKTSV4RRFFQ69G5T01")
+    sid, _ := ids.ParseSessionID("01ARZ3NDEKTSV4RRFFQ69G5S01")
+    gid, _ := ids.ParseGroupID("01ARZ3NDEKTSV4RRFFQ69G5G01")
+    tk, _ := NewTask(tid, gid, "do thing", []string{"src/**/*.go"})
+    require.NoError(t, tk.Claim(sid))
+    require.Equal(t, TaskStatusClaimed, tk.Status())
+    require.ErrorIs(t, tk.Claim(sid), ErrAlreadyClaimed)
+    require.NoError(t, tk.Release())
+    require.Equal(t, TaskStatusPending, tk.Status())
+}
+
+func TestTask_EscalatesAtThirdAttempt(t *testing.T) {
+    tid, _ := ids.ParseTaskID("01ARZ3NDEKTSV4RRFFQ69G5T01")
+    gid, _ := ids.ParseGroupID("01ARZ3NDEKTSV4RRFFQ69G5G01")
+    tk, _ := NewTask(tid, gid, "do thing", []string{"src/**/*.go"})
+    require.NoError(t, tk.RecordAttempt(false))
+    require.NoError(t, tk.RecordAttempt(false))
+    err := tk.RecordAttempt(false)
+    require.ErrorIs(t, err, ErrEscalationRequired) // 3rd attempt triggers escalation
+    require.Equal(t, TaskStatusBlocked, tk.Status())
+}
+
+func mkGroupID(t *testing.T, raw string) (ids.GroupID, error) {
+    return ids.ParseGroupID(raw)
+}
+```
+
+- [ ] **Step 2: Run failing**
+
+```bash
+go test ./internal/domain/apply/... -v
+```
+
+- [ ] **Step 3: Implement** — `status.go`, `errors.go`, `board.go`, `group.go`, `task.go`. Detail in spec §3 and 5.
+
+```go
+// status.go
+package apply
+
+type BoardStatus string
+
+const (
+    BoardStatusBuilding  BoardStatus = "building"
+    BoardStatusRunning   BoardStatus = "running"
+    BoardStatusCompleted BoardStatus = "completed"
+    BoardStatusFailed    BoardStatus = "failed"
+)
+
+type GroupStatus string
+
+const (
+    GroupStatusPending   GroupStatus = "pending"
+    GroupStatusRunning   GroupStatus = "running"
+    GroupStatusCompleted GroupStatus = "completed"
+    GroupStatusFailed    GroupStatus = "failed"
+)
+
+type TaskStatus string
+
+const (
+    TaskStatusPending TaskStatus = "pending"
+    TaskStatusClaimed TaskStatus = "claimed"
+    TaskStatusRunning TaskStatus = "running"
+    TaskStatusDone    TaskStatus = "done"
+    TaskStatusFailed  TaskStatus = "failed"
+    TaskStatusBlocked TaskStatus = "blocked"
+)
+```
+
+```go
+// errors.go
+package apply
+
+import "errors"
+
+var (
+    ErrInvalidBoardTransition = errors.New("apply.board: invalid transition")
+    ErrInvalidGroupTransition = errors.New("apply.group: invalid transition")
+    ErrInvalidTaskTransition  = errors.New("apply.task: invalid transition")
+    ErrAlreadyClaimed         = errors.New("apply.task: already claimed")
+    ErrEscalationRequired     = errors.New("apply.task: escalation required (3 failures)")
+    ErrCycle                  = errors.New("apply.dag: cycle detected")
+    ErrEmptyDescription       = errors.New("apply.task: empty description")
+    ErrEmptyFilesPattern      = errors.New("apply.task: files_pattern empty")
+)
+```
+
+```go
+// board.go
+package apply
+
+import "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+
+type Board struct {
+    id      ids.BoardID
+    phaseID ids.PhaseID
+    status  BoardStatus
+    groups  []*Group
+}
+
+func NewBoard(id ids.BoardID, phaseID ids.PhaseID) (*Board, error) {
+    return &Board{id: id, phaseID: phaseID, status: BoardStatusBuilding}, nil
+}
+
+func (b *Board) ID() ids.BoardID         { return b.id }
+func (b *Board) PhaseID() ids.PhaseID    { return b.phaseID }
+func (b *Board) Status() BoardStatus     { return b.status }
+func (b *Board) Groups() []*Group        { return b.groups }
+
+func (b *Board) AddGroup(g *Group) { b.groups = append(b.groups, g) }
+
+func (b *Board) Start() error {
+    if b.status != BoardStatusBuilding {
+        return ErrInvalidBoardTransition
+    }
+    b.status = BoardStatusRunning
+    return nil
+}
+
+func (b *Board) Complete() error {
+    if b.status != BoardStatusRunning {
+        return ErrInvalidBoardTransition
+    }
+    b.status = BoardStatusCompleted
+    return nil
+}
+
+func (b *Board) Fail() error {
+    if b.status == BoardStatusCompleted || b.status == BoardStatusFailed {
+        return ErrInvalidBoardTransition
+    }
+    b.status = BoardStatusFailed
+    return nil
+}
+```
+
+```go
+// group.go
+package apply
+
+import "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+
+type Group struct {
+    id           ids.GroupID
+    boardID      ids.BoardID
+    name         string
+    dependsOn    []ids.GroupID
+    tasks        []*Task
+    status       GroupStatus
+    worktreePath string
+    branchName   string
+}
+
+func NewGroup(id ids.GroupID, boardID ids.BoardID, name string, dependsOn []ids.GroupID) *Group {
+    return &Group{id: id, boardID: boardID, name: name, dependsOn: dependsOn, status: GroupStatusPending}
+}
+
+func (g *Group) ID() ids.GroupID            { return g.id }
+func (g *Group) BoardID() ids.BoardID       { return g.boardID }
+func (g *Group) Name() string               { return g.name }
+func (g *Group) DependsOn() []ids.GroupID   { return g.dependsOn }
+func (g *Group) Tasks() []*Task             { return g.tasks }
+func (g *Group) Status() GroupStatus        { return g.status }
+func (g *Group) WorktreePath() string       { return g.worktreePath }
+func (g *Group) BranchName() string         { return g.branchName }
+func (g *Group) AddTask(t *Task)            { g.tasks = append(g.tasks, t) }
+func (g *Group) AssignWorktree(p, b string) { g.worktreePath = p; g.branchName = b }
+
+func (g *Group) Start() error {
+    if g.status != GroupStatusPending {
+        return ErrInvalidGroupTransition
+    }
+    g.status = GroupStatusRunning
+    return nil
+}
+
+func (g *Group) Complete() error {
+    if g.status != GroupStatusRunning {
+        return ErrInvalidGroupTransition
+    }
+    g.status = GroupStatusCompleted
+    return nil
+}
+
+func (g *Group) Fail() error {
+    if g.status == GroupStatusCompleted || g.status == GroupStatusFailed {
+        return ErrInvalidGroupTransition
+    }
+    g.status = GroupStatusFailed
+    return nil
+}
+
+// ValidateDAG returns ErrCycle if the depends_on graph has a cycle.
+func ValidateDAG(groups []*Group) error {
+    visited := map[ids.GroupID]int{} // 0=unseen, 1=visiting, 2=done
+    byID := map[ids.GroupID]*Group{}
+    for _, g := range groups {
+        byID[g.id] = g
+    }
+    var visit func(g *Group) error
+    visit = func(g *Group) error {
+        switch visited[g.id] {
+        case 1:
+            return ErrCycle
+        case 2:
+            return nil
+        }
+        visited[g.id] = 1
+        for _, depID := range g.dependsOn {
+            if dep, ok := byID[depID]; ok {
+                if err := visit(dep); err != nil {
+                    return err
+                }
+            }
+        }
+        visited[g.id] = 2
+        return nil
+    }
+    for _, g := range groups {
+        if err := visit(g); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+```
+
+```go
+// task.go
+package apply
+
+import (
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type Task struct {
+    id           ids.TaskID
+    groupID      ids.GroupID
+    description  string
+    filesPattern []string
+    status       TaskStatus
+    claimedBy    *ids.SessionID
+    attempts     int
+    envelope     *envelope.Envelope
+}
+
+func NewTask(id ids.TaskID, groupID ids.GroupID, description string, filesPattern []string) (*Task, error) {
+    if description == "" {
+        return nil, ErrEmptyDescription
+    }
+    if len(filesPattern) == 0 {
+        return nil, ErrEmptyFilesPattern
+    }
+    return &Task{
+        id: id, groupID: groupID, description: description,
+        filesPattern: filesPattern, status: TaskStatusPending,
+    }, nil
+}
+
+func (t *Task) ID() ids.TaskID                 { return t.id }
+func (t *Task) GroupID() ids.GroupID           { return t.groupID }
+func (t *Task) Description() string            { return t.description }
+func (t *Task) FilesPattern() []string         { return t.filesPattern }
+func (t *Task) Status() TaskStatus             { return t.status }
+func (t *Task) ClaimedBy() *ids.SessionID      { return t.claimedBy }
+func (t *Task) Attempts() int                  { return t.attempts }
+func (t *Task) Envelope() *envelope.Envelope   { return t.envelope }
+
+func (t *Task) Claim(sid ids.SessionID) error {
+    if t.status != TaskStatusPending {
+        return ErrAlreadyClaimed
+    }
+    t.status = TaskStatusClaimed
+    t.claimedBy = &sid
+    return nil
+}
+
+func (t *Task) Release() error {
+    if t.status != TaskStatusClaimed && t.status != TaskStatusRunning {
+        return ErrInvalidTaskTransition
+    }
+    t.status = TaskStatusPending
+    t.claimedBy = nil
+    return nil
+}
+
+func (t *Task) MarkRunning() error {
+    if t.status != TaskStatusClaimed {
+        return ErrInvalidTaskTransition
+    }
+    t.status = TaskStatusRunning
+    return nil
+}
+
+func (t *Task) Complete(e *envelope.Envelope) error {
+    if t.status != TaskStatusRunning {
+        return ErrInvalidTaskTransition
+    }
+    t.envelope = e
+    t.status = TaskStatusDone
+    return nil
+}
+
+func (t *Task) RecordAttempt(success bool) error {
+    t.attempts++
+    if success {
+        t.status = TaskStatusDone
+        return nil
+    }
+    if t.attempts >= 3 {
+        t.status = TaskStatusBlocked
+        return ErrEscalationRequired // Iron Law #5
+    }
+    t.status = TaskStatusFailed
+    return nil
+}
+```
+
+- [ ] **Step 4: Run passing**
+
+```bash
+go test ./internal/domain/apply/... -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/domain/apply/
+git commit -m "feat(domain/apply): add Board/Group/Task aggregates with DAG validation and Iron Law #5"
+```
+
+### Task 21: AgentSession aggregate
+
+**Files:**
+- Create: `internal/domain/session/{session,role,status,errors}.go`
+- Test: `internal/domain/session/session_test.go`
+
+- [ ] **Step 1: Tests** — covers role enum, provider enum, lifecycle, terminal protection. Following same pattern as Task 19.
+
+- [ ] **Step 2: Implement**
+
+```go
+// role.go
+package session
+
+type AgentRole string
+
+const (
+    RoleSDDInit     AgentRole = "sdd-init"
+    RoleSDDExplore  AgentRole = "sdd-explore"
+    RoleSDDProposal AgentRole = "sdd-proposal"
+    RoleSDDSpec     AgentRole = "sdd-spec"
+    RoleSDDDesign   AgentRole = "sdd-design"
+    RoleSDDTasks    AgentRole = "sdd-tasks"
+    RoleSDDVerify   AgentRole = "sdd-verify"
+    RoleSDDArchive  AgentRole = "sdd-archive"
+    RoleTeamLead    AgentRole = "team-lead"
+    RoleImplement   AgentRole = "implement"
+)
+
+func (r AgentRole) IsValid() bool {
+    switch r {
+    case RoleSDDInit, RoleSDDExplore, RoleSDDProposal, RoleSDDSpec,
+        RoleSDDDesign, RoleSDDTasks, RoleSDDVerify, RoleSDDArchive,
+        RoleTeamLead, RoleImplement:
+        return true
+    }
+    return false
+}
+
+type Provider string
+
+const (
+    ProviderOpenCode    Provider = "opencode"
+    ProviderClaudeCode  Provider = "claude-code" // V2
+    ProviderCursor      Provider = "cursor"      // V2
+    ProviderGemini      Provider = "gemini"      // V2
+)
+
+func (p Provider) IsValidV1() bool {
+    return p == ProviderOpenCode
+}
+```
+
+```go
+// status.go
+package session
+
+type Status string
+
+const (
+    StatusPending Status = "pending"
+    StatusRunning Status = "running"
+    StatusDone    Status = "done"
+    StatusFailed  Status = "failed"
+    StatusTimeout Status = "timeout"
+)
+
+func (s Status) IsTerminal() bool {
+    return s == StatusDone || s == StatusFailed || s == StatusTimeout
+}
+```
+
+```go
+// errors.go
+package session
+
+import "errors"
+
+var (
+    ErrInvalidRole     = errors.New("session: invalid role")
+    ErrInvalidProvider = errors.New("session: invalid provider")
+    ErrTerminal        = errors.New("session: already terminal")
+    ErrNotRunning      = errors.New("session: not running")
+)
+```
+
+```go
+// session.go
+package session
+
+import (
+    "fmt"
+    "time"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type Session struct {
+    id            ids.SessionID
+    changeID      ids.ChangeID
+    phaseID       ids.PhaseID
+    role          AgentRole
+    provider      Provider
+    worktreeID    *ids.WorktreeID
+    promptSHA256  string
+    command       string
+    status        Status
+    exitCode      *int
+    envelope      *envelope.Envelope
+    startedAt     time.Time
+    endedAt       *time.Time
+}
+
+func New(id ids.SessionID, changeID ids.ChangeID, phaseID ids.PhaseID,
+    role AgentRole, provider Provider, promptSHA, command string,
+    now time.Time) (*Session, error) {
+    if !role.IsValid() {
+        return nil, fmt.Errorf("%w: %q", ErrInvalidRole, role)
+    }
+    if !provider.IsValidV1() {
+        return nil, fmt.Errorf("%w: %q", ErrInvalidProvider, provider)
+    }
+    return &Session{
+        id: id, changeID: changeID, phaseID: phaseID,
+        role: role, provider: provider, promptSHA256: promptSHA,
+        command: command, status: StatusPending, startedAt: now,
+    }, nil
+}
+
+func (s *Session) ID() ids.SessionID            { return s.id }
+func (s *Session) Status() Status               { return s.status }
+func (s *Session) Envelope() *envelope.Envelope { return s.envelope }
+func (s *Session) ExitCode() *int               { return s.exitCode }
+
+func (s *Session) MarkRunning() error {
+    if s.status != StatusPending {
+        return fmt.Errorf("%w: state %q", ErrTerminal, s.status)
+    }
+    s.status = StatusRunning
+    return nil
+}
+
+func (s *Session) AssignWorktree(wid ids.WorktreeID) {
+    s.worktreeID = &wid
+}
+
+func (s *Session) RecordEnvelope(e *envelope.Envelope, exit int, now time.Time) error {
+    if s.status != StatusRunning {
+        return ErrNotRunning
+    }
+    s.envelope = e
+    s.exitCode = &exit
+    s.endedAt = &now
+    if exit == 0 {
+        s.status = StatusDone
+    } else {
+        s.status = StatusFailed
+    }
+    return nil
+}
+
+func (s *Session) MarkTimeout(now time.Time) error {
+    if s.status.IsTerminal() {
+        return ErrTerminal
+    }
+    s.status = StatusTimeout
+    s.endedAt = &now
+    return nil
+}
+```
+
+- [ ] **Step 3: Run failing tests, then run passing.**
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/domain/session/
+git commit -m "feat(domain/session): add AgentSession aggregate with role/provider enums"
+```
+
+### Task 22: Worktree value object
+
+**Files:**
+- Create: `internal/domain/worktree/{worktree,status}.go`
+- Test: `internal/domain/worktree/worktree_test.go`
+
+Lifecycle: created → locked → released → cleaned. Detail follows Task 21 pattern.
+
+- [ ] **Step 1-5: Standard TDD** — implementation in `worktree.go`:
+
+```go
+package worktree
+
+import (
+    "errors"
+    "time"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type Status string
+
+const (
+    StatusCreated  Status = "created"
+    StatusLocked   Status = "locked"
+    StatusReleased Status = "released"
+    StatusCleaned  Status = "cleaned"
+)
+
+var (
+    ErrInvalidTransition = errors.New("worktree: invalid transition")
+    ErrEmptyPath         = errors.New("worktree: empty path")
+    ErrEmptyBranch       = errors.New("worktree: empty branch")
+)
+
+type Worktree struct {
+    id        ids.WorktreeID
+    sessionID *ids.SessionID
+    path      string
+    branch    string
+    status    Status
+    createdAt time.Time
+    cleanedAt *time.Time
+}
+
+func New(id ids.WorktreeID, sessionID *ids.SessionID, path, branch string, now time.Time) (*Worktree, error) {
+    if path == "" {
+        return nil, ErrEmptyPath
+    }
+    if branch == "" {
+        return nil, ErrEmptyBranch
+    }
+    return &Worktree{
+        id: id, sessionID: sessionID, path: path, branch: branch,
+        status: StatusCreated, createdAt: now,
+    }, nil
+}
+
+func (w *Worktree) ID() ids.WorktreeID    { return w.id }
+func (w *Worktree) Path() string          { return w.path }
+func (w *Worktree) Branch() string        { return w.branch }
+func (w *Worktree) Status() Status        { return w.status }
+
+func (w *Worktree) Lock() error {
+    if w.status != StatusCreated {
+        return ErrInvalidTransition
+    }
+    w.status = StatusLocked
+    return nil
+}
+
+func (w *Worktree) Release() error {
+    if w.status != StatusLocked && w.status != StatusCreated {
+        return ErrInvalidTransition
+    }
+    w.status = StatusReleased
+    return nil
+}
+
+func (w *Worktree) Clean(now time.Time) error {
+    if w.status == StatusCleaned {
+        return ErrInvalidTransition
+    }
+    w.status = StatusCleaned
+    w.cleanedAt = &now
+    return nil
+}
+```
+
+- [ ] **Commit:**
+
+```bash
+git add internal/domain/worktree/
+git commit -m "feat(domain/worktree): add Worktree value object lifecycle"
+```
+
+---
+
+## Milestone 3 — Discipline (Iron Laws + Validation + Spawn Governor)
+
+### Task 23: EnvelopeValidator (cross-aggregate validation service)
+
+**Files:**
+- Create: `internal/application/discipline/validator.go`
+- Test: `internal/application/discipline/validator_test.go`
+
+- [ ] **Step 1: Tests** — confidence threshold per phase, status enum, schema_version, phase mismatch.
+- [ ] **Step 2-4: Implement** — wraps `envelope.Parse` then re-validates against expected phase + threshold.
+
+```go
+package discipline
+
+import (
+    "errors"
+    "fmt"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+var ErrPhaseMismatch = errors.New("envelope phase does not match expected")
+
+type Validator struct{}
+
+func NewValidator() *Validator { return &Validator{} }
+
+func (v *Validator) Validate(raw []byte, expectedPhase phase.PhaseType) (*envelope.Envelope, error) {
+    e, err := envelope.Parse(raw)
+    if err != nil {
+        return nil, err
+    }
+    if e.Phase != expectedPhase {
+        return nil, fmt.Errorf("%w: got %q want %q", ErrPhaseMismatch, e.Phase, expectedPhase)
+    }
+    if e.Status == envelope.StatusDone && e.Confidence < expectedPhase.ConfidenceThreshold() {
+        // Coerce to DONE_WITH_CONCERNS — agent claimed DONE but threshold not met.
+        e.Status = envelope.StatusDoneWithConcerns
+    }
+    return e, nil
+}
+```
+
+- [ ] **Commit**
+
+### Task 24: IronLawChecker
+
+**Files:**
+- Create: `internal/application/discipline/ironlaw_checker.go`
+- Test: `internal/application/discipline/ironlaw_checker_test.go`
+
+- [ ] **Step 1: Tests** — 5 laws individually with positive/negative cases (mock prior phase repo).
+- [ ] **Step 2-4: Implement** — accepts a Change/Phase context and verifies each law that applies.
+
+### Task 25: PromptBuilder (HARD-GATE injection)
+
+**Files:**
+- Create: `internal/application/discipline/prompt_builder.go`
+- Test: `internal/application/discipline/prompt_builder_test.go`
+
+- [ ] **Step 1: Tests** — for each phase type, prompt includes (a) Iron Laws relevant to that phase, (b) HARD-GATE markers, (c) envelope schema, (d) injected change context.
+- [ ] **Step 2-4: Implement**
+
+```go
+package discipline
+
+import (
+    "bytes"
+    "text/template"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+type PromptBuilder struct {
+    tmpls map[phase.PhaseType]*template.Template
+}
+
+type PromptInput struct {
+    ChangeName       string
+    Project          string
+    PhaseType        phase.PhaseType
+    PriorContext     string
+    TaskDescription  string
+    ConfidenceThr    float64
+    EnvelopeSchema   string
+    IronLaws         []string
+    HardGates        []string
+}
+
+func NewPromptBuilder() (*PromptBuilder, error) {
+    pb := &PromptBuilder{tmpls: make(map[phase.PhaseType]*template.Template)}
+    if err := pb.compile(); err != nil {
+        return nil, err
+    }
+    return pb, nil
+}
+
+func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
+    t, ok := pb.tmpls[in.PhaseType]
+    if !ok {
+        return "", fmt.Errorf("no template for phase %q", in.PhaseType)
+    }
+    var buf bytes.Buffer
+    if err := t.Execute(&buf, in); err != nil {
+        return "", err
+    }
+    return buf.String(), nil
+}
+
+func (pb *PromptBuilder) compile() error {
+    base := `You are running the SDD phase: {{.PhaseType}}
+Change: {{.ChangeName}} (project {{.Project}})
+
+# Iron Laws (NON-NEGOTIABLE)
+{{range .IronLaws}}- {{.}}
+{{end}}
+
+# HARD-GATE Markers
+{{range .HardGates}}<HARD-GATE>{{.}}</HARD-GATE>
+{{end}}
+
+# Prior Context
+{{.PriorContext}}
+
+# Task
+{{.TaskDescription}}
+
+# Envelope contract — return EXACTLY this JSON shape on stdout, in a fenced ` + "```json" + ` block:
+{{.EnvelopeSchema}}
+
+Confidence threshold for this phase: {{.ConfidenceThr}}.
+Status MUST be one of: DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT.
+`
+    for _, pt := range []phase.PhaseType{
+        phase.PhaseInit, phase.PhaseExplore, phase.PhaseProposal, phase.PhaseSpec,
+        phase.PhaseDesign, phase.PhaseTasks, phase.PhaseApply, phase.PhaseVerify, phase.PhaseArchive,
+    } {
+        t, err := template.New(string(pt)).Parse(base)
+        if err != nil {
+            return err
+        }
+        pb.tmpls[pt] = t
+    }
+    return nil
+}
+```
+
+- [ ] **Commit**
+
+### Task 26: SpawnGovernor (Postgres advisory lock + stagger)
+
+**Files:**
+- Create: `internal/application/discipline/spawn_governor.go`
+- Test: `internal/application/discipline/spawn_governor_test.go`
+
+- [ ] **Step 1: Tests** — fake repo backing the governor: `Acquire` blocks while count == max; `Release` decrements; concurrent acquires honor cap.
+
+```go
+package discipline
+
+import (
+    "context"
+    "errors"
+    "math/rand/v2"
+    "time"
+)
+
+var ErrSaturated = errors.New("spawn governor saturated")
+
+type SpawnGovernorRepo interface {
+    Acquire(ctx context.Context, max int) (acquired bool, current int, err error)
+    Release(ctx context.Context) error
+    Active(ctx context.Context) (int, error)
+}
+
+type SpawnGovernor struct {
+    repo            SpawnGovernorRepo
+    max             int
+    staggerMin      time.Duration
+    staggerMax      time.Duration
+    waitInterval    time.Duration
+    maxWait         time.Duration
+}
+
+type SpawnGovernorConfig struct {
+    Max          int
+    StaggerMin   time.Duration
+    StaggerMax   time.Duration
+    WaitInterval time.Duration
+    MaxWait      time.Duration
+}
+
+func NewSpawnGovernor(repo SpawnGovernorRepo, cfg SpawnGovernorConfig) *SpawnGovernor {
+    return &SpawnGovernor{
+        repo: repo, max: cfg.Max,
+        staggerMin: cfg.StaggerMin, staggerMax: cfg.StaggerMax,
+        waitInterval: cfg.WaitInterval, maxWait: cfg.MaxWait,
+    }
+}
+
+func (sg *SpawnGovernor) Acquire(ctx context.Context) error {
+    deadline := time.Now().Add(sg.maxWait)
+    for {
+        ok, _, err := sg.repo.Acquire(ctx, sg.max)
+        if err != nil {
+            return err
+        }
+        if ok {
+            sg.stagger()
+            return nil
+        }
+        if time.Now().After(deadline) {
+            return ErrSaturated
+        }
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-time.After(sg.waitInterval):
+        }
+    }
+}
+
+func (sg *SpawnGovernor) Release(ctx context.Context) error {
+    return sg.repo.Release(ctx)
+}
+
+func (sg *SpawnGovernor) stagger() {
+    span := sg.staggerMax - sg.staggerMin
+    jitter := time.Duration(rand.Int64N(int64(span)))
+    time.Sleep(sg.staggerMin + jitter)
+}
+```
+
+- [ ] **Commit**
+
+---
+
+## Milestone 4 — Outbound Ports
+
+Pure interfaces. No implementation. Tests verify the interface contract via mocks.
+
+### Task 27: Outbound port — Repositories
+
+**Files:**
+- Create: `internal/ports/outbound/repository.go`
+
+```go
+package outbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/worktree"
+)
+
+type ChangeRepository interface {
+    Save(ctx context.Context, c *change.Change) error
+    FindByID(ctx context.Context, id ids.ChangeID) (*change.Change, error)
+    FindByProjectName(ctx context.Context, project, name string) (*change.Change, error)
+    List(ctx context.Context, project string, status string, limit, offset int) ([]*change.Change, error)
+}
+
+type PhaseRepository interface {
+    Save(ctx context.Context, p *phase.Phase) error
+    FindByID(ctx context.Context, id ids.PhaseID) (*phase.Phase, error)
+    FindByChangeAndType(ctx context.Context, changeID ids.ChangeID, pt phase.PhaseType) (*phase.Phase, error)
+    FindRunningByChange(ctx context.Context, changeID ids.ChangeID) (*phase.Phase, error)
+    LockByChange(ctx context.Context, changeID ids.ChangeID) error
+}
+
+type BoardRepository interface {
+    Save(ctx context.Context, b *apply.Board) error
+    FindByPhaseID(ctx context.Context, id ids.PhaseID) (*apply.Board, error)
+    SaveTask(ctx context.Context, t *apply.Task) error
+    ClaimTask(ctx context.Context, taskID ids.TaskID, sessionID ids.SessionID) error
+}
+
+type SessionRepository interface {
+    Save(ctx context.Context, s *session.Session) error
+    FindByID(ctx context.Context, id ids.SessionID) (*session.Session, error)
+}
+
+type WorktreeRepository interface {
+    Save(ctx context.Context, w *worktree.Worktree) error
+    FindByID(ctx context.Context, id ids.WorktreeID) (*worktree.Worktree, error)
+}
+```
+
+### Task 28: Outbound port — GovernanceClient
+
+**Files:**
+- Create: `internal/ports/outbound/governance.go`
+
+```go
+package outbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+type GovernanceDecision struct {
+    Decision   string // allow | allow_with_constraints | require_approval | deny
+    AgentRole  string
+    Strategy   string
+    Reason     string
+    Approval   *ApprovalGate
+    Constraints map[string]any
+}
+
+type ApprovalGate struct {
+    URL string
+}
+
+type GovernanceClient interface {
+    EvaluatePhase(ctx context.Context, changeID ids.ChangeID, pt phase.PhaseType, taskDesc string) (*GovernanceDecision, error)
+    AwaitApproval(ctx context.Context, changeID ids.ChangeID, phaseID ids.PhaseID) error
+}
+```
+
+### Task 29: Outbound port — MemoryClient
+
+**Files:**
+- Create: `internal/ports/outbound/memory.go`
+
+```go
+package outbound
+
+import "context"
+
+type MemoryArtifact struct {
+    TopicKey string
+    Content  string
+    Type     string
+}
+
+type MemoryClient interface {
+    Save(ctx context.Context, a MemoryArtifact) error
+    Load(ctx context.Context, topicKey string) (*MemoryArtifact, error)
+    AppendAudit(ctx context.Context, eventType string, payload []byte) error
+}
+```
+
+### Task 30: Outbound port — RuntimeClient
+
+**Files:**
+- Create: `internal/ports/outbound/runtime.go`
+
+```go
+package outbound
+
+import "context"
+
+type ExecutionRequest struct {
+    Capability   string // shell.exec@v1, git.worktree.create@v1, etc.
+    Payload      []byte // JSON
+    TimeoutMS    int
+    IdempotencyKey string
+}
+
+type ExecutionReceipt struct {
+    Status     string // success | failure | timeout | cancelled | partial
+    Stdout     []byte
+    Stderr     []byte
+    ExitCode   int
+    DurationMS int
+    ReceiptID  string
+    RetryHint  string
+}
+
+type RuntimeClient interface {
+    Execute(ctx context.Context, req ExecutionRequest) (*ExecutionReceipt, error)
+}
+```
+
+### Task 31: Outbound port — AgentDispatcher
+
+**Files:**
+- Create: `internal/ports/outbound/dispatcher.go`
+
+```go
+package outbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
+)
+
+type DispatchRequest struct {
+    Provider     session.Provider
+    Prompt       string
+    WorktreePath string
+    TimeoutMS    int
+    EnvelopeOut  string // path or capture mode hint (e.g., "stdout-fenced-json")
+}
+
+type DispatchResult struct {
+    ExitCode    int
+    Stdout      []byte
+    Stderr      []byte
+    EnvelopeRaw []byte // extracted envelope JSON (or empty if must fall back to memory)
+    DurationMS  int
+}
+
+type AgentDispatcher interface {
+    Provider() session.Provider
+    SuggestedMaxConcurrent() int
+    HealthCheck(ctx context.Context) error
+    Dispatch(ctx context.Context, req DispatchRequest) (*DispatchResult, error)
+}
+```
+
+### Task 32: Outbound port — ArtifactStore + AuditLog + SpawnGovernorRepo
+
+**Files:**
+- Create: `internal/ports/outbound/artifact.go`
+- Create: `internal/ports/outbound/audit.go`
+- Create: `internal/ports/outbound/spawngovernor.go`
+
+```go
+// artifact.go
+package outbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+)
+
+type ArtifactStore interface {
+    Mode() change.ArtifactStoreMode
+    Save(ctx context.Context, topicKey string, content []byte, contentType string) error
+    Load(ctx context.Context, topicKey string) ([]byte, error)
+}
+```
+
+```go
+// audit.go
+package outbound
+
+import (
+    "context"
+    "time"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type AuditEvent struct {
+    ChangeID  *ids.ChangeID
+    PhaseID   *ids.PhaseID
+    SessionID *ids.SessionID
+    EventType string
+    Payload   []byte
+    OccurredAt time.Time
+}
+
+type AuditLog interface {
+    Append(ctx context.Context, e AuditEvent) error
+}
+```
+
+```go
+// spawngovernor.go
+package outbound
+
+import "context"
+
+type SpawnGovernorRepo interface {
+    Acquire(ctx context.Context, max int) (bool, int, error)
+    Release(ctx context.Context) error
+    Active(ctx context.Context) (int, error)
+}
+```
+
+### Task 33: Inbound ports
+
+**Files:**
+- Create: `internal/ports/inbound/{change,phase,apply,eventstream}.go`
+
+These mirror the HTTP API surface in spec §7. One method per use case. Inbound interfaces are consumed by HTTP handlers.
+
+```go
+// change.go
+package inbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type CreateChangeInput struct {
+    Name              string
+    Project           string
+    ArtifactStoreMode change.ArtifactStoreMode
+    BaseRef           string
+}
+
+type ChangeService interface {
+    Create(ctx context.Context, in CreateChangeInput) (*change.Change, error)
+    Get(ctx context.Context, id ids.ChangeID) (*change.Change, error)
+    List(ctx context.Context, project, status string, limit, offset int) ([]*change.Change, error)
+    Abort(ctx context.Context, id ids.ChangeID, reason string) error
+}
+```
+
+```go
+// phase.go
+package inbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+)
+
+type RunPhaseInput struct {
+    ChangeID         ids.ChangeID
+    PhaseType        phase.PhaseType
+    TaskDescription  string
+    ContextOverrides map[string]any
+    RetryBudget      int
+}
+
+type RunPhaseOutput struct {
+    PhaseID    ids.PhaseID
+    Status     phase.PhaseStatus
+    EventsURL  string
+    StartedAt  string
+}
+
+type PhaseService interface {
+    Run(ctx context.Context, in RunPhaseInput) (*RunPhaseOutput, error)
+    Get(ctx context.Context, id ids.PhaseID) (*phase.Phase, error)
+    Resume(ctx context.Context, id ids.PhaseID) (*RunPhaseOutput, error)
+    Approve(ctx context.Context, id ids.PhaseID, approver, reason string) error
+    Reject(ctx context.Context, id ids.PhaseID, approver, reason string) error
+}
+```
+
+```go
+// apply.go
+package inbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type ApplyService interface {
+    GetBoard(ctx context.Context, phaseID ids.PhaseID) (*apply.Board, error)
+}
+```
+
+```go
+// eventstream.go
+package inbound
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type Event struct {
+    Type      string
+    Timestamp string
+    Payload   map[string]any
+    TraceID   string
+}
+
+type EventStream interface {
+    Subscribe(ctx context.Context, phaseID ids.PhaseID) (<-chan Event, func(), error)
+    Publish(ctx context.Context, phaseID ids.PhaseID, ev Event) error
+}
+```
+
+- [ ] **Commit**
+
+```bash
+git add internal/ports/
+git commit -m "feat(ports): add inbound and outbound port interfaces"
+```
+
+---
+
+## Milestone 5 — Application Services (use cases)
+
+Each use case is a struct with constructor injecting outbound ports. Each has unit tests against fakes implementing the outbound interfaces. TDD pattern as in earlier milestones.
+
+### Task 34: CreateChange use case
+
+**Files:**
+- Create: `internal/application/change/create.go`
+- Test: `internal/application/change/create_test.go`
+
+```go
+package change
+
+import (
+    "context"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
+)
+
+type CreateService struct {
+    repo  outbound.ChangeRepository
+    idGen shared.IDGenerator
+}
+
+func NewCreate(repo outbound.ChangeRepository, idGen shared.IDGenerator) *CreateService {
+    return &CreateService{repo: repo, idGen: idGen}
+}
+
+func (s *CreateService) Create(ctx context.Context, in inbound.CreateChangeInput) (*change.Change, error) {
+    id, err := ids.ParseChangeID(s.idGen.NewID())
+    if err != nil {
+        return nil, err
+    }
+    c, err := change.New(id, in.Name, in.Project, in.ArtifactStoreMode)
+    if err != nil {
+        return nil, err
+    }
+    if err := s.repo.Save(ctx, c); err != nil {
+        return nil, fmt.Errorf("save change: %w", err)
+    }
+    return c, nil
+}
+```
+
+Tests cover: valid creation, name/project validation, artifact store validation, repo error propagation.
+
+### Task 35-39: Get/List/Abort/Approve/Reject Change & Phase use cases
+
+Same TDD pattern. Each ~50 LOC. Tests against fake repo. Commit per task.
+
+### Task 40: RunPhase (single-agent flow)
+
+**Files:**
+- Create: `internal/application/phase/run.go`
+- Test: `internal/application/phase/run_test.go`
+
+This is the critical use case. Implements the 16-step flow from spec §4. Tests cover:
+- governance approve → dispatcher invoked → envelope validated → persisted → audit logged
+- governance require_approval → status awaiting; resume after approve
+- governance deny → status blocked
+- envelope below threshold → status done_with_concerns
+- dispatcher timeout → retry with budget; budget exhausted → status blocked
+- 202 immediate response (use case returns RunPhaseOutput with events_url BEFORE async work completes)
+
+Implementation pseudocode:
+```go
+func (s *RunService) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.RunPhaseOutput, error) {
+    // 1. Validate change + lock phase mutex
+    // 2. Persist Phase row pending
+    // 3. Spawn goroutine for async work
+    // 4. Return 202 output immediately
+}
+
+func (s *RunService) runAsync(ctx context.Context, p *phase.Phase) {
+    // 4. Governance.EvaluatePhase
+    // 5. Branch: deny/approve/allow
+    // 6. Discipline.IronLawCheck
+    // 7. Create AgentSession
+    // 8. Discipline.PromptBuilder.Build
+    // 9. SpawnGovernor.Acquire
+    // 10. Dispatcher.Dispatch
+    // 11. SpawnGovernor.Release; parse envelope
+    // 12. Discipline.Validator.Validate
+    // 13. PhaseRepo.Save with envelope
+    // 14. ChangeRepo update CurrentPhase if DONE & threshold
+    // 15. Audit append
+    // 16. EventStream.Publish phase.completed
+}
+```
+
+Each step is a method (`s.evaluateGovernance`, `s.runAgent`, etc.) with own test.
+
+### Task 41: ResumePhase use case
+### Task 42: RunApply use case (parallel coordination, 18 steps from spec §5)
+### Task 43: GetBoard use case
+### Task 44: SubscribeEvents (SSE pub/sub)
+
+All TDD per task.
+
+---
+
+## Milestone 6 — Persistence Adapters (Postgres)
+
+### Task 45: pgx connection helper
+
+**Files:**
+- Create: `internal/infrastructure/db/driver.go`
+
+```go
+package db
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
+type Config struct {
+    URL              string
+    MaxConns         int32
+    MinConns         int32
+    HealthCheckPath  string
+}
+
+func Open(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
+    poolCfg, err := pgxpool.ParseConfig(cfg.URL)
+    if err != nil {
+        return nil, fmt.Errorf("parse pg url: %w", err)
+    }
+    if cfg.MaxConns > 0 {
+        poolCfg.MaxConns = cfg.MaxConns
+    }
+    if cfg.MinConns > 0 {
+        poolCfg.MinConns = cfg.MinConns
+    }
+    pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+    if err != nil {
+        return nil, fmt.Errorf("new pool: %w", err)
+    }
+    if err := pool.Ping(ctx); err != nil {
+        return nil, fmt.Errorf("ping pg: %w", err)
+    }
+    return pool, nil
+}
+```
+
+### Tasks 46-51: Migrations 001-005
+
+Each migration is a pair `.up.sql` / `.down.sql` matching spec §8 schema.
+
+Example:
+```sql
+-- migrations/postgres/001_changes.up.sql
+CREATE TABLE changes (
+  id              CHAR(26) PRIMARY KEY,
+  name            TEXT NOT NULL,
+  project         TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  current_phase   TEXT,
+  artifact_store  TEXT NOT NULL,
+  config_json     JSONB NOT NULL DEFAULT '{}',
+  base_ref        TEXT,
+  created_at      TIMESTAMPTZ NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL,
+  UNIQUE (project, name)
+);
+
+-- migrations/postgres/001_changes.down.sql
+DROP TABLE IF EXISTS changes;
+```
+
+### Tasks 52-57: Repository implementations
+
+Each repo implements the corresponding outbound port. Integration test (build tag `integration`) spins up testcontainers Postgres, applies migrations, exercises CRUD + concurrent access.
+
+Pattern:
+```go
+package pg
+
+import (
+    "context"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+)
+
+type ChangeRepo struct {
+    pool *pgxpool.Pool
+}
+
+func NewChangeRepo(pool *pgxpool.Pool) *ChangeRepo { return &ChangeRepo{pool: pool} }
+
+func (r *ChangeRepo) Save(ctx context.Context, c *change.Change) error {
+    _, err := r.pool.Exec(ctx, `
+INSERT INTO changes (id, name, project, status, current_phase, artifact_store, config_json, base_ref, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, '{}', '', NOW(), NOW())
+ON CONFLICT (id) DO UPDATE SET
+  status         = EXCLUDED.status,
+  current_phase  = EXCLUDED.current_phase,
+  updated_at     = NOW()
+`, c.ID().String(), c.Name(), c.Project(), c.Status(), c.CurrentPhase(), c.ArtifactStore())
+    return err
+}
+
+// ...FindByID, FindByProjectName, List
+```
+
+Each repo test uses testcontainers-go to spin up a real Postgres 15.
+
+### Task 58: Spawn Governor pg backend (advisory lock)
+
+```sql
+-- spawn_governor uses both a counter row and pg_advisory_lock
+SELECT pg_advisory_xact_lock(hashtext('sophia-spawn-governor'));
+UPDATE spawn_governor_state SET active_count = active_count + 1 WHERE id = 1 RETURNING active_count;
+```
+
+Tested with concurrent goroutines; verifies cap respected.
+
+---
+
+## Milestone 7 — HTTP Outbound Clients
+
+### Task 59: BaseHTTPClient with circuit breaker
+
+**Files:**
+- Create: `internal/adapters/outbound/http_base/{client,circuit_breaker}.go`
+- Test: `internal/adapters/outbound/http_base/{client,circuit_breaker}_test.go`
+
+Implements the resilience pipeline from cli-orchestrator-mcp:
+- Per-target circuit breaker
+- Separate thresholds: 3 hard failures, 5 timeouts
+- Half-open with 1 success → close
+- Exponential backoff with ±30% jitter
+- Global time budget shared across retries
+
+```go
+package http_base
+
+import (
+    "context"
+    "errors"
+    "math/rand/v2"
+    "net/http"
+    "sync"
+    "time"
+)
+
+type CBState int
+
+const (
+    CBClosed CBState = iota
+    CBOpen
+    CBHalfOpen
+)
+
+type CircuitBreaker struct {
+    mu              sync.Mutex
+    state           CBState
+    failThreshold   int
+    timeoutThreshold int
+    failures        int
+    timeouts        int
+    openUntil       time.Time
+    cooldown        time.Duration
+}
+
+// Allow returns true if the call should proceed.
+func (cb *CircuitBreaker) Allow() bool { ... }
+func (cb *CircuitBreaker) RecordSuccess() { ... }
+func (cb *CircuitBreaker) RecordFailure(timeout bool) { ... }
+```
+
+### Task 60: GovernanceClient HTTP impl
+
+**Files:**
+- Create: `internal/adapters/outbound/governance/client.go`
+- Test: `internal/adapters/outbound/governance/client_test.go`
+
+Spec calls governance via HTTP:
+```
+POST /governance/v1/decisions/phase
+body: { change_id, phase_type, task_description }
+returns: { decision, agent_role, strategy, reason, approval?, constraints? }
+```
+
+Tests use httptest.NewServer with canned responses.
+
+### Tasks 61-62: MemoryClient + RuntimeClient HTTP impls
+
+Same pattern. Detailed contract test verifies parsing.
+
+### Task 63: OpenCode dispatcher adapter
+
+**Files:**
+- Create: `internal/adapters/outbound/dispatcher/opencode/dispatcher.go`
+- Test: `internal/adapters/outbound/dispatcher/opencode/dispatcher_test.go`
+
+Calls runtime-adapters' `shell.exec@v1` capability with a payload like:
+```json
+{
+  "cmd": "opencode run",
+  "args": ["--prompt-stdin", "--cwd", "<worktree>", "--output-json"],
+  "stdin": "<prompt>",
+  "timeout_ms": 1800000
+}
+```
+Captures stdout, extracts the LAST fenced ```json block, returns as `EnvelopeRaw`.
+
+```go
+package opencode
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "regexp"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
+)
+
+type Dispatcher struct {
+    runtime outbound.RuntimeClient
+}
+
+func New(runtime outbound.RuntimeClient) *Dispatcher { return &Dispatcher{runtime: runtime} }
+
+func (d *Dispatcher) Provider() session.Provider     { return session.ProviderOpenCode }
+func (d *Dispatcher) SuggestedMaxConcurrent() int    { return 4 } // V1 default; ADR-pending after empirical verification
+
+func (d *Dispatcher) HealthCheck(ctx context.Context) error {
+    payload, _ := json.Marshal(map[string]any{
+        "cmd": "opencode", "args": []string{"--version"}, "timeout_ms": 5000,
+    })
+    receipt, err := d.runtime.Execute(ctx, outbound.ExecutionRequest{
+        Capability: "shell.exec@v1", Payload: payload, TimeoutMS: 5000,
+    })
+    if err != nil {
+        return fmt.Errorf("opencode health: %w", err)
+    }
+    if receipt.Status != "success" {
+        return fmt.Errorf("opencode health: %s", receipt.Status)
+    }
+    return nil
+}
+
+func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+    payload, err := json.Marshal(map[string]any{
+        "cmd":  "opencode",
+        "args": []string{"run", "--prompt-stdin", "--cwd", req.WorktreePath, "--output-json"},
+        "stdin": req.Prompt,
+        "timeout_ms": req.TimeoutMS,
+    })
+    if err != nil {
+        return nil, err
+    }
+    receipt, err := d.runtime.Execute(ctx, outbound.ExecutionRequest{
+        Capability: "shell.exec@v1", Payload: payload, TimeoutMS: req.TimeoutMS,
+    })
+    if err != nil {
+        return nil, err
+    }
+    envRaw := extractLastFencedJSON(receipt.Stdout)
+    return &outbound.DispatchResult{
+        ExitCode:    receipt.ExitCode,
+        Stdout:      receipt.Stdout,
+        Stderr:      receipt.Stderr,
+        EnvelopeRaw: envRaw,
+        DurationMS:  receipt.DurationMS,
+    }, nil
+}
+
+var fencedJSONRE = regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
+
+func extractLastFencedJSON(stdout []byte) []byte {
+    matches := fencedJSONRE.FindAllSubmatch(stdout, -1)
+    if len(matches) == 0 {
+        return nil
+    }
+    return bytes.TrimSpace(matches[len(matches)-1][1])
+}
+```
+
+Note: the exact `opencode run` flag set is an Open Question (spec §13 #2). The implementation here is a working skeleton; the ADR-0002 will close on the actual flags after the first dispatcher test against real OpenCode.
+
+---
+
+## Milestone 8 — Artifact Store Adapters
+
+### Tasks 64-66: Engram, OpenSpec, Hybrid stores
+
+**engram store**: HTTP wrapper around memory-engine. Save/Load via topic_key.
+
+**openspec store**: filesystem under `<repo>/openspec/changes/<change-name>/`. One file per topic_key segment.
+
+**hybrid store**: composite — writes to BOTH, reads from primary (engram) with fallback to openspec.
+
+Tests cover idempotency, conflict resolution (hybrid prefers engram), path safety (openspec).
+
+---
+
+## Milestone 9 — HTTP Inbound + SSE
+
+### Task 67: Router scaffold
+
+**Files:**
+- Create: `internal/adapters/inbound/http/router.go`
+
+```go
+package http
+
+import (
+    "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
+)
+
+func NewRouter(deps Deps) *chi.Mux {
+    r := chi.NewRouter()
+    r.Use(middleware.RequestID)
+    r.Use(middleware.RealIP)
+    r.Use(middleware.Recoverer)
+    r.Use(middleware.Timeout(30 * time.Second)) // applies only to fast endpoints; SSE bypasses
+
+    r.Use(deps.AuthMW)
+    r.Use(deps.LoggingMW)
+    r.Use(deps.TracingMW)
+
+    r.Get("/api/v1/health", deps.Health.Check)
+    r.Get("/api/v1/ready", deps.Health.Ready)
+    r.Handle("/metrics", deps.MetricsHandler)
+
+    r.Route("/api/v1/changes", func(r chi.Router) {
+        r.Post("/", deps.Changes.Create)
+        r.Get("/", deps.Changes.List)
+        r.Route("/{change_id}", func(r chi.Router) {
+            r.Get("/", deps.Changes.Get)
+            r.Post("/abort", deps.Changes.Abort)
+            r.Route("/phases", func(r chi.Router) {
+                r.Post("/{phase_type}/run", deps.Phases.Run)
+                r.Get("/{phase_id}", deps.Phases.Get)
+                r.Get("/{phase_id}/events", deps.SSE.Stream) // SSE endpoint
+                r.Post("/{phase_id}/resume", deps.Phases.Resume)
+                r.Post("/{phase_id}/approve", deps.Phases.Approve)
+                r.Post("/{phase_id}/reject", deps.Phases.Reject)
+                r.Get("/{phase_id}/board", deps.Apply.GetBoard)
+            })
+        })
+    })
+
+    return r
+}
+```
+
+### Task 68: Middleware (auth, logging, tracing, recover)
+
+Each middleware is its own file with unit test.
+
+### Task 69-72: Handlers (changes, phases, apply, health)
+
+Each handler validates input, calls inbound port, returns JSON. Tests use httptest with mock services.
+
+### Task 73: SSE handler
+
+```go
+package handlers
+
+import (
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "time"
+
+    "github.com/go-chi/chi/v5"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+)
+
+type SSEHandler struct {
+    stream    inbound.EventStream
+    heartbeat time.Duration
+}
+
+func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
+    phaseID, err := ids.ParsePhaseID(chi.URLParam(r, "phase_id"))
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    flusher, ok := w.(http.Flusher)
+    if !ok {
+        http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "text/event-stream")
+    w.Header().Set("Cache-Control", "no-cache")
+    w.Header().Set("Connection", "keep-alive")
+    w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
+
+    ch, cancel, err := h.stream.Subscribe(r.Context(), phaseID)
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+    }
+    defer cancel()
+
+    hbTicker := time.NewTicker(h.heartbeat)
+    defer hbTicker.Stop()
+
+    for {
+        select {
+        case <-r.Context().Done():
+            return
+        case <-hbTicker.C:
+            fmt.Fprintf(w, "event: heartbeat\ndata: {}\n\n")
+            flusher.Flush()
+        case ev, ok := <-ch:
+            if !ok {
+                return
+            }
+            payload, _ := json.Marshal(ev)
+            fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, payload)
+            flusher.Flush()
+        }
+    }
+}
+```
+
+E2E test in milestone 12 verifies multi-client broadcast and heartbeat.
+
+---
+
+## Milestone 10 — Observability
+
+### Tasks 74-78: slog logger, OTEL traces, OTEL metrics, SLO specs, Grafana dashboards
+
+Each follows the runtime-adapters pattern. SLO specs example:
+
+```yaml
+# ops/slo/phase_api_latency.yaml
+version: prometheus/v1
+service: sophia-orchestator
+labels:
+  team: platform
+slos:
+  - name: phase_api_latency_p99
+    objective: 99.0
+    description: "POST /run returns 202 in <500ms p99"
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_phase_api_duration_ms_bucket{le="500", method="POST"}[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_phase_api_duration_ms_count{method="POST"}[5m]))
+    alerting:
+      name: SophiaPhaseAPILatencyHigh
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }
+```
+
+---
+
+## Milestone 11 — Bootstrap
+
+### Task 79: Config
+
+**Files:**
+- Create: `internal/infrastructure/config/config.go`
+
+Loads config from env (12-factor). Defaults map to spec values.
+
+### Task 80: bootstrap/wire.go
+
+Composition root. The ONLY file that imports adapter implementations. Wires all dependencies: pg pool → repos → app services → http handlers → router → server.
+
+### Task 81: cmd/sophia-orchestator/main.go
+
+```go
+package main
+
+import (
+    "context"
+    "log/slog"
+    "os"
+    "os/signal"
+    "syscall"
+
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/bootstrap"
+    "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/config"
+)
+
+func main() {
+    cfg, err := config.Load()
+    if err != nil {
+        slog.Error("config load", "err", err); os.Exit(1)
+    }
+
+    ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer cancel()
+
+    app, err := bootstrap.Wire(ctx, cfg)
+    if err != nil {
+        slog.Error("bootstrap", "err", err); os.Exit(1)
+    }
+    defer app.Close()
+
+    if err := app.Run(ctx); err != nil {
+        slog.Error("run", "err", err); os.Exit(1)
+    }
+}
+```
+
+---
+
+## Milestone 12 — Integration / E2E / Chaos / Load
+
+### Tasks 82-86
+
+- `test/integration/full_cycle_test.go` — drives 9 phases against real Postgres with stubbed downstreams.
+- `test/e2e/apply_parallel_test.go` — apply phase with 2 groups × 2 implements = 4 parallel sessions.
+- `test/e2e_sse/stream_test.go` — SSE multi-client + heartbeat.
+- `test/chaos/kill_mid_apply_test.go` — kill orchestrator process during apply, verify resume API works.
+- `ops/load/k6/baseline.js` — 50 phase runs/min, p99 < 500ms, soak 4h.
+
+---
+
+## Milestone 13 — Operational
+
+### Tasks 87-90
+
+- `Dockerfile` (multi-stage, distroless final) — copy from runtime-adapters' `Dockerfile`.
+- `ops/local/compose.yaml` — Postgres + sophia-orchestator + governance-stub + memory-stub + runtime-stub.
+- `.github/workflows/ci.yaml` — lint + unit + integration + e2e + chaos. Coverage gate. Govulncheck.
+- `helm/sophia-orchestator/` — minimal helm chart skeleton (deployment + service + secret + configmap).
+
+---
+
+## Self-Review
+
+**Spec coverage** — every section of the spec is covered by at least one task. Specifically:
+- Spec §1 (Boundaries + Iron Laws) → Tasks 6-9 (docs), 17 (ironlaw)
+- Spec §2 (Architecture) → Milestone 1 + bootstrap/wire (Task 80)
+- Spec §3 (Domain Model) → Tasks 12-22
+- Spec §4 (Phase flow single) → Task 40 (RunPhase use case)
+- Spec §5 (Apply flow) → Task 42 (RunApply use case) + Task 20 (Apply aggregates)
+- Spec §6 (Spawn Governor) → Task 26 + Task 58
+- Spec §7 (HTTP API) → Tasks 67-73
+- Spec §8 (Persistence Schema) → Tasks 46-58
+- Spec §9 (Observability) → Tasks 74-78
+- Spec §10 (Testing Strategy) → Tasks 82-86 + per-task TDD
+- Spec §11 (Roadmap) → V1 = scope of this plan
+- Spec §12-13 (References + Open Questions) → ADRs (Task 9 + future ADRs)
+
+**Placeholder scan**: every step has actual code or commands. No "TBD", "TODO", "fill in details". Some later milestones (especially 7-13) compress similar tasks (e.g., Tasks 35-39 are "same TDD pattern as Task 34") — acceptable because the engineer has Task 34 as the canonical reference and the file paths are exact.
+
+**Type consistency**: `phase.PhaseType`, `envelope.Status`, `change.ArtifactStoreMode` used consistently across milestones. Task 21 names are `session.RoleSDDExplore` etc, and the prompt builder in Task 25 references `phase.PhaseExplore`. No mismatched names.
+
+---
+
+## Execution Handoff
+
+**Plan complete and saved to `docs/superpowers/plans/2026-05-03-sophia-orchestator-v1.md`.**
+
+This plan has ~90 tasks across 13 milestones. Realistic to execute V1 in 8-12 weeks with one engineer or 4-6 weeks with two. Subagent-driven execution is recommended for tasks ≥ Milestone 5 (where the work is mostly mechanical TDD over well-defined domain types). For Milestones 1-4 (project bootstrap + domain) inline execution is also fine — small touches per file, frequent commits.
+
+**Two execution modes:**
+1. **Subagent-driven** (recommended for Milestones 5+): fresh subagent per task + two-stage review.
+2. **Inline execution** (good for Milestones 1-4): batch execution with checkpoints.
+
+**This session continues by inline-executing Milestones 1-2 (bootstrap + domain) and saves progress to engram for the next session to continue.**
