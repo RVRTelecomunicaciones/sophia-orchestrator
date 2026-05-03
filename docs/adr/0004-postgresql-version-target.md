@@ -49,6 +49,16 @@ None of these are blocking for V1, but they materially shape the V1 ceiling.
    `MERGE … RETURNING` extensions exclusive to 18, async I/O tuning).
    V1 ships nothing PG-18-only.
 
+   **Note on PG 18 stability** (verified via context7, May 2026):
+   PG 18 is the *Current* stable major — listed as supported in the
+   official version table (not "devel"). Released Sept 2025 GA, currently
+   at 18.3 (Feb 2026), with 3 patch releases shipping only minor bug fixes.
+   PG 18 is **production-ready, not experimental**. The reason it is opt-in
+   in V1 is purely conservative tooling-coverage: testcontainers-go, pgx/v5,
+   and golang-migrate have more matrix-test history with PG 17 (18+ months
+   post-GA) than PG 18 (5 months). When the orchestrator opts into a
+   PG-18-only feature, this caveat is revisited.
+
 4. **No PG 15 fallback.** sophia-runtime-adapters and friends may run on
    PG 15 — that is their ADR. sophia-orchestator does not need parity here:
    we operate on a different DB schema, deployed independently.
