@@ -1,0 +1,61 @@
+run:
+  timeout: 5m
+  go: "1.26"
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - forbidigo
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+    - wrapcheck
+
+linters-settings:
+  forbidigo:
+    forbid:
+      - p: '^time\.Now$'
+        msg: "use shared.Clock in domain/application"
+      - p: '^ulid\.Make$'
+        msg: "use shared.IDGenerator in domain/application"
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
+  wrapcheck:
+    ignoreSigs:
+      - .Errorf(
+      - errors.New(
+      - errors.Join(
+      - errors.Unwrap(
+  gosec:
+    excludes:
+      - G104  # errcheck overlap
+      - G115  # integer overflow conversion (false positives in Go 1.22+)
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - wrapcheck
+        - gosec
+        - forbidigo
+    - path: internal/infrastructure
+      linters:
+        - forbidigo  # infrastructure may use time.Now/ulid.Make
+    - path: internal/bootstrap
+      linters:
+        - forbidigo
+    - path: internal/adapters
+      linters:
+        - forbidigo  # adapters may use time.Now/ulid.Make at the boundary
