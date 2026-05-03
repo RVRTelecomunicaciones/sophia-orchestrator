@@ -25,7 +25,8 @@ func (s Status) IsTerminal() bool {
 }
 
 // ArtifactStoreMode controls where SDD artifacts (proposal, spec, design,
-// tasks, etc.) are persisted: engram, openspec files, both, or none.
+// tasks, etc.) are persisted: sophia-memory-engine, openspec files, both, or
+// none. See ADR-0003 for the memory-engine integration contract.
 type ArtifactStoreMode string
 
 // Artifact-store modes per spec § 7.1.

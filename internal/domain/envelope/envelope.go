@@ -39,7 +39,8 @@ type Risk struct {
 	Level       string `json:"level"` // low | medium | high
 }
 
-// ArtifactRef references an artifact saved by the agent (e.g. into engram).
+// ArtifactRef references an artifact saved by the agent (e.g. into
+// sophia-memory-engine via topic_key).
 type ArtifactRef struct {
 	TopicKey string `json:"topic_key"`
 	Type     string `json:"type"`
