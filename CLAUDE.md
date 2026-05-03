@@ -38,13 +38,18 @@ Every phase transition produces an Envelope. Every Envelope is persisted before 
 
 ## Tech stack
 
-- Language: Go 1.26+ (toolchain `go1.26.2`).
-- DB: PostgreSQL 15+ via `pgx/v5`.
+- Language: **Go 1.26.2** (pinned via `toolchain go1.26.2` directive in `go.mod`).
+  Even if your system-wide Go is older (e.g., 1.24.5), Go 1.21+ auto-downloads
+  and uses the pinned toolchain when `GOTOOLCHAIN=auto` (the default). Verify
+  with `go env GOVERSION` from inside the repo — it must report `go1.26.2`.
+  All tests, lint, and builds run on 1.26.2 regardless of system Go.
+- DB: PostgreSQL 16+ via `pgx/v5` (recommended PG 17; PG 18 feature-flagged). See ADR-0004.
 - HTTP router: `chi/v5`.
 - Migrations: `golang-migrate`.
 - Observability: OpenTelemetry + slog.
 - Testing: `testify` + `testcontainers-go`.
 - Lint: `golangci-lint` with `forbidigo`, `wrapcheck`, `errorlint`.
+- Memory backend: **`sophia-memory-engine`** (HTTP `/api/v1/memories`) — NOT engram. See ADR-0003.
 
 ## Output style
 

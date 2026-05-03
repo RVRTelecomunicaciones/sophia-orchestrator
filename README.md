@@ -30,7 +30,9 @@ Hexagonal / clean. Eight bounded contexts: Change, Phase, Apply, AgentDispatch, 
 
 ## Stack
 
-Go 1.26 · PostgreSQL 15 · chi/v5 · pgx/v5 · OpenTelemetry · slog · testify · testcontainers-go · golangci-lint.
+Go 1.26 · PostgreSQL 16+ (recommended PG 17, see [ADR-0004](docs/adr/0004-postgresql-version-target.md)) · chi/v5 · pgx/v5 · OpenTelemetry · slog · testify · testcontainers-go · golangci-lint.
+
+**Memory backend**: [`sophia-memory-engine`](https://github.com/sophia-engine/memory-engine) (HTTP). Not engram. See [ADR-0003](docs/adr/0003-memory-engine-integration.md).
 
 ## Tests
 

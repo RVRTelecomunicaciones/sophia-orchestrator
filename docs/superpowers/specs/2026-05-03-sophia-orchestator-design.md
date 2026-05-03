@@ -48,7 +48,7 @@ The design adopts patterns validated by Cursor's "Scaling Agents" architecture (
 
 ### 1.1. What sophia-orchestator IS
 
-- A Go 1.26+ HTTP service (chi/v5 router, OTEL, Postgres 15+) that owns SDD Change workflow state.
+- A Go 1.26+ HTTP service (chi/v5 router, OTEL, Postgres 16+; recommended PG 17) that owns SDD Change workflow state.
 - The orchestrator of the SDD 9-phase canonical lifecycle:
   ```
   init → explore → proposal → spec → design → tasks → apply → verify → archive
@@ -140,7 +140,8 @@ Same hexagonal/clean architecture as governance, memory-engine, and runtime-adap
 │      ┌───────────────────┼─────────────────────┐                   │
 │      ▼                   ▼                     ▼                   │
 │ adapters/outbound   pg                  http-clients               │
-│ (engram, openspec,  (changes, phases,   (governance, memory,       │
+│ (memoryengine,      (changes, phases,   (governance, memory,       │
+│  openspec, hybrid;  boards, tasks,      runtime; CB per-target)    │
 │  hybrid stores;     boards, tasks,      runtime; CB per-target)    │
 │  opencode-disp,     sessions,                                      │
 │  worktree-mgr)      worktrees, audit)                              │
@@ -164,7 +165,7 @@ Same hexagonal/clean architecture as governance, memory-engine, and runtime-adap
 | **Apply** | Sub-aggregate of Phase apply: Board, Groups, Tasks, claim/release semantics |
 | **AgentDispatch** | A single AI CLI invocation: prompt, worktree, captured envelope, exit code |
 | **Worktree** | Lifecycle of a git worktree: create, lock, release, cleanup |
-| **Artifact** | Abstraction over engram / openspec / hybrid; topic-key resolution |
+| **Artifact** | Abstraction over memory-engine / openspec / hybrid; topic-key resolution. See ADR-0003. |
 | **Discipline** | Iron Laws + HARD-GATE injection + envelope validation + Spawn Governor |
 | **Audit** | Append-only trail of every transition, mirrored to memory-engine ledger |
 
@@ -172,7 +173,7 @@ Same hexagonal/clean architecture as governance, memory-engine, and runtime-adap
 
 - Go 1.26+ (toolchain pinned `go1.26.2`)
 - HTTP router: `chi/v5`
-- DB: PostgreSQL 15+ via `pgx/v5`
+- DB: **PostgreSQL 16+** via `pgx/v5` (recommended PG 17 LTS-style; PG 18 feature-flagged). See ADR-0004.
 - Migrations: `golang-migrate`
 - Observability: OpenTelemetry (traces + metrics) + slog (structured logs)
 - Testing: `testify` + `testcontainers-go`
@@ -196,7 +197,7 @@ type Change struct {
     Project       ProjectName
     Status        ChangeStatus          // active | completed | aborted
     CurrentPhase  PhaseType
-    ArtifactStore ArtifactStoreMode     // engram | openspec | hybrid | none
+    ArtifactStore ArtifactStoreMode     // memory-engine | openspec | hybrid | none
     Phases        map[PhaseType]*Phase
     CreatedAt     time.Time
     UpdatedAt     time.Time
@@ -489,7 +490,7 @@ All long-running endpoints follow `202 Accepted + SSE`.
 
 ```
 POST   /api/v1/changes
-  body: { name: string, project: string, artifact_store_mode?: "engram"|"openspec"|"hybrid"|"none", base_ref?: string }
+  body: { name: string, project: string, artifact_store_mode?: "memory-engine"|"openspec"|"hybrid"|"none", base_ref?: string }
   → 201 { change_id, name, project, current_phase: "init", status: "active", artifact_store_mode }
 
 GET    /api/v1/changes/:id
@@ -572,7 +573,7 @@ CREATE TABLE changes (
   project         TEXT NOT NULL,
   status          TEXT NOT NULL,                  -- active | completed | aborted
   current_phase   TEXT,
-  artifact_store  TEXT NOT NULL,                  -- engram | openspec | hybrid | none
+  artifact_store  TEXT NOT NULL,                  -- memory-engine | openspec | hybrid | none
   config_json     JSONB NOT NULL DEFAULT '{}',    -- per-change overrides (parallelism, thresholds, ...)
   base_ref        TEXT,                           -- optional git ref to branch from
   created_at      TIMESTAMPTZ NOT NULL,
@@ -788,7 +789,7 @@ Each outbound HTTP client (governance, memory, runtime, opencode dispatcher) tes
 
 ### 10.3. Integration (testcontainers-go, build tag `integration`)
 
-Postgres 15 container per test class. Migrations applied via `golang-migrate`. HTTP roundtrip via `httptest.NewServer`.
+Postgres 16 container per test class (CI matrix also runs PG 17). Migrations applied via `golang-migrate`. HTTP roundtrip via `httptest.NewServer`.
 
 Tests:
 - CreateChange + CreatePhase + RunPhase end-to-end (phase mocked)
@@ -843,7 +844,7 @@ Scope:
 - Apply phase parallel coordination (default 2×2=4, cap 6, stagger+jitter)
 - Spawn Governor (Postgres advisory lock)
 - Manual resume API
-- Artifact store: engram default, openspec opt-in
+- Artifact store: **memory-engine default** (via sophia-memory-engine HTTP API per ADR-0003), openspec opt-in
 - Worktrees managed by orchestrator via runtime-adapters
 - Dispatcher abstraction + OpenCode adapter
 - Iron Laws (5) + HARD-GATE injection + envelope validation

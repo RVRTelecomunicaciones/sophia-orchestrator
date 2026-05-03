@@ -6,7 +6,8 @@
 
 **Architecture:** Clean / hexagonal with 8 bounded contexts (Change, Phase, Apply, AgentDispatch, Worktree, Artifact, Discipline, Audit). Mirrors `sophia-runtime-adapters` layout. Domain has zero I/O; application orchestrates use cases; outbound ports are HTTP clients to governance/memory-engine/runtime-adapters; inbound is chi/v5 HTTP server with SSE.
 
-**Tech Stack:** Go 1.26+, PostgreSQL 15+, chi/v5, pgx/v5, OpenTelemetry, slog, testify, testcontainers-go, golangci-lint, golang-migrate, ulid/v2, Sloth (SLO specs).
+**Tech Stack:** **Go 1.26.2** (toolchain pinned), **PostgreSQL 16+** (recommended PG 17, see ADR-0004), chi/v5, pgx/v5, OpenTelemetry, slog, testify, testcontainers-go, golangci-lint, golang-migrate, ulid/v2, Sloth (SLO specs).
+**Memory backend:** sophia-memory-engine (HTTP `/api/v1/memories`). Not engram. See ADR-0003.
 
 **Spec:** `docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`
 
@@ -64,7 +65,7 @@ sophia-orchestator/
 │   │       ├── memory/client.go
 │   │       ├── runtime/client.go
 │   │       ├── dispatcher/opencode/dispatcher.go
-│   │       ├── artifact/{engram, openspec, hybrid}/store.go
+│   │       ├── artifact/{memoryengine, openspec, hybrid}/store.go
 │   │       └── http_base/{client.go, circuit_breaker.go}
 │   ├── infrastructure/
 │   │   ├── config/config.go
@@ -163,7 +164,7 @@ git commit -m "chore: init go module pinned to go 1.26.2"
 ```bash
 mkdir -p api/openapi cmd/sophia-orchestator \
   docs/adr docs/superpowers/specs docs/superpowers/plans \
-  internal/{domain/{ids,change,phase,apply,session,worktree,envelope,ironlaw,artifact,risk,shared},ports/{inbound,outbound},application/{change,phase,apply,eventstream,discipline,audit},adapters/inbound/http/{middleware,handlers},adapters/outbound/{pg,governance,memory,runtime,dispatcher/opencode,artifact/{engram,openspec,hybrid},http_base},infrastructure/{config,obs/log,db},bootstrap} \
+  internal/{domain/{ids,change,phase,apply,session,worktree,envelope,ironlaw,artifact,risk,shared},ports/{inbound,outbound},application/{change,phase,apply,eventstream,discipline,audit},adapters/inbound/http/{middleware,handlers},adapters/outbound/{pg,governance,memory,runtime,dispatcher/opencode,artifact/{memoryengine,openspec,hybrid},http_base},infrastructure/{config,obs/log,db},bootstrap} \
   migrations/postgres \
   ops/{alertmanager,grafana/dashboards,load/k6,local,otel-collector,prometheus/{rules,generated},slo} \
   scripts \
@@ -398,7 +399,7 @@ Every phase transition produces an Envelope. Every Envelope is persisted before 
 ## Tech stack
 
 - Language: Go 1.26+ (toolchain `go1.26.2`).
-- DB: PostgreSQL 15+ via `pgx/v5`.
+- DB: PostgreSQL 16+ via `pgx/v5` (recommended PG 17, see ADR-0004).
 - HTTP router: `chi/v5`.
 - Migrations: `golang-migrate`.
 - Observability: OpenTelemetry + slog.
@@ -623,7 +624,7 @@ V1 of `sophia-orchestator` follows the spec at `docs/superpowers/specs/2026-05-0
 ## Decision
 
 - Go 1.26+, toolchain pinned `go1.26.2`.
-- PostgreSQL 15+ via `pgx/v5`. No SQLite in V1.
+- PostgreSQL 16+ via `pgx/v5` (recommended PG 17 LTS-style, see ADR-0004). No SQLite in V1.
 - HTTP router: `chi/v5`.
 - Observability: OpenTelemetry + slog.
 - Testing: `testify` + `testcontainers-go`.
@@ -692,7 +693,7 @@ Hexagonal / clean. Eight bounded contexts: Change, Phase, Apply, AgentDispatch, 
 
 ## Stack
 
-Go 1.26 · PostgreSQL 15 · chi/v5 · pgx/v5 · OpenTelemetry · slog · testify · testcontainers-go · golangci-lint.
+Go 1.26.2 · PostgreSQL 16+ (recommended PG 17, see ADR-0004) · chi/v5 · pgx/v5 · OpenTelemetry · slog · testify · testcontainers-go · golangci-lint. Memory backend: sophia-memory-engine (ADR-0003).
 
 ## Tests
 
@@ -1573,10 +1574,10 @@ func (s Status) IsTerminal() bool {
 type ArtifactStoreMode string
 
 const (
-    ArtifactStoreEngram   ArtifactStoreMode = "engram"
-    ArtifactStoreOpenspec ArtifactStoreMode = "openspec"
-    ArtifactStoreHybrid   ArtifactStoreMode = "hybrid"
-    ArtifactStoreNone     ArtifactStoreMode = "none"
+    ArtifactStoreMemoryEngine ArtifactStoreMode = "memory-engine"
+    ArtifactStoreOpenspec     ArtifactStoreMode = "openspec"
+    ArtifactStoreHybrid       ArtifactStoreMode = "hybrid"
+    ArtifactStoreNone         ArtifactStoreMode = "none"
 )
 
 func (a ArtifactStoreMode) IsValid() bool {
@@ -3388,7 +3389,7 @@ ON CONFLICT (id) DO UPDATE SET
 // ...FindByID, FindByProjectName, List
 ```
 
-Each repo test uses testcontainers-go to spin up a real Postgres 15.
+Each repo test uses testcontainers-go to spin up a real Postgres 16 (CI matrix also runs PG 17).
 
 ### Task 58: Spawn Governor pg backend (advisory lock)
 
@@ -3574,13 +3575,13 @@ Note: the exact `opencode run` flag set is an Open Question (spec §13 #2). The 
 
 ### Tasks 64-66: Engram, OpenSpec, Hybrid stores
 
-**engram store**: HTTP wrapper around memory-engine. Save/Load via topic_key.
+**memoryengine store**: HTTP wrapper around `sophia-memory-engine` (`POST /api/v1/memories` with `topic_key=sdd/{change}/{phase}`, GET via search). See ADR-0003.
 
 **openspec store**: filesystem under `<repo>/openspec/changes/<change-name>/`. One file per topic_key segment.
 
-**hybrid store**: composite — writes to BOTH, reads from primary (engram) with fallback to openspec.
+**hybrid store**: composite — writes to BOTH, reads from primary (memory-engine) with fallback to openspec.
 
-Tests cover idempotency, conflict resolution (hybrid prefers engram), path safety (openspec).
+Tests cover idempotency, conflict resolution (hybrid prefers memory-engine), path safety (openspec).
 
 ---
 

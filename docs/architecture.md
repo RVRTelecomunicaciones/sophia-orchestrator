@@ -28,7 +28,8 @@ on nothing inside the domain. The dependency arrow always points inward.
 │      ┌───────────────────┼─────────────────────┐                   │
 │      ▼                   ▼                     ▼                   │
 │ adapters/outbound       pg                  http-clients           │
-│ (engram, openspec,    (changes, phases,    (governance, memory,    │
+│ (memoryengine,        (changes, phases,    (governance, memory,    │
+│  openspec, hybrid     boards, tasks,        runtime; CB per-target)│
 │  hybrid stores;        boards, tasks,       runtime; CB per-target)│
 │  opencode-disp,        sessions,                                   │
 │  worktree-mgr)         worktrees, audit)                           │
@@ -57,7 +58,7 @@ import adapters or infrastructure. Violation = build-time architecture error
 | **Apply** | Sub-aggregate of Phase apply: Board, Groups, Tasks, claim/release |
 | **AgentDispatch** | A single AI CLI invocation: prompt, worktree, captured envelope, exit code |
 | **Worktree** | Lifecycle of a git worktree: create, lock, release, cleanup |
-| **Artifact** | Abstraction over engram / openspec / hybrid; topic-key resolution |
+| **Artifact** | Abstraction over memory-engine / openspec / hybrid; topic-key resolution. See [ADR-0003](adr/0003-memory-engine-integration.md). |
 | **Discipline** | Iron Laws + HARD-GATE injection + envelope validation + Spawn Governor |
 | **Audit** | Append-only trail of every transition, mirrored to memory-engine ledger |
 
@@ -65,6 +66,10 @@ import adapters or infrastructure. Violation = build-time architecture error
 
 - **agent-governance-core** — consumed via outbound port `GovernanceClient` (HTTP).
 - **sophia-memory-engine** — consumed via outbound port `MemoryClient` (HTTP).
+  Endpoints used by orchestrator: `POST /api/v1/memories` (ingest typed
+  MemoryRecord with `topic_key=sdd/{change}/{phase}`), `GET /api/v1/memories/{id}`,
+  `POST /api/v1/search`, `POST /api/v1/search/context`, `POST /api/v1/decisions`.
+  Full integration contract: [ADR-0003](adr/0003-memory-engine-integration.md).
 - **sophia-runtime-adapters** — consumed via outbound port `RuntimeClient` (HTTP); exposes Phase 1 (shell, git, fs, http) and Phase 2 (locks, mailbox, reservations) capabilities.
 
 ## Process layout

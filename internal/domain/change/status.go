@@ -28,18 +28,24 @@ func (s Status) IsTerminal() bool {
 // tasks, etc.) are persisted: engram, openspec files, both, or none.
 type ArtifactStoreMode string
 
-// Artifact-store modes per spec § 7.1 + global CLAUDE.md "Artifact Store Policy".
+// Artifact-store modes per spec § 7.1.
+//
+// MemoryEngine is the canonical V1 backend: artifacts (proposal/spec/design/
+// tasks/etc.) are persisted via the sophia-memory-engine HTTP API as typed
+// MemoryRecord rows with topic_key = "sdd/{change_name}/{phase_type}".
+// Openspec persists to filesystem under openspec/changes/{change_name}/.
+// Hybrid writes both. None returns artifacts inline (transient).
 const (
-	ArtifactStoreEngram   ArtifactStoreMode = "engram"
-	ArtifactStoreOpenspec ArtifactStoreMode = "openspec"
-	ArtifactStoreHybrid   ArtifactStoreMode = "hybrid"
-	ArtifactStoreNone     ArtifactStoreMode = "none"
+	ArtifactStoreMemoryEngine ArtifactStoreMode = "memory-engine"
+	ArtifactStoreOpenspec     ArtifactStoreMode = "openspec"
+	ArtifactStoreHybrid       ArtifactStoreMode = "hybrid"
+	ArtifactStoreNone         ArtifactStoreMode = "none"
 )
 
 // IsValid reports whether m is a known ArtifactStoreMode.
 func (m ArtifactStoreMode) IsValid() bool {
 	switch m {
-	case ArtifactStoreEngram, ArtifactStoreOpenspec, ArtifactStoreHybrid, ArtifactStoreNone:
+	case ArtifactStoreMemoryEngine, ArtifactStoreOpenspec, ArtifactStoreHybrid, ArtifactStoreNone:
 		return true
 	}
 	return false

@@ -5,12 +5,19 @@ This document gives an AI agent everything it needs to make a meaningful contrib
 ## Quick start
 
 ```bash
+# Verify Go toolchain (must report go1.26.2; auto-downloaded by toolchain directive)
+go env GOVERSION
+
 go mod download
 docker compose -f ops/local/compose.yaml up -d
 make migrate-up
 make build
 make test-unit
 ```
+
+**Go version**: this repo pins **Go 1.26.2** via `toolchain go1.26.2`. If your
+system Go is 1.24.x or 1.25.x, that's fine — Go 1.21+ with `GOTOOLCHAIN=auto`
+auto-downloads and uses the pinned toolchain. All commands compile/run on 1.26.2.
 
 ## Repository purpose
 
@@ -59,6 +66,7 @@ Run targets via `make test-*`.
 3. NEVER call `time.Now()` / `ulid.Make()` in `internal/domain` or `internal/application` (lint enforces).
 4. NEVER persist after returning — Envelope persistence happens BEFORE caller-visible state change.
 5. NEVER skip `make lint` before commit if you touched Go files.
+6. NEVER reference `engram` as a backend — sophia uses `sophia-memory-engine` (HTTP). See ADR-0003.
 
 ## Commit prefixes
 

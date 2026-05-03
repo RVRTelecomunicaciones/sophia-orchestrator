@@ -14,8 +14,14 @@ maintain consistency with the rest of the Sophia ecosystem
 
 ## Decision
 
-1. **Language**: Go 1.26+, toolchain pinned `go1.26.2` (matches sibling repos).
-2. **DB**: PostgreSQL 15+ via `pgx/v5`. No SQLite in V1 (parity with prod).
+1. **Language**: Go 1.26.2 (toolchain pinned in `go.mod` via the `toolchain go1.26.2`
+   directive — matches sibling repos `agent-governance-core`, `sophia-memory-engine`,
+   `sophia-runtime-adapters`). System Go 1.21+ auto-downloads the pinned toolchain
+   transparently; effective compile version is always `go1.26.2` regardless of
+   what `which go` resolves to. Verify with `go env GOVERSION`.
+2. **DB**: PostgreSQL 16+ via `pgx/v5` (recommended target PG 17 LTS-style; PG 18
+   feature-flagged). See [ADR-0004](0004-postgresql-version-target.md). No SQLite
+   in V1 (parity with prod).
 3. **HTTP router**: `chi/v5`.
 4. **Observability**: OpenTelemetry traces + metrics, slog for structured logs.
 5. **Testing**: `testify` + `testcontainers-go` for integration.
