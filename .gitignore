@@ -22,6 +22,10 @@ vendor/
 /dist/
 /tmp/
 
+# Local smoke-test binaries (when developers run `go build ./cmd/...`)
+/sophia-orchestator
+/stubs
+
 # Logs
 *.log
 
