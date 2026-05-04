@@ -1,0 +1,83 @@
+# Local docker-compose stack for sophia-orchestator. Brings up Postgres 16,
+# three downstream stubs (governance/memory/runtime), and the orchestrator
+# itself wired to talk to them. Useful for end-to-end smoke tests without
+# real governance/memory/runtime services.
+#
+# Bring up:   docker compose -f ops/local/compose.yaml up -d --build
+# Smoke test: curl localhost:8080/api/v1/health
+# Tear down:  docker compose -f ops/local/compose.yaml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sophia-orchestator-pg
+    environment:
+      POSTGRES_USER: sophia
+      POSTGRES_PASSWORD: sophia
+      POSTGRES_DB: sophia_orchestator
+    ports:
+      - "5434:5432"   # 5432 already used by host PG; 5433 by ms-cotizacion
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sophia -d sophia_orchestator"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  governance-stub:
+    build:
+      context: ../..
+      dockerfile: ops/local/Dockerfile.stubs
+    container_name: sophia-governance-stub
+    command: ["--addr=:9001", "--mode=governance"]
+    ports:
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sophia-stubs", "--help"]
+      interval: 5s
+      retries: 5
+
+  memory-stub:
+    build:
+      context: ../..
+      dockerfile: ops/local/Dockerfile.stubs
+    container_name: sophia-memory-stub
+    command: ["--addr=:9002", "--mode=memory"]
+    ports:
+      - "9002:9002"
+
+  runtime-stub:
+    build:
+      context: ../..
+      dockerfile: ops/local/Dockerfile.stubs
+    container_name: sophia-runtime-stub
+    command: ["--addr=:9003", "--mode=runtime"]
+    ports:
+      - "9003:9003"
+
+  orchestator:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: sophia-orchestator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      governance-stub:
+        condition: service_started
+      memory-stub:
+        condition: service_started
+      runtime-stub:
+        condition: service_started
+    environment:
+      SOPHIA_HTTP_ADDR: ":8080"
+      SOPHIA_HTTP_API_KEY: "demo-key"
+      SOPHIA_HTTP_API_KEY_PROJECT: "demo"
+      SOPHIA_DB_URL: "postgres://sophia:sophia@postgres:5432/sophia_orchestator?sslmode=disable"
+      SOPHIA_DB_MIGRATE_ON_BOOT: "true"
+      SOPHIA_GOVERNANCE_URL: "http://governance-stub:9001"
+      SOPHIA_MEMORY_URL: "http://memory-stub:9002"
+      SOPHIA_RUNTIME_URL: "http://runtime-stub:9003"
+      SOPHIA_ENV: "dev"
+      SOPHIA_LOG_LEVEL: "info"
+    ports:
+      - "18080:8080"

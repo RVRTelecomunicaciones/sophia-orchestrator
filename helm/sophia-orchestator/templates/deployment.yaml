@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sophia-orchestator.fullname" . }}
+  labels:
+    {{- include "sophia-orchestator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sophia-orchestator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sophia-orchestator.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "sophia-orchestator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: orchestator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: SOPHIA_HTTP_ADDR
+              value: {{ .Values.config.httpAddr | quote }}
+            - name: SOPHIA_ENV
+              value: {{ .Values.config.env | quote }}
+            - name: SOPHIA_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            - name: SOPHIA_SPAWN_MAX
+              value: {{ .Values.config.spawn.max | quote }}
+            - name: SOPHIA_DB_MIGRATE_ON_BOOT
+              value: {{ .Values.migrateOnBoot | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "sophia-orchestator.fullname" . }}-secrets
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

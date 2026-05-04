@@ -1,0 +1,15 @@
+apiVersion: v2
+name: sophia-orchestator
+description: Deterministic SDD workflow coordinator (Sophia ecosystem)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - sdd
+  - orchestrator
+  - sophia
+  - ai-agents
+home: https://github.com/RVRTelecomunicaciones/sophia-orchestrator
+maintainers:
+  - name: rfactperu
+    email: rfactperu@gmail.com

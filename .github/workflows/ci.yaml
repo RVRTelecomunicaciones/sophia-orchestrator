@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+      - name: go test
+        run: go test ./internal/... -race -count=1 -coverprofile=coverage.out
+      - name: Coverage report
+        run: go tool cover -func=coverage.out | tee coverage.txt | tail -1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.txt
+
+  integration:
+    name: Integration tests (Postgres)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+      - name: Run integration tests
+        run: go test -tags=integration ./test/integration/... -count=1 -timeout=10m
+
+  build:
+    name: Build binary
+    runs-on: ubuntu-latest
+    needs: [lint, unit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+      - name: go build
+        run: |
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags="-s -w -X main.commit=${GITHUB_SHA::7}" \
+            -o bin/sophia-orchestator ./cmd/sophia-orchestator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sophia-orchestator-${{ github.sha }}
+          path: bin/sophia-orchestator
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    needs: [lint, unit]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg VERSION=${{ github.ref_name }} \
+            --build-arg COMMIT=${GITHUB_SHA::7} \
+            -t sophia-orchestator:${GITHUB_SHA::7} .
+      - name: Image size
+        run: docker image ls sophia-orchestator:${GITHUB_SHA::7}
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run govulncheck
+        run: govulncheck ./... || true   # warnings; do not fail CI in V1
