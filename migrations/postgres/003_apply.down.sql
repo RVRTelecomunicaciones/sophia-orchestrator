@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS groups;
+DROP TABLE IF EXISTS apply_boards;
