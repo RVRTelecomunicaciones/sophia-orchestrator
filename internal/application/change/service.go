@@ -11,6 +11,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -22,17 +23,29 @@ var ErrAlreadyExists = errors.New("change: already exists")
 // Service implements inbound.ChangeService. Constructed by bootstrap/wire.go
 // with concrete repository, clock, and ID generator implementations.
 type Service struct {
-	repo  outbound.ChangeRepository
-	clock shared.Clock
-	idGen shared.IDGenerator
+	repo    outbound.ChangeRepository
+	clock   shared.Clock
+	idGen   shared.IDGenerator
+	metrics *obs.Metrics // optional; nil ⇒ no-op recording
 }
 
-// New constructs a Service. All dependencies are required (panic on nil).
+// New constructs a Service. All required dependencies are checked; metrics
+// is optional.
 func New(repo outbound.ChangeRepository, clock shared.Clock, idGen shared.IDGenerator) *Service {
 	if repo == nil || clock == nil || idGen == nil {
 		panic("change.Service: nil dependency")
 	}
 	return &Service{repo: repo, clock: clock, idGen: idGen}
+}
+
+// WithMetrics returns a Service with metrics recording enabled. The
+// returned Service shares the same repo/clock/idGen — call after New().
+func (s *Service) WithMetrics(m *obs.Metrics) *Service {
+	if s == nil {
+		return nil
+	}
+	s.metrics = m
+	return s
 }
 
 // Create persists a new SDD Change in StatusActive at PhaseInit.
@@ -58,6 +71,10 @@ func (s *Service) Create(ctx context.Context, in inbound.CreateChangeInput) (*ch
 
 	if err := s.repo.Save(ctx, c); err != nil {
 		return nil, fmt.Errorf("save change: %w", err)
+	}
+	if s.metrics != nil {
+		s.metrics.ChangesTotal.WithLabelValues(c.Project(), string(c.Status())).Inc()
+		s.metrics.ChangesInFlight.Inc()
 	}
 	return c, nil
 }
@@ -99,6 +116,10 @@ func (s *Service) Abort(ctx context.Context, id ids.ChangeID, reason string) err
 	}
 	if err := s.repo.Save(ctx, c); err != nil {
 		return fmt.Errorf("save change: %w", err)
+	}
+	if s.metrics != nil {
+		s.metrics.ChangesTotal.WithLabelValues(c.Project(), string(c.Status())).Inc()
+		s.metrics.ChangesInFlight.Dec()
 	}
 	return nil
 }

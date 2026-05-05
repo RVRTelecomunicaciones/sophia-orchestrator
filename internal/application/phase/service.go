@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
@@ -93,6 +94,10 @@ type Deps struct {
 	// single-agent flow. nil ⇒ apply phases run as single-agent (V1
 	// fallback).
 	ApplyExecutor ApplyExecutor
+
+	// Metrics is the optional Prometheus instrument set. When nil, all
+	// metric record calls are no-ops.
+	Metrics *obs.Metrics
 }
 
 // ApplyExecutor is the contract phase.Service uses to delegate apply-phase
@@ -187,6 +192,7 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 	if err := s.d.PhaseRepo.Save(ctx, p); err != nil {
 		return nil, fmt.Errorf("save phase: %w", err)
 	}
+	s.recordPhaseStarted(p)
 
 	// Audit + event: phase.started.
 	s.appendAudit(ctx, &in.ChangeID, &pid, nil, "phase.started", nil)
@@ -360,6 +366,8 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("save phase: %v", err))
 		return
 	}
+	s.recordPhaseTerminal(p, env)
+	s.recordPhaseEnded(p)
 
 	// Step 14: advance Change.CurrentPhase if DONE.
 	if p.Status() == phase.PhaseStatusDone {
@@ -399,6 +407,8 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 		s.failPhase(ctx, p, fmt.Sprintf("save phase: %v", err))
 		return
 	}
+	s.recordPhaseTerminal(p, env)
+	s.recordPhaseEnded(p)
 
 	if p.Status() == phase.PhaseStatusDone {
 		s.advanceChange(ctx, c, p.Type())
@@ -537,6 +547,11 @@ func (s *Service) failPhase(ctx context.Context, p *phase.Phase, reason string) 
 	}
 	if err := p.Complete(env, s.d.Clock.Now()); err == nil {
 		_ = s.d.PhaseRepo.Save(ctx, p)
+	}
+	s.recordPhaseTerminal(p, env)
+	s.recordPhaseEnded(p)
+	if strings.Contains(reason, "iron law") || strings.Contains(reason, "Iron Law") {
+		s.recordIronLawViolation("IL_DETECTED")
 	}
 	pidLocal := p.ID()
 	cidLocal := c.ID()

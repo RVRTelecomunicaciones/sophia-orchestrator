@@ -112,9 +112,16 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
 	}
 
+	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE
+	// application services so metrics can be injected into them.
+	var metrics *obs.Metrics
+	if cfg.Obs.MetricsEnabled {
+		metrics = obs.NewMetrics()
+	}
+
 	// Application services.
 	events := eventstream.New(0, nil)
-	changeSvc := change.New(changeRepo, clock, idGen)
+	changeSvc := change.New(changeRepo, clock, idGen).WithMetrics(metrics)
 	applySvc := apply.New(boardRepo)
 
 	// Apply-phase parallel coordination (spec § 5).
@@ -132,33 +139,30 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Clock:       clock,
 		IDGen:       idGen,
 		Config:      apply.DefaultRunConfig(),
+		Metrics:     metrics,
 	})
 
 	phaseSvc := phase.New(phase.Deps{
-		ChangeRepo:  changeRepo,
-		PhaseRepo:   phaseRepo,
-		SessionRepo: sessionRepo,
-		Governance:  govClient,
-		Memory:      memClient,
-		Dispatcher:  dispatcher,
-		SpawnGov:    spawnGov,
-		Validator:   validator,
-		IronLaw:     ironLaw,
-		Prompts:     prompts,
-		Audit:       auditLog,
-		Events:      events,
-		Clock:       clock,
-		IDGen:       idGen,
+		ChangeRepo:    changeRepo,
+		PhaseRepo:     phaseRepo,
+		SessionRepo:   sessionRepo,
+		Governance:    govClient,
+		Memory:        memClient,
+		Dispatcher:    dispatcher,
+		SpawnGov:      spawnGov,
+		Validator:     validator,
+		IronLaw:       ironLaw,
+		Prompts:       prompts,
+		Audit:         auditLog,
+		Events:        events,
+		Clock:         clock,
+		IDGen:         idGen,
 		Scheduler:     phase.AsyncScheduler,
 		Config:        phase.DefaultServiceConfig(),
 		ApplyExecutor: applyExecutor,
+		Metrics:       metrics,
 	})
 
-	// Observability: Prometheus metrics + OTEL traces.
-	var metrics *obs.Metrics
-	if cfg.Obs.MetricsEnabled {
-		metrics = obs.NewMetrics()
-	}
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
 		Enabled:     cfg.Obs.TracesEnabled,
 		Endpoint:    cfg.Obs.OTLPEndpoint,

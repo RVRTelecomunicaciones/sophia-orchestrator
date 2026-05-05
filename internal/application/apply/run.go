@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
@@ -60,6 +61,9 @@ type RunDeps struct {
 	Clock       shared.Clock
 	IDGen       shared.IDGenerator
 	Config      RunConfig
+
+	// Metrics is the optional Prometheus instrument set. nil ⇒ no-op.
+	Metrics *obs.Metrics
 }
 
 // RunConfig parameterizes RunService.
@@ -262,6 +266,24 @@ func (s *RunService) finalize(ctx context.Context, c *change.Change, p *phase.Ph
 	}
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
 		s.publishEvent(p.ID(), "apply.board.save_failed", map[string]any{"err": err.Error()})
+	}
+
+	// Metrics: record per-group + per-task aggregates.
+	if s.d.Metrics != nil {
+		for _, g := range board.Groups() {
+			r := results[g.ID()]
+			groupStatus := "completed"
+			if r.failed {
+				groupStatus = "failed"
+			}
+			s.d.Metrics.ApplyGroupsTotal.WithLabelValues(groupStatus).Inc()
+			for _, tk := range g.Tasks() {
+				s.d.Metrics.ApplyTasksTotal.WithLabelValues(string(tk.Status())).Inc()
+				if tk.Attempts() > 0 {
+					s.d.Metrics.ApplyTaskAttempts.Observe(float64(tk.Attempts()))
+				}
+			}
+		}
 	}
 
 	env := &envelope.Envelope{
