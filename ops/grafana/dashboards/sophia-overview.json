@@ -1,0 +1,140 @@
+{
+  "title": "sophia-orchestator — overview",
+  "uid": "sophia-overview",
+  "tags": ["sophia", "overview"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Phases running",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sophia_orchestator_phases_running",
+          "legendFormat": "running",
+          "refId": "A"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Changes in flight",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "expr": "sophia_orchestator_changes_in_flight",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Spawn governor active",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sophia_orchestator_spawn_governor_active",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "SSE connections",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "sophia_orchestator_sse_connections_active",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Phases by type / status (rate)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "expr": "sum by (phase_type, status) (rate(sophia_orchestator_phases_total[5m]))",
+          "legendFormat": "{{phase_type}} / {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "HTTP request duration p99 (ms)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sophia_orchestator_http_request_duration_ms_bucket[5m])) by (le, route))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Iron Law violations (cumulative)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum by (law_id) (sophia_orchestator_iron_law_violations_total)",
+          "legendFormat": "{{law_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Dispatcher calls (rate)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum by (provider, status) (rate(sophia_orchestator_dispatcher_calls_total[5m]))",
+          "legendFormat": "{{provider}} / {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Spawn governor throttling",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "rate(sophia_orchestator_spawn_governor_throttled_total[5m])",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Apply task attempts distribution",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sophia_orchestator_apply_task_attempts_bucket[5m])) by (le))",
+          "legendFormat": "p95 attempts",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

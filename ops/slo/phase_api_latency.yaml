@@ -1,0 +1,28 @@
+# SLO: HTTP phase-API latency (POST /run returns 202 in <500ms p99).
+# Sloth v1 spec — generates Prometheus recording + multi-window multi-burn-
+# rate alert rules via `sloth generate -i ops/slo/*.yaml -o ops/prometheus/
+# generated/`.
+version: "prometheus/v1"
+service: sophia-orchestator
+labels:
+  team: platform
+  tier: t1
+slos:
+  - name: phase_api_latency_p99
+    objective: 99.0   # 99% of phase-API requests under 500ms
+    description: "POST /api/v1/.../run returns 202 in <500ms p99 (7d)."
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_http_request_duration_ms_bucket{route="/api/v1/changes/{change_id}/phases/{phase_type}/run",le="500"}[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_http_request_duration_ms_count{route="/api/v1/changes/{change_id}/phases/{phase_type}/run"}[5m]))
+    alerting:
+      name: SophiaPhaseAPILatencyHigh
+      annotations:
+        summary: "Phase-API latency p99 budget burning"
+        runbook: "https://runbooks.example.com/sophia/phase-api-latency"
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }

@@ -1,0 +1,23 @@
+version: "prometheus/v1"
+service: sophia-orchestator
+labels:
+  team: platform
+  tier: t1
+slos:
+  - name: dispatcher_availability
+    objective: 99.5
+    description: "Dispatcher invocations succeed at ≥99.5% per provider."
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_dispatcher_calls_total{status="failure"}[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_dispatcher_calls_total[5m]))
+    alerting:
+      name: SophiaDispatcherAvailabilityLow
+      annotations:
+        summary: "Dispatcher availability below 99.5%"
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }

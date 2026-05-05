@@ -20,8 +20,19 @@ type Config struct {
 	Runtime     ServiceConfig
 	Dispatcher  DispatcherConfig
 	Spawn       SpawnConfig
+	Obs         ObsConfig
 	Environment string // dev | staging | prod
 	LogLevel    string // debug | info | warn | error
+}
+
+// ObsConfig tunes observability (Prometheus metrics + OTEL traces).
+type ObsConfig struct {
+	MetricsEnabled  bool
+	TracesEnabled   bool
+	OTLPEndpoint    string  // e.g. "otel-collector:4318"; empty + traces enabled ⇒ stdout exporter
+	OTLPInsecure    bool    // skip TLS for OTLP (dev only)
+	TraceSampleRate float64 // [0.0, 1.0]
+	Version         string  // baked into resource attributes
 }
 
 // HTTPConfig configures the inbound HTTP server.
@@ -83,6 +94,12 @@ func Default() Config {
 			Cmd:                 "opencode",
 			SuggestedConcurrent: 4,
 		},
+		Obs: ObsConfig{
+			MetricsEnabled:  true,
+			TracesEnabled:   false,
+			TraceSampleRate: 1.0,
+			Version:         "v0.1.0",
+		},
 		Spawn: SpawnConfig{
 			Max:          4,
 			StaggerMin:   200 * time.Millisecond,
@@ -123,6 +140,12 @@ func Load() (Config, error) {
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
+
+	c.Obs.MetricsEnabled = envBool("SOPHIA_METRICS_ENABLED", c.Obs.MetricsEnabled)
+	c.Obs.TracesEnabled = envBool("SOPHIA_TRACES_ENABLED", c.Obs.TracesEnabled)
+	c.Obs.OTLPEndpoint = envStr("SOPHIA_OTLP_ENDPOINT", c.Obs.OTLPEndpoint)
+	c.Obs.OTLPInsecure = envBool("SOPHIA_OTLP_INSECURE", c.Obs.OTLPInsecure)
+	c.Obs.Version = envStr("SOPHIA_VERSION", c.Obs.Version)
 
 	c.Environment = envStr("SOPHIA_ENV", c.Environment)
 	c.LogLevel = strings.ToLower(envStr("SOPHIA_LOG_LEVEL", c.LogLevel))

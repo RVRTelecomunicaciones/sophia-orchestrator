@@ -31,6 +31,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/config"
 	dbpkg "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/db"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 )
 
 // App is the wired application. main.go calls Run; tests can call Close
@@ -40,6 +41,7 @@ type App struct {
 	logger *slog.Logger
 	pool   *pgxpool.Pool
 	server *http.Server
+	tracer *obs.Tracer
 }
 
 // Wire constructs the App by composing every concrete dependency.
@@ -152,9 +154,28 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		ApplyExecutor: applyExecutor,
 	})
 
+	// Observability: Prometheus metrics + OTEL traces.
+	var metrics *obs.Metrics
+	if cfg.Obs.MetricsEnabled {
+		metrics = obs.NewMetrics()
+	}
+	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
+		Enabled:     cfg.Obs.TracesEnabled,
+		Endpoint:    cfg.Obs.OTLPEndpoint,
+		Insecure:    cfg.Obs.OTLPInsecure,
+		ServiceName: "sophia-orchestator",
+		Version:     cfg.Obs.Version,
+		Environment: cfg.Environment,
+		SampleRatio: cfg.Obs.TraceSampleRate,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("bootstrap: tracer: %w", err)
+	}
+
 	// Inbound HTTP.
 	auth := newStaticAuthn(cfg.HTTP.APIKey, cfg.HTTP.APIKeyProject)
-	router := httpinbound.NewRouter(httpinbound.Deps{
+	routerDeps := httpinbound.Deps{
 		Changes:   changeSvc,
 		Phases:    phaseSvc,
 		Apply:     applySvc,
@@ -163,7 +184,12 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Logger:    logger,
 		StartedAt: time.Now(),
 		Ready:     readinessFor(pool),
-	})
+		Metrics:   metrics,
+	}
+	if tracer.Enabled() {
+		routerDeps.Tracer = tracer.Tracer("sophia-orchestator/http")
+	}
+	router := httpinbound.NewRouter(routerDeps)
 
 	srv := &http.Server{
 		Addr:        cfg.HTTP.Addr,
@@ -172,7 +198,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		// WriteTimeout intentionally 0 — SSE long-poll incompatible with it.
 	}
 
-	return &App{cfg: cfg, logger: logger, pool: pool, server: srv}, nil
+	return &App{cfg: cfg, logger: logger, pool: pool, server: srv, tracer: tracer}, nil
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled or the server
@@ -210,6 +236,11 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) Close() {
 	if a.pool != nil {
 		a.pool.Close()
+	}
+	if a.tracer != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.tracer.Shutdown(shutCtx)
 	}
 }
 

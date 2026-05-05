@@ -1,0 +1,47 @@
+# Alertmanager 3-tier routing skeleton (spec § 9.6).
+# T1 (severity=page): on-call paging — availability < SLO, Iron Law spike,
+#                     dispatcher down.
+# T2 (severity=ticket): notify Slack — phase success degradation, spawn
+#                      governor throttle > 10%.
+# T3 (severity=info):   log only — single phase failure, retry exhausted.
+#
+# Replace receivers' webhook URLs / Slack channels for your environment;
+# the `null` receivers are placeholders so amtool check-config passes.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'service']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'null-receiver'
+  routes:
+    - matchers:
+        - severity = page
+      receiver: 'pagerduty'
+      group_wait: 0s
+      continue: true
+    - matchers:
+        - severity = ticket
+      receiver: 'slack-platform'
+    - matchers:
+        - severity = info
+      receiver: 'null-receiver'
+
+receivers:
+  - name: 'null-receiver'
+  - name: 'pagerduty'
+    # webhook_configs:
+    #   - url: 'https://events.pagerduty.com/integration/<KEY>/enqueue'
+  - name: 'slack-platform'
+    # slack_configs:
+    #   - api_url: 'https://hooks.slack.com/services/...'
+    #     channel: '#sophia-alerts'
+    #     title: '{{ .GroupLabels.alertname }}'
+
+inhibit_rules:
+  - source_matchers: [severity = page]
+    target_matchers: [severity = ticket]
+    equal: ['alertname', 'service']

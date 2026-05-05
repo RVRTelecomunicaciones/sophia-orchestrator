@@ -1,0 +1,24 @@
+version: "prometheus/v1"
+service: sophia-orchestator
+labels:
+  team: platform
+  tier: t1
+slos:
+  - name: iron_law_violation_rate
+    objective: 99.9   # < 0.1% of phases trigger an Iron Law violation
+    description: "Iron Law violations stay <0.1% of phase executions."
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_iron_law_violations_total[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_phases_total[5m]))
+    alerting:
+      name: SophiaIronLawViolations
+      annotations:
+        summary: "Iron Law violation spike"
+        description: "Iron Laws are non-rationalizable — investigate cause"
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }

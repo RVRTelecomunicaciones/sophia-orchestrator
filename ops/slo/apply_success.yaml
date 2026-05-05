@@ -1,0 +1,23 @@
+version: "prometheus/v1"
+service: sophia-orchestator
+labels:
+  team: platform
+  tier: t1
+slos:
+  - name: apply_phase_success
+    objective: 90.0
+    description: "Apply phase end-to-end success rate (groups + tasks complete)."
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_apply_groups_total{status="failed"}[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_apply_groups_total[5m]))
+    alerting:
+      name: SophiaApplySuccessRateLow
+      annotations:
+        summary: "Apply phase success rate below 90%"
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }

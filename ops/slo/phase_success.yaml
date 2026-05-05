@@ -1,0 +1,24 @@
+version: "prometheus/v1"
+service: sophia-orchestator
+labels:
+  team: platform
+  tier: t1
+slos:
+  - name: phase_execution_success
+    objective: 95.0   # 95% phase success (excluding awaiting_approval)
+    description: "Phase executions reach status=done across 30d."
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_phases_total{status=~"blocked|needs_context"}[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_phases_total[5m]))
+    alerting:
+      name: SophiaPhaseSuccessRateLow
+      annotations:
+        summary: "Phase success rate below 95%"
+        runbook: "https://runbooks.example.com/sophia/phase-success-rate"
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }

@@ -1,0 +1,24 @@
+version: "prometheus/v1"
+service: sophia-orchestator
+labels:
+  team: platform
+  tier: t2
+slos:
+  - name: spawn_governor_throttle_ratio
+    objective: 95.0
+    description: "<5% of dispatcher spawn attempts get throttled."
+    sli:
+      events:
+        error_query: |
+          sum(rate(sophia_orchestator_spawn_governor_throttled_total[5m]))
+        total_query: |
+          sum(rate(sophia_orchestator_dispatcher_calls_total[5m]))
+    alerting:
+      name: SophiaSpawnGovernorThrottling
+      annotations:
+        summary: "Spawn-governor throttling above threshold"
+        description: "Consider raising SOPHIA_SPAWN_MAX or investigate burst rate-limit ceiling"
+      page_alert:
+        labels: { severity: page }
+      ticket_alert:
+        labels: { severity: ticket }
