@@ -114,6 +114,24 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	events := eventstream.New(0, nil)
 	changeSvc := change.New(changeRepo, clock, idGen)
 	applySvc := apply.New(boardRepo)
+
+	// Apply-phase parallel coordination (spec § 5).
+	applyExecutor := apply.NewRun(apply.RunDeps{
+		BoardRepo:   boardRepo,
+		SessionRepo: sessionRepo,
+		Runtime:     rtClient,
+		Dispatcher:  dispatcher,
+		SpawnGov:    spawnGov,
+		Validator:   validator,
+		Prompts:     prompts,
+		Audit:       auditLog,
+		Events:      events,
+		Memory:      memClient,
+		Clock:       clock,
+		IDGen:       idGen,
+		Config:      apply.DefaultRunConfig(),
+	})
+
 	phaseSvc := phase.New(phase.Deps{
 		ChangeRepo:  changeRepo,
 		PhaseRepo:   phaseRepo,
@@ -129,8 +147,9 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Events:      events,
 		Clock:       clock,
 		IDGen:       idGen,
-		Scheduler:   phase.AsyncScheduler,
-		Config:      phase.DefaultServiceConfig(),
+		Scheduler:     phase.AsyncScheduler,
+		Config:        phase.DefaultServiceConfig(),
+		ApplyExecutor: applyExecutor,
 	})
 
 	// Inbound HTTP.

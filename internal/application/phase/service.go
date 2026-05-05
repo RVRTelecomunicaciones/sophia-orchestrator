@@ -86,6 +86,19 @@ type Deps struct {
 	IDGen       shared.IDGenerator
 	Scheduler   Scheduler
 	Config      ServiceConfig
+
+	// ApplyExecutor handles apply-phase coordination (parallel team-leads
+	// + implements + Iron Law #5 escalation). When non-nil and Phase.Type
+	// == apply, the Service delegates to it instead of running the
+	// single-agent flow. nil ⇒ apply phases run as single-agent (V1
+	// fallback).
+	ApplyExecutor ApplyExecutor
+}
+
+// ApplyExecutor is the contract phase.Service uses to delegate apply-phase
+// coordination. internal/application/apply.RunService implements it.
+type ApplyExecutor interface {
+	Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error)
 }
 
 // SpawnGovernor is the minimal contract from discipline.SpawnGovernor used
@@ -231,6 +244,14 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		return
 	}
 
+	// Apply phase delegates to the parallel coordination ApplyExecutor.
+	// Iron Laws + envelope persistence still happen here so the contract
+	// stays uniform across phase types.
+	if p.Type() == phase.PhaseApply && s.d.ApplyExecutor != nil {
+		s.runApplyPhase(ctx, c, p, in)
+		return
+	}
+
 	// Step 6: Iron Law pre-flight.
 	prior, err := s.loadPriorPhases(ctx, c.ID())
 	if err != nil {
@@ -346,6 +367,43 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 
 	// Step 15-16: audit + emit phase.completed.
+	cidLocal := c.ID()
+	pidLocal := p.ID()
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
+	s.publishEvent(p.ID(), eventTypeForStatus(p.Status()), map[string]any{
+		"envelope_status":     string(env.Status),
+		"envelope_confidence": env.Confidence,
+	})
+}
+
+// runApplyPhase delegates apply-phase coordination to the injected
+// ApplyExecutor (apply.RunService). Iron Law #1 (persisted-before-return),
+// Change.CurrentPhase advance, audit, and SSE event emission all stay in
+// phase.Service so the contract is uniform across phase types.
+func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) {
+	env, err := s.d.ApplyExecutor.Execute(ctx, c, p, in)
+	if err != nil && env == nil {
+		s.failPhase(ctx, p, fmt.Sprintf("apply executor: %v", err))
+		return
+	}
+	if env == nil {
+		s.failPhase(ctx, p, "apply executor returned nil envelope")
+		return
+	}
+
+	if err := p.Complete(env, s.d.Clock.Now()); err != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("phase complete: %v", err))
+		return
+	}
+	if err := s.d.PhaseRepo.Save(ctx, p); err != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("save phase: %v", err))
+		return
+	}
+
+	if p.Status() == phase.PhaseStatusDone {
+		s.advanceChange(ctx, c, p.Type())
+	}
+
 	cidLocal := c.ID()
 	pidLocal := p.ID()
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
