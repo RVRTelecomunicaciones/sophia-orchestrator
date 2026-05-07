@@ -235,7 +235,7 @@ func TestSSE_StreamReceivesEvents(t *testing.T) {
 
 	// Subscribe in a goroutine via HTTP.
 	req, _ := http.NewRequest("GET",
-		srv.URL+"/api/v1/changes/01ARZ3NDEKTSV4RRFFQ69G5C01/phases/01ARZ3NDEKTSV4RRFFQ69G5P01/events",
+		srv.URL+"/api/v1/phases/01ARZ3NDEKTSV4RRFFQ69G5P01/events",
 		nil)
 	req.Header.Set("X-Sophia-API-Key", "valid")
 	req.Header.Set("Accept", "text/event-stream")
