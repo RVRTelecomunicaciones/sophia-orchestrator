@@ -451,7 +451,7 @@ func TestRun_HappyPath_PersistsAndCompletes(t *testing.T) {
 	require.Contains(t, h.audit.eventTypes(), "phase.completed")
 	require.Contains(t, h.events.types(), "phase.started")
 	require.Contains(t, h.events.types(), "governance.decision")
-	require.Contains(t, h.events.types(), "agent.spawned")
+	require.Contains(t, h.events.types(), "agent.dispatched")
 	require.Contains(t, h.events.types(), "agent.envelope.received")
 	require.Contains(t, h.events.types(), "phase.completed")
 
@@ -537,7 +537,7 @@ func TestRun_GovernanceRequireApproval_PausesPhase(t *testing.T) {
 	require.NoError(t, err)
 	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
 	require.Equal(t, phase.PhaseStatusRunning, stored.Status())
-	require.Contains(t, h.events.types(), "phase.awaiting_approval")
+	require.Contains(t, h.events.types(), "approval.required")
 }
 
 func TestRun_DispatcherErrorFailsPhase(t *testing.T) {
@@ -761,7 +761,7 @@ func TestReject_HappyPath(t *testing.T) {
 
 	stored, _ := h.phaseRepo.FindByID(context.Background(), pid)
 	require.Equal(t, phase.PhaseStatusBlocked, stored.Status())
-	require.Contains(t, h.events.types(), "phase.rejected")
+	require.Contains(t, h.events.types(), "approval.resolved")
 }
 
 func TestApprove_HappyPath(t *testing.T) {
@@ -774,7 +774,7 @@ func TestApprove_HappyPath(t *testing.T) {
 	_ = h.phaseRepo.Save(context.Background(), p)
 
 	require.NoError(t, h.svc.Approve(context.Background(), pid, "alice", "ok"))
-	require.Contains(t, h.events.types(), "phase.approved")
+	require.Contains(t, h.events.types(), "approval.resolved")
 }
 
 func TestRun_FallbackToMemoryWhenEnvelopeEmpty(t *testing.T) {

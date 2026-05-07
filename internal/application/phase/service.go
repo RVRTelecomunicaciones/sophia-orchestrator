@@ -21,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
+
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
@@ -194,11 +196,13 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 	}
 	s.recordPhaseStarted(p)
 
-	// Audit + event: phase.started.
+	// Audit + event: phase.started (sophia-wire-v1 §5.3).
 	s.appendAudit(ctx, &in.ChangeID, &pid, nil, "phase.started", nil)
-	s.publishEvent(p.ID(), "phase.started", map[string]any{
+	s.publishEvent(p.ID(), contract.EventPhaseStarted, map[string]any{
+		"phase_id":   p.ID().String(),
 		"phase_type": string(in.PhaseType),
 		"change_id":  in.ChangeID.String(),
+		"started_at": s.d.Clock.Now().UTC(),
 	})
 
 	// Step 9: Schedule async work (steps 10-16).
@@ -242,11 +246,16 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		return
 	case outbound.DecisionRequireApproval:
 		// V1: pause. Caller must call Approve to resume; the phase row stays
-		// at running (Resume will continue from here). We emit an event and
-		// stop the goroutine.
-		s.publishEvent(p.ID(), "phase.awaiting_approval", map[string]any{
-			"approval_url": s.approvalURL(decision),
-		})
+		// at running (Resume will continue from here). Per sophia-wire-v1
+		// §5.3 + §8 (approval flow): emit `approval.required` with phase_id,
+		// gate_url, reason, plus risk/policy when the governance decision
+		// surfaces them (Optional per Phase 1.5 amendment).
+		approvalPayload := map[string]any{
+			"phase_id": p.ID().String(),
+			"gate_url": s.approvalURL(decision),
+			"reason":   decision.Reason,
+		}
+		s.publishEvent(p.ID(), contract.EventApprovalRequired, approvalPayload)
 		return
 	}
 
@@ -311,7 +320,8 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("save session: %v", err))
 		return
 	}
-	s.publishEvent(p.ID(), "agent.spawned", map[string]any{
+	s.publishEvent(p.ID(), contract.EventAgentDispatched, map[string]any{
+		"phase_id":   p.ID().String(),
 		"session_id": sid.String(),
 		"role":       string(roleFor(p.Type())),
 		"provider":   string(s.d.Dispatcher.Provider()),
@@ -479,7 +489,15 @@ func (s *Service) Approve(ctx context.Context, id ids.PhaseID, approver, reason 
 	s.appendAudit(ctx, nil, &id, nil, "phase.approved", map[string]any{
 		"approver": approver, "reason": reason,
 	})
-	s.publishEvent(id, "phase.approved", map[string]any{"approver": approver})
+	// sophia-wire-v1 §5.3 + §8: collapse approve/reject into a single
+	// `approval.resolved` event tagged with `decision`.
+	s.publishEvent(id, contract.EventApprovalResolved, map[string]any{
+		"phase_id":   id.String(),
+		"decision":   contract.DecisionApproved,
+		"approver":   approver,
+		"reason":     reason,
+		"decided_at": s.d.Clock.Now().UTC(),
+	})
 	return nil
 }
 
@@ -521,7 +539,15 @@ func (s *Service) Reject(ctx context.Context, id ids.PhaseID, approver, reason s
 	s.appendAudit(ctx, nil, &id, nil, "phase.rejected", map[string]any{
 		"approver": approver, "reason": reason,
 	})
-	s.publishEvent(id, "phase.rejected", map[string]any{"approver": approver, "reason": reason})
+	// Symmetric to Approve: single `approval.resolved` event with
+	// decision="rejected".
+	s.publishEvent(id, contract.EventApprovalResolved, map[string]any{
+		"phase_id":   id.String(),
+		"decision":   contract.DecisionRejected,
+		"approver":   approver,
+		"reason":     reason,
+		"decided_at": s.d.Clock.Now().UTC(),
+	})
 	return nil
 }
 

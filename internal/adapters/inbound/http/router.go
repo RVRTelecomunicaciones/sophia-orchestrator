@@ -11,6 +11,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/handlers"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 )
@@ -25,6 +26,9 @@ type Deps struct {
 	Logger    *slog.Logger
 	StartedAt time.Time
 	Ready     func() error
+	// IDGen mints ULIDs for SSE event IDs (sophia-wire-v1 §5.1).
+	// MUST be non-nil in production; tests may pass FixedIDGenerator.
+	IDGen shared.IDGenerator
 
 	// AllowAnonLocalhost: when true, the auth middleware permits requests
 	// without X-Sophia-API-Key. Bootstrap MUST only set this true when
@@ -73,7 +77,7 @@ func NewRouter(d Deps) chi.Router {
 		ch := handlers.NewChangesHandler(d.Changes, writeError, writeJSON)
 		ph := handlers.NewPhasesHandler(d.Phases, writeError, writeJSON)
 		ap := handlers.NewApplyHandler(d.Apply, writeError, writeJSON)
-		sh := handlers.NewSSEHandler(d.Events, 5*time.Second, writeError)
+		sh := handlers.NewSSEHandler(d.Events, 5*time.Second, writeError, d.IDGen)
 
 		// Change-scoped: create, list, get, abort, plus phase creation
 		// (phase doesn't yet exist when /run is invoked, so the parent

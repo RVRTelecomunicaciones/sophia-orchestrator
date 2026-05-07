@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
 )
 
 // splitHostPort and parseIP wrap stdlib calls so the rest of the package
@@ -66,9 +68,9 @@ func APIKey(authn Authenticator) func(next http.Handler) http.Handler {
 func APIKeyWithAnonOption(authn Authenticator, allowAnon bool) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key := strings.TrimSpace(r.Header.Get("X-Sophia-API-Key"))
+			key := strings.TrimSpace(r.Header.Get(contract.HeaderAPIKey))
 			if key == "" {
-				key = strings.TrimSpace(r.Header.Get("X-API-Key"))
+				key = strings.TrimSpace(r.Header.Get(contract.HeaderAPIKeyLegacy))
 			}
 			if key == "" {
 				if allowAnon {
@@ -128,7 +130,7 @@ func IsLoopbackAddr(addr string) bool {
 func writeUnauthorized(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	body := `{"code":"unauthorized","error":"` + jsonEscape(msg) + `"}`
+	body := `{"code":"` + contract.CodeUnauthorized + `","error":"` + jsonEscape(msg) + `"}`
 	_, _ = w.Write([]byte(body))
 }
 

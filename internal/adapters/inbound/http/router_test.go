@@ -17,6 +17,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 	"github.com/stretchr/testify/require"
@@ -133,6 +134,16 @@ func defaultDeps() httpinbound.Deps {
 		Auth:      &fakeAuthn{},
 		StartedAt: time.Now(),
 		Ready:     func() error { return nil },
+		IDGen: shared.FixedIDGenerator([]string{
+			"01ARZ3NDEKTSV4RRFFQ69G5EV1",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV2",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV3",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV4",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV5",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV6",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV7",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV8",
+		}),
 	}
 }
 
