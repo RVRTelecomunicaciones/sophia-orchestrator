@@ -74,10 +74,17 @@ func NewRouter(d Deps) chi.Router {
 			r.Use(middleware.APIKeyWithAnonOption(d.Auth, d.AllowAnonLocalhost))
 		}
 
-		ch := handlers.NewChangesHandler(d.Changes, writeError, writeJSON)
-		ph := handlers.NewPhasesHandler(d.Phases, writeError, writeJSON)
-		ap := handlers.NewApplyHandler(d.Apply, writeError, writeJSON)
-		sh := handlers.NewSSEHandler(d.Events, 5*time.Second, writeError, d.IDGen)
+		// Resource-scoped error writers so 404s pick the correct
+		// contract code (sophia-wire-v1 §9.2: change_not_found vs
+		// phase_not_found). Other errors fall through to the generic
+		// mapping.
+		writeChangeErr := func(w http.ResponseWriter, err error) { writeErrorResource(w, err, "change") }
+		writePhaseErr := func(w http.ResponseWriter, err error) { writeErrorResource(w, err, "phase") }
+
+		ch := handlers.NewChangesHandler(d.Changes, writeChangeErr, writeJSON)
+		ph := handlers.NewPhasesHandler(d.Phases, writePhaseErr, writeJSON)
+		ap := handlers.NewApplyHandler(d.Apply, writePhaseErr, writeJSON)
+		sh := handlers.NewSSEHandler(d.Events, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen)
 
 		// Change-scoped: create, list, get, abort, plus phase creation
 		// (phase doesn't yet exist when /run is invoked, so the parent

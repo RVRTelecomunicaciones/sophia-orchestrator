@@ -229,6 +229,17 @@ func (a *fakeAudit) Append(_ context.Context, e outbound.AuditEvent) error {
 	return nil
 }
 
+func (a *fakeAudit) HasEventForPhase(_ context.Context, phaseID ids.PhaseID, eventType string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.events {
+		if e.EventType == eventType && e.PhaseID != nil && *e.PhaseID == phaseID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 type fakeEvents struct {
 	mu     sync.Mutex
 	events []inbound.Event

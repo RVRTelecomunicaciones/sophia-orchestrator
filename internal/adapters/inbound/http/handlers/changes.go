@@ -91,6 +91,12 @@ func (h *ChangesHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, toChangeDTO(c))
 }
 
+// MaxListLimit caps the `limit` query parameter for paginated GETs.
+// sophia-wire-v1 §9.2: requests above this MUST receive 400 +
+// limit_too_large. Hard-coded for v0.2.0; v0.3.0 may surface this via
+// configuration for tenant-specific tuning.
+const MaxListLimit = 100
+
 // List handles GET /api/v1/changes.
 func (h *ChangesHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -98,6 +104,17 @@ func (h *ChangesHandler) List(w http.ResponseWriter, r *http.Request) {
 	status := q.Get("status")
 	limit := atoiDefault(q.Get("limit"), 50)
 	offset := atoiDefault(q.Get("offset"), 0)
+	if limit > MaxListLimit {
+		h.writeJSON(w, http.StatusBadRequest, map[string]any{
+			"code":  "limit_too_large",
+			"error": "limit exceeds maximum allowed",
+			"details": map[string]any{
+				"limit":     limit,
+				"max_limit": MaxListLimit,
+			},
+		})
+		return
+	}
 	cs, err := h.svc.List(r.Context(), project, status, limit, offset)
 	if err != nil {
 		h.writeErr(w, err)

@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -11,9 +13,19 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+	domainphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
+
+// PhaseLookup is the narrow read-only port the SSE handler needs to
+// short-circuit on terminal phases (sophia-wire-v1 §9.2:
+// phase_terminal_no_events). Production wires inbound.PhaseService;
+// tests pass a fake.
+type PhaseLookup interface {
+	Get(ctx context.Context, id ids.PhaseID) (*domainphase.Phase, error)
+}
 
 // SSEHandler streams phase events to clients per sophia-wire-v1 §5.
 // Sends `event: heartbeat` every HeartbeatInterval to keep proxies alive
@@ -24,19 +36,29 @@ import (
 // (§4.3) without timestamp collisions.
 type SSEHandler struct {
 	stream    inbound.EventStream
+	phases    PhaseLookup
 	heartbeat time.Duration
 	writeErr  func(http.ResponseWriter, error)
+	writeJSON func(http.ResponseWriter, int, any)
 	idGen     shared.IDGenerator
 }
 
 // NewSSEHandler constructs an SSEHandler. heartbeat ≤ 0 defaults to 5s.
 // idGen MUST be a working ULID generator (NewSystemIDGenerator in
-// production, FixedIDGenerator in tests).
-func NewSSEHandler(stream inbound.EventStream, heartbeat time.Duration, writeErr func(http.ResponseWriter, error), idGen shared.IDGenerator) *SSEHandler {
+// production, FixedIDGenerator in tests). phases MUST be a working
+// PhaseService for the terminal-phase short-circuit.
+func NewSSEHandler(stream inbound.EventStream, phases PhaseLookup, heartbeat time.Duration, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any), idGen shared.IDGenerator) *SSEHandler {
 	if heartbeat <= 0 {
 		heartbeat = 5 * time.Second
 	}
-	return &SSEHandler{stream: stream, heartbeat: heartbeat, writeErr: writeErr, idGen: idGen}
+	return &SSEHandler{
+		stream:    stream,
+		phases:    phases,
+		heartbeat: heartbeat,
+		writeErr:  writeErr,
+		writeJSON: writeJSON,
+		idGen:     idGen,
+	}
 }
 
 // Stream handles GET /api/v1/phases/{phase_id}/events.
@@ -45,6 +67,34 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeErr(w, err)
 		return
+	}
+
+	// sophia-wire-v1 §9.2: clients attaching to a phase that is already
+	// terminal MUST receive 410 + phase_terminal_no_events so they fall
+	// back to the snapshot endpoint (GET /api/v1/phases/{id}).
+	if h.phases != nil {
+		p, perr := h.phases.Get(r.Context(), phaseID)
+		switch {
+		case errors.Is(perr, outbound.ErrNotFound):
+			h.writeJSON(w, http.StatusNotFound, contract.ErrorResponse{
+				Code:  contract.CodePhaseNotFound,
+				Error: "phase not found",
+			})
+			return
+		case perr != nil:
+			h.writeErr(w, perr)
+			return
+		case p.Status().IsTerminal():
+			h.writeJSON(w, http.StatusGone, contract.ErrorResponse{
+				Code:  contract.CodePhaseTerminalNoEvents,
+				Error: "phase is terminal; no further events will be emitted",
+				Details: map[string]any{
+					"phase_id": phaseID.String(),
+					"status":   string(p.Status()),
+				},
+			})
+			return
+		}
 	}
 
 	flusher, ok := w.(http.Flusher)

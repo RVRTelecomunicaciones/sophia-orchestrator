@@ -37,9 +37,12 @@ import (
 
 // Sentinel errors raised by the Phase service.
 var (
-	ErrInvalidTransition = errors.New("phase service: invalid phase transition")
-	ErrPhaseRunning      = errors.New("phase service: another phase already running for this change")
-	ErrAlreadyTerminal   = errors.New("phase service: phase already terminal")
+	ErrInvalidTransition  = errors.New("phase service: invalid phase transition")
+	ErrPhaseRunning       = errors.New("phase service: another phase already running for this change")
+	ErrAlreadyTerminal    = errors.New("phase service: phase already terminal")
+	ErrApproverRequired   = errors.New("phase service: approver field is required")
+	ErrPhaseNotGated      = errors.New("phase service: phase is not awaiting approval")
+	ErrGateAlreadyDecided = errors.New("phase service: approval gate has already been decided")
 )
 
 // Scheduler runs work asynchronously. Inject AsyncScheduler in production
@@ -384,14 +387,24 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.advanceChange(ctx, c, p.Type())
 	}
 
-	// Step 15-16: audit + emit phase.completed.
+	// Step 15-16: audit + emit terminal lifecycle event per
+	// sophia-wire-v1 §5.3. Payload carries phase_id + phase_type +
+	// ended_at + confidence per the spec; envelope_status is
+	// retained as a Forward-compat extra field (clients ignore unknown
+	// fields per §10).
 	cidLocal := c.ID()
 	pidLocal := p.ID()
-	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
-	s.publishEvent(p.ID(), eventTypeForStatus(p.Status()), map[string]any{
+	eventType := eventTypeForStatus(p.Status())
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventType, env)
+	payload := map[string]any{
+		"phase_id":            p.ID().String(),
+		"phase_type":          string(p.Type()),
+		"ended_at":            s.d.Clock.Now().UTC(),
+		"confidence":          env.Confidence,
 		"envelope_status":     string(env.Status),
 		"envelope_confidence": env.Confidence,
-	})
+	}
+	s.publishEvent(p.ID(), eventType, payload)
 }
 
 // runApplyPhase delegates apply-phase coordination to the injected
@@ -479,6 +492,9 @@ func (s *Service) Resume(ctx context.Context, id ids.PhaseID) (*inbound.RunPhase
 // NOT auto-resume the dispatch — the caller must invoke Resume separately.
 // V1.1 may collapse Approve+Resume into one step.
 func (s *Service) Approve(ctx context.Context, id ids.PhaseID, approver, reason string) error {
+	if approver == "" {
+		return ErrApproverRequired
+	}
 	p, err := s.d.PhaseRepo.FindByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("find phase: %w", err)
@@ -486,11 +502,17 @@ func (s *Service) Approve(ctx context.Context, id ids.PhaseID, approver, reason 
 	if p.Status().IsTerminal() {
 		return fmt.Errorf("%w: %s", ErrAlreadyTerminal, p.Status())
 	}
-	s.appendAudit(ctx, nil, &id, nil, "phase.approved", map[string]any{
-		"approver": approver, "reason": reason,
+	if err := s.checkGateState(ctx, id); err != nil {
+		return err
+	}
+	// sophia-wire-v1 §5.3 + §8: audit + SSE event share the
+	// approval.resolved name so the audit log is the single source of
+	// truth for gate-state checks (gate_already_decided).
+	s.appendAudit(ctx, nil, &id, nil, contract.EventApprovalResolved, map[string]any{
+		"decision": contract.DecisionApproved,
+		"approver": approver,
+		"reason":   reason,
 	})
-	// sophia-wire-v1 §5.3 + §8: collapse approve/reject into a single
-	// `approval.resolved` event tagged with `decision`.
 	s.publishEvent(id, contract.EventApprovalResolved, map[string]any{
 		"phase_id":   id.String(),
 		"decision":   contract.DecisionApproved,
@@ -504,12 +526,18 @@ func (s *Service) Approve(ctx context.Context, id ids.PhaseID, approver, reason 
 // Reject marks a phase as BLOCKED via a synthetic envelope, persists it,
 // and emits phase.rejected.
 func (s *Service) Reject(ctx context.Context, id ids.PhaseID, approver, reason string) error {
+	if approver == "" {
+		return ErrApproverRequired
+	}
 	p, err := s.d.PhaseRepo.FindByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("find phase: %w", err)
 	}
 	if p.Status().IsTerminal() {
 		return fmt.Errorf("%w: %s", ErrAlreadyTerminal, p.Status())
+	}
+	if err := s.checkGateState(ctx, id); err != nil {
+		return err
 	}
 	c, err := s.d.ChangeRepo.FindByID(ctx, p.ChangeID())
 	if err != nil {
@@ -536,8 +564,10 @@ func (s *Service) Reject(ctx context.Context, id ids.PhaseID, approver, reason s
 	if err := s.d.PhaseRepo.Save(ctx, p); err != nil {
 		return fmt.Errorf("save phase: %w", err)
 	}
-	s.appendAudit(ctx, nil, &id, nil, "phase.rejected", map[string]any{
-		"approver": approver, "reason": reason,
+	s.appendAudit(ctx, nil, &id, nil, contract.EventApprovalResolved, map[string]any{
+		"decision": contract.DecisionRejected,
+		"approver": approver,
+		"reason":   reason,
 	})
 	// Symmetric to Approve: single `approval.resolved` event with
 	// decision="rejected".
@@ -581,8 +611,15 @@ func (s *Service) failPhase(ctx context.Context, p *phase.Phase, reason string) 
 	}
 	pidLocal := p.ID()
 	cidLocal := c.ID()
-	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.failed", map[string]any{"reason": reason})
-	s.publishEvent(p.ID(), "phase.failed", map[string]any{"reason": reason})
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, contract.EventPhaseFailed, map[string]any{"reason": reason})
+	// sophia-wire-v1 §5.3: phase.failed payload carries phase_id +
+	// phase_type + ended_at + error.
+	s.publishEvent(p.ID(), contract.EventPhaseFailed, map[string]any{
+		"phase_id":   p.ID().String(),
+		"phase_type": string(p.Type()),
+		"ended_at":   s.d.Clock.Now().UTC(),
+		"error":      reason,
+	})
 }
 
 func (s *Service) loadPriorPhases(ctx context.Context, changeID ids.ChangeID) (map[phase.PhaseType]discipline.PhasePredicate, error) {
@@ -650,6 +687,31 @@ func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed
 			_ = s.d.ChangeRepo.Save(ctx, c)
 		}
 	}
+}
+
+// checkGateState enforces sophia-wire-v1 §9.2 codes phase_not_gated /
+// gate_already_decided. The audit log is the source of truth: a phase is
+// "gated" iff at least one approval.required event has been recorded for
+// it; the gate is "already decided" iff at least one approval.resolved
+// event has been recorded. Audit-log query failures are NOT silently
+// swallowed — they surface as errors so the handler returns 500 rather
+// than a misleading 409.
+func (s *Service) checkGateState(ctx context.Context, id ids.PhaseID) error {
+	gated, err := s.d.Audit.HasEventForPhase(ctx, id, contract.EventApprovalRequired)
+	if err != nil {
+		return fmt.Errorf("audit lookup approval.required: %w", err)
+	}
+	if !gated {
+		return ErrPhaseNotGated
+	}
+	decided, err := s.d.Audit.HasEventForPhase(ctx, id, contract.EventApprovalResolved)
+	if err != nil {
+		return fmt.Errorf("audit lookup approval.resolved: %w", err)
+	}
+	if decided {
+		return ErrGateAlreadyDecided
+	}
+	return nil
 }
 
 func (s *Service) appendAudit(ctx context.Context, cid *ids.ChangeID, pid *ids.PhaseID, sid *ids.SessionID, eventType string, payload any) {
@@ -728,15 +790,15 @@ func actionForPhase(pt phase.PhaseType) discipline.Action {
 func eventTypeForStatus(s phase.PhaseStatus) string {
 	switch s {
 	case phase.PhaseStatusDone:
-		return "phase.completed"
+		return contract.EventPhaseCompleted
 	case phase.PhaseStatusDoneWithConcerns:
-		return "phase.completed_with_concerns"
+		return contract.EventPhaseCompletedWithConcerns
 	case phase.PhaseStatusBlocked:
-		return "phase.failed"
+		return contract.EventPhaseFailed
 	case phase.PhaseStatusNeedsContext:
-		return "phase.needs_context"
+		return contract.EventPhaseNeedsContext
 	default:
-		return "phase.completed"
+		return contract.EventPhaseCompleted
 	}
 }
 

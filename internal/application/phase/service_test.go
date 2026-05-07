@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
+
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	appphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
 	domainchange "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
@@ -268,6 +270,17 @@ func (a *fakeAudit) eventTypes() []string {
 		out = append(out, e.EventType)
 	}
 	return out
+}
+
+func (a *fakeAudit) HasEventForPhase(_ context.Context, phaseID ids.PhaseID, eventType string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.events {
+		if e.EventType == eventType && e.PhaseID != nil && *e.PhaseID == phaseID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type fakeEvents struct {
@@ -748,6 +761,20 @@ var _ = worktree.New
 
 // --- additional coverage tests ---
 
+// seedApprovalGate primes the audit log with an approval.required event
+// for the given phase so Approve/Reject see the phase as gated. Production
+// emits this event from the dispatch path when governance returns
+// require_approval; tests bypass that path.
+func seedApprovalGate(t *testing.T, h *harness, phaseID ids.PhaseID) {
+	t.Helper()
+	pid := phaseID
+	require.NoError(t, h.audit.Append(context.Background(), outbound.AuditEvent{
+		PhaseID:    &pid,
+		EventType:  contract.EventApprovalRequired,
+		OccurredAt: time.Now(),
+	}))
+}
+
 func TestReject_HappyPath(t *testing.T) {
 	h := newHarness(t)
 	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
@@ -756,6 +783,7 @@ func TestReject_HappyPath(t *testing.T) {
 	_ = p.Start(time.Now())
 	_ = p.MarkInterrupted()
 	_ = h.phaseRepo.Save(context.Background(), p)
+	seedApprovalGate(t, h, pid)
 
 	require.NoError(t, h.svc.Reject(context.Background(), pid, "alice", "bad spec"))
 
@@ -772,9 +800,154 @@ func TestApprove_HappyPath(t *testing.T) {
 	_ = p.Start(time.Now())
 	_ = p.MarkInterrupted()
 	_ = h.phaseRepo.Save(context.Background(), p)
+	seedApprovalGate(t, h, pid)
 
 	require.NoError(t, h.svc.Approve(context.Background(), pid, "alice", "ok"))
 	require.Contains(t, h.events.types(), "approval.resolved")
+}
+
+// --- Phase 3.8: required error code coverage (sophia-wire-v1 §9.2) ---
+
+func TestApprove_ApproverRequired(t *testing.T) {
+	h := newHarness(t)
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5INT")
+	err := h.svc.Approve(context.Background(), pid, "", "missing approver")
+	require.ErrorIs(t, err, appphase.ErrApproverRequired)
+}
+
+func TestReject_ApproverRequired(t *testing.T) {
+	h := newHarness(t)
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5INT")
+	err := h.svc.Reject(context.Background(), pid, "", "missing approver")
+	require.ErrorIs(t, err, appphase.ErrApproverRequired)
+}
+
+func TestApprove_PhaseNotGated(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5INT")
+	p, _ := phase.New(pid, cid, phase.PhaseSpec, 3)
+	_ = p.Start(time.Now())
+	_ = p.MarkInterrupted()
+	_ = h.phaseRepo.Save(context.Background(), p)
+	// No seedApprovalGate — phase has never been gated.
+	err := h.svc.Approve(context.Background(), pid, "alice", "ok")
+	require.ErrorIs(t, err, appphase.ErrPhaseNotGated)
+}
+
+func TestReject_PhaseNotGated(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5INT")
+	p, _ := phase.New(pid, cid, phase.PhaseSpec, 3)
+	_ = p.Start(time.Now())
+	_ = p.MarkInterrupted()
+	_ = h.phaseRepo.Save(context.Background(), p)
+	err := h.svc.Reject(context.Background(), pid, "alice", "no")
+	require.ErrorIs(t, err, appphase.ErrPhaseNotGated)
+}
+
+func TestApprove_GateAlreadyDecided(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5INT")
+	p, _ := phase.New(pid, cid, phase.PhaseSpec, 3)
+	_ = p.Start(time.Now())
+	_ = p.MarkInterrupted()
+	_ = h.phaseRepo.Save(context.Background(), p)
+	seedApprovalGate(t, h, pid)
+	require.NoError(t, h.svc.Approve(context.Background(), pid, "alice", "ok"))
+
+	// Second approval call → gate already decided.
+	err := h.svc.Approve(context.Background(), pid, "alice", "again")
+	require.ErrorIs(t, err, appphase.ErrGateAlreadyDecided)
+}
+
+func TestReject_GateAlreadyDecided(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5INT")
+	p, _ := phase.New(pid, cid, phase.PhaseSpec, 3)
+	_ = p.Start(time.Now())
+	_ = p.MarkInterrupted()
+	_ = h.phaseRepo.Save(context.Background(), p)
+	seedApprovalGate(t, h, pid)
+	require.NoError(t, h.svc.Approve(context.Background(), pid, "alice", "ok"))
+
+	// Now Reject → gate already decided (Approve resolved it first).
+	err := h.svc.Reject(context.Background(), pid, "bob", "second guessing")
+	require.ErrorIs(t, err, appphase.ErrGateAlreadyDecided)
+}
+
+// --- Phase 3.8: lifecycle event payload assertions (sophia-wire-v1 §5.3) ---
+
+func TestRun_PhaseStartedPayloadShape(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	// Find the phase.started event and assert required fields.
+	var started inbound.Event
+	for _, ev := range h.events.published {
+		if ev.Type == contract.EventPhaseStarted {
+			started = ev
+			break
+		}
+	}
+	require.Equal(t, contract.EventPhaseStarted, started.Type, "phase.started event must be published")
+	payload := started.Payload
+	require.NotNil(t, payload, "phase.started payload must not be nil")
+	require.Equal(t, out.PhaseID.String(), payload["phase_id"])
+	require.Equal(t, string(phase.PhaseSpec), payload["phase_type"])
+	require.Equal(t, cid.String(), payload["change_id"])
+	require.NotNil(t, payload["started_at"], "phase.started must include started_at")
+}
+
+func TestRun_PhaseCompletedPayloadShape(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	var completed inbound.Event
+	for _, ev := range h.events.published {
+		if ev.Type == contract.EventPhaseCompleted {
+			completed = ev
+		}
+	}
+	require.Equal(t, contract.EventPhaseCompleted, completed.Type, "phase.completed event must be published")
+	payload := completed.Payload
+	require.NotNil(t, payload)
+	require.Equal(t, out.PhaseID.String(), payload["phase_id"])
+	require.Equal(t, string(phase.PhaseSpec), payload["phase_type"])
+	require.NotNil(t, payload["ended_at"], "phase.completed must include ended_at")
+	require.NotNil(t, payload["confidence"], "phase.completed must include confidence")
+}
+
+func TestRun_PhaseFailedPayloadShape(t *testing.T) {
+	h := newHarness(t)
+	// Force dispatch failure → failPhase → phase.failed.
+	h.dispatcher.err = errors.New("dispatch boom")
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, _ := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	var failed inbound.Event
+	for _, ev := range h.events.published {
+		if ev.Type == contract.EventPhaseFailed {
+			failed = ev
+		}
+	}
+	require.Equal(t, contract.EventPhaseFailed, failed.Type, "phase.failed event must be published")
+	payload := failed.Payload
+	require.NotNil(t, payload)
+	require.Equal(t, out.PhaseID.String(), payload["phase_id"])
+	require.Equal(t, string(phase.PhaseSpec), payload["phase_type"])
+	require.NotNil(t, payload["ended_at"])
+	require.NotNil(t, payload["error"])
 }
 
 func TestRun_FallbackToMemoryWhenEnvelopeEmpty(t *testing.T) {
