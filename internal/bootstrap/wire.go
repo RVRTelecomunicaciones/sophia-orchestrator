@@ -179,16 +179,30 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 
 	// Inbound HTTP.
 	auth := newStaticAuthn(cfg.HTTP.APIKey, cfg.HTTP.APIKeyProject)
+
+	// AllowAnonLocalhost is the EFFECTIVE composition of (config flag
+	// AND listener-bound-to-loopback) per sophia-wire-v1 §3.2 / D-M10-02.
+	// If the operator sets the flag but binds to a non-loopback
+	// interface, the flag is silently downgraded to false; this avoids
+	// accidentally exposing an unauthenticated endpoint on a routable
+	// IP. A warning is logged when downgrading happens.
+	effectiveAllowAnon := cfg.HTTP.AllowAnonLocalhost && middleware.IsLoopbackAddr(cfg.HTTP.Addr)
+	if cfg.HTTP.AllowAnonLocalhost && !effectiveAllowAnon {
+		logger.Warn("AllowAnonLocalhost requested but listener is not loopback-bound; auth required for all requests",
+			slog.String("addr", cfg.HTTP.Addr))
+	}
+
 	routerDeps := httpinbound.Deps{
-		Changes:   changeSvc,
-		Phases:    phaseSvc,
-		Apply:     applySvc,
-		Events:    events,
-		Auth:      auth,
-		Logger:    logger,
-		StartedAt: time.Now(),
-		Ready:     readinessFor(pool),
-		Metrics:   metrics,
+		Changes:            changeSvc,
+		Phases:             phaseSvc,
+		Apply:              applySvc,
+		Events:             events,
+		Auth:               auth,
+		Logger:             logger,
+		StartedAt:          time.Now(),
+		Ready:              readinessFor(pool),
+		Metrics:            metrics,
+		AllowAnonLocalhost: effectiveAllowAnon,
 	}
 	if tracer.Enabled() {
 		routerDeps.Tracer = tracer.Tracer("sophia-orchestator/http")
