@@ -413,13 +413,47 @@ MUST skip unknown event types (forward-compat).
 | `task.failed` | optional | `{ "task_id", "ended_at", "error" }` | apply-phase task fail-terminal |
 | `agent.dispatched` | optional | `{ "agent_id", "task_id", "model" }` | apply-phase agent dispatch |
 | `agent.completed` | optional | `{ "agent_id", "ended_at" }` | apply-phase agent done |
-| `approval.required` | required | `{ "phase_id", "gate_url", "reason", "risk", "policy" }` | governance gate trigger |
+| `approval.required` | required | `{ "phase_id", "gate_url", "reason", "risk?", "policy?" }` | governance gate trigger |
 | `approval.resolved` | required | `{ "phase_id", "decision", "approver", "reason?", "decided_at" }` | gate decision (any channel) |
+| `open` | optional | `{ "phase_id" }` | server emits at SSE stream open as a connection-live signal; clients MAY use it for fast reconnect detection. Skipping is safe. |
+| `phase.completed_with_concerns` | optional (orch-internal extension) | `{ "phase_id", "phase_type", "ended_at", "confidence", "concerns" }` | orchestrator emits when a phase finishes successfully but Iron Law / governance flagged advisory concerns. Clients MAY surface as a yellow timeline marker; skipping is safe. |
+| `phase.needs_context` | optional (orch-internal extension) | `{ "phase_id", "phase_type", "missing": [string] }` | orchestrator emits when a phase requires additional context to proceed. Clients MAY surface a hint; skipping is safe. |
+| `agent.envelope.received` | optional (orch-internal extension) | `{ "agent_id", "phase_id", "envelope_hash" }` | orchestrator emits when a dispatched agent returns its envelope. Diagnostic signal; clients MAY ignore. |
+| `apply.board.created` / `apply.group.completed` / `apply.group.failed` / `apply.board.save_failed` / `apply.worktree.error` | optional (apply-phase diagnostic events) | `{ phase-specific fields }` | apply-phase coordination diagnostics. Clients MAY surface as additional ApplyBoard signal but MUST tolerate absence + must NOT exit on these alone. The CLI's M7 ApplyBoard view does NOT depend on these. |
 
 `phase_id` in the payload of every phase-bound event MUST equal the
 `phase_id` in the URL of the GET that opened the stream. Cross-phase
 events MUST NOT appear on a per-phase stream (the multiplexer in 5.4
 relies on this invariant).
+
+**Note on `risk` and `policy` in `approval.required`** (Phase 1.5
+amendment, 2026-05-07): these were originally specified as required
+fields. The audit (`docs/specs/contract-readiness-audit.md` §2.2)
+revealed that the orchestrator's governance contract does NOT
+currently surface these fields, and forcing them into the wire
+required either (a) a governance contract change (out of M10 scope)
+or (b) downgrading them to Optional. v1 takes path (b). Servers MAY
+emit them when the underlying governance decision carries the data;
+clients MUST tolerate their absence. v0.3.0 may promote them back to
+required once the governance contract evolves.
+
+**Note on Optional / orch-internal extension events** (Phase 1.5
+amendment, 2026-05-07): the events tagged "orch-internal extension"
+above (`phase.completed_with_concerns`, `phase.needs_context`,
+`agent.envelope.received`) and the `apply.*` diagnostic family exist
+in the orchestrator's emission surface today. They are documented
+here so that:
+1. CLI implementers can decide whether to consume them (Optional
+   per the compatibility matrix) without "unknown event type" log
+   noise.
+2. The wire spec is honest about the orchestrator's full output —
+   clients of the spec see what they may receive.
+3. Future spec versions can promote them to required without breaking
+   v1 clients (forward-compat per §10).
+
+The CLI v0.2.0 marks all of them Optional in its compatibility
+matrix; absence MUST NOT cause exit non-zero, and presence MUST NOT
+cause unrecognized-event log noise.
 
 ### 5.4 Phase-stream multiplexer protocol (D-M10-05)
 
@@ -712,6 +746,7 @@ part of v1:
 |---------|------|--------|------|
 | 0.1 (draft) | 2026-05-07 | repository architect | First canonical draft. Authored from M9 inventory (`docs/superpowers/research/m10-wire-inventory.md`) + ADR-0003 + D-M10-01..17. Awaiting Phase 1 Task 1.2 (mirror) and Task 1.3 (ADR promotion). |
 | 0.1.1 (cross-reviewed) | 2026-05-07 | repository architect | Phase 1 Task 1.1 Step 2 complete: every endpoint in `m10-wire-inventory.md` is either covered, explicitly migrated, or explicitly excluded. See Appendix C. |
+| 0.1.2 (Phase 1.5 amendments) | 2026-05-07 | repository architect | Five amendments from the contract readiness audit (`docs/specs/contract-readiness-audit.md`): (a) `approval.required.risk` and `.policy` downgraded to Optional. (b) `open` event documented as Optional (server emits at stream open, payload `{phase_id}`). (c) `phase.completed_with_concerns`, `phase.needs_context`, `agent.envelope.received` documented as Optional orch-internal extensions. (d) `apply.*` diagnostic event family documented as Optional. (e) clarifying paragraph in §5.3 on the v1 status of these fields/events and forward-compat to v2. Spec checksum bumps; both repos must re-mirror in the same commit pair. |
 
 ## Appendix C — Inventory cross-review (Phase 1 Task 1.1 Step 2)
 
