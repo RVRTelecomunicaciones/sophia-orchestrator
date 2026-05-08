@@ -11,6 +11,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/handlers"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 )
@@ -25,14 +26,24 @@ type Deps struct {
 	Logger    *slog.Logger
 	StartedAt time.Time
 	Ready     func() error
+	// IDGen mints ULIDs for SSE event IDs (sophia-wire-v1 §5.1).
+	// MUST be non-nil in production; tests may pass FixedIDGenerator.
+	IDGen shared.IDGenerator
+
+	// AllowAnonLocalhost: when true, the auth middleware permits requests
+	// without X-Sophia-API-Key. Bootstrap MUST only set this true when
+	// the listener is bound exclusively to a loopback address per
+	// sophia-wire-v1 §3.2 / D-M10-02; the router itself does NOT verify
+	// the listener.
+	AllowAnonLocalhost bool
 
 	// Observability (optional). When nil, the corresponding middleware is a no-op.
 	Metrics *obs.Metrics
 	Tracer  trace.Tracer
 }
 
-// NewRouter assembles the chi router with all middleware + handlers per spec
-// § 7. Returns a chi.Router ready to be served by net/http.
+// NewRouter assembles the chi router with all middleware + handlers per
+// sophia-wire-v1 §4. Returns a chi.Router ready to be served by net/http.
 func NewRouter(d Deps) chi.Router {
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
@@ -46,7 +57,7 @@ func NewRouter(d Deps) chi.Router {
 	}
 	r.Use(middleware.Logging(d.Logger))
 
-	// Health + ready + metrics (un-auth).
+	// Health + ready + metrics (un-auth) per sophia-wire-v1 §4.1 + §4.5.
 	hh := handlers.NewHealthHandler(d.StartedAt, d.Ready, writeJSON)
 	r.Get("/api/v1/health", hh.Check)
 	r.Get("/api/v1/ready", hh.Ready)
@@ -54,35 +65,50 @@ func NewRouter(d Deps) chi.Router {
 		r.Method(http.MethodGet, "/metrics", d.Metrics.Handler())
 	}
 
-	// Authenticated routes.
+	// Authenticated routes per sophia-wire-v1 §4 (D-M10-13 Form A: phase
+	// routes are top-level / phase-scoped; only the phase-creation route
+	// stays change-scoped because the phase doesn't yet exist when /run
+	// is invoked).
 	r.Group(func(r chi.Router) {
 		if d.Auth != nil {
-			r.Use(middleware.APIKey(d.Auth))
+			r.Use(middleware.APIKeyWithAnonOption(d.Auth, d.AllowAnonLocalhost))
 		}
 
-		ch := handlers.NewChangesHandler(d.Changes, writeError, writeJSON)
-		ph := handlers.NewPhasesHandler(d.Phases, writeError, writeJSON)
-		ap := handlers.NewApplyHandler(d.Apply, writeError, writeJSON)
-		sh := handlers.NewSSEHandler(d.Events, 5*time.Second, writeError)
+		// Resource-scoped error writers so 404s pick the correct
+		// contract code (sophia-wire-v1 §9.2: change_not_found vs
+		// phase_not_found). Other errors fall through to the generic
+		// mapping.
+		writeChangeErr := func(w http.ResponseWriter, err error) { writeErrorResource(w, err, "change") }
+		writePhaseErr := func(w http.ResponseWriter, err error) { writeErrorResource(w, err, "phase") }
 
+		ch := handlers.NewChangesHandler(d.Changes, writeChangeErr, writeJSON)
+		ph := handlers.NewPhasesHandler(d.Phases, writePhaseErr, writeJSON)
+		ap := handlers.NewApplyHandler(d.Apply, writePhaseErr, writeJSON)
+		sh := handlers.NewSSEHandler(d.Events, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen)
+
+		// Change-scoped: create, list, get, abort, plus phase creation
+		// (phase doesn't yet exist when /run is invoked, so the parent
+		// change-id IS the URL identifier).
 		r.Route("/api/v1/changes", func(r chi.Router) {
 			r.Post("/", ch.Create)
 			r.Get("/", ch.List)
 			r.Route("/{change_id}", func(r chi.Router) {
 				r.Get("/", ch.Get)
 				r.Post("/abort", ch.Abort)
-				r.Route("/phases", func(r chi.Router) {
-					r.Post("/{phase_type}/run", ph.Run)
-					r.Route("/{phase_id}", func(r chi.Router) {
-						r.Get("/", ph.Get)
-						r.Post("/resume", ph.Resume)
-						r.Post("/approve", ph.Approve)
-						r.Post("/reject", ph.Reject)
-						r.Get("/board", ap.GetBoard)
-						r.Get("/events", sh.Stream)
-					})
-				})
+				r.Post("/phases/{phase_type}/run", ph.Run)
 			})
+		})
+
+		// Phase-scoped (sophia-wire-v1 §4.3, D-M10-13 Form A): get,
+		// resume, approve, reject, board, events all use the
+		// globally-unique phase_id directly.
+		r.Route("/api/v1/phases/{phase_id}", func(r chi.Router) {
+			r.Get("/", ph.Get)
+			r.Post("/resume", ph.Resume)
+			r.Post("/approve", ph.Approve)
+			r.Post("/reject", ph.Reject)
+			r.Get("/board", ap.GetBoard)
+			r.Get("/events", sh.Stream)
 		})
 	})
 

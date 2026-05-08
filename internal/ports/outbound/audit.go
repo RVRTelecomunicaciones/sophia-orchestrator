@@ -12,6 +12,12 @@ import (
 // engine ledger (queryable index). The composite adapter writes both.
 type AuditLog interface {
 	Append(ctx context.Context, e AuditEvent) error
+
+	// HasEventForPhase reports whether at least one event of the given
+	// type has been recorded for phaseID. Used by the phase service to
+	// detect gate state (sophia-wire-v1 §9.2 codes `phase_not_gated` /
+	// `gate_already_decided`).
+	HasEventForPhase(ctx context.Context, phaseID ids.PhaseID, eventType string) (bool, error)
 }
 
 // AuditEvent is one append-only audit record.

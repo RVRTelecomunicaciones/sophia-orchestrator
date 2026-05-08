@@ -5,6 +5,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -42,6 +43,19 @@ VALUES ($1, $2, $3, $4, $5, $6)`
 	}
 	_, err := a.pool.Exec(ctx, q, changeID, phaseID, sessionID, e.EventType, e.Payload, e.OccurredAt)
 	return wrapErr("AuditLog.Append", err)
+}
+
+// HasEventForPhase reports whether at least one event of eventType has
+// been recorded for phaseID. Implements the gate-state lookup added to
+// outbound.AuditLog for sophia-wire-v1 §9.2 phase_not_gated /
+// gate_already_decided.
+func (a *AuditLog) HasEventForPhase(ctx context.Context, phaseID ids.PhaseID, eventType string) (bool, error) {
+	const q = `SELECT EXISTS(SELECT 1 FROM audit_log WHERE phase_id = $1 AND event_type = $2)`
+	var ok bool
+	if err := a.pool.QueryRow(ctx, q, phaseID.String(), eventType).Scan(&ok); err != nil {
+		return false, wrapErr("AuditLog.HasEventForPhase", err)
+	}
+	return ok, nil
 }
 
 // Compile-time interface check.

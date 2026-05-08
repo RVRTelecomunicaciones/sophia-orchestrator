@@ -9,19 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
+
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
-	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	domainchange "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	domainphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
-
-type errorBody struct {
-	Error   string `json:"error"`
-	Code    string `json:"code"`
-	Details string `json:"details,omitempty"`
-}
 
 // writeJSON serializes v as JSON with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -35,41 +31,84 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-// writeError maps an application/domain error to the right HTTP status.
+// writeError maps an application/domain error to the right HTTP status +
+// stable contract code (sophia-wire-v1 §9.1 / §9.2). The error envelope
+// shape is contract.ErrorResponse: {code, error, details?}. Resource
+// disambiguation (CodeChangeNotFound vs CodePhaseNotFound) is handled by
+// writeErrorResource; callers without a resource hint fall back to a
+// generic 404.
 func writeError(w http.ResponseWriter, err error) {
-	if err == nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody{Error: "unknown error", Code: "internal"})
-		return
-	}
-	status, code := mapError(err)
-	writeJSON(w, status, errorBody{Error: err.Error(), Code: code})
+	writeErrorResource(w, err, "")
 }
 
-func mapError(err error) (int, string) {
+// writeErrorResource is the resource-aware variant of writeError. The
+// resource hint ("change" | "phase") lets us pick CodeChangeNotFound or
+// CodePhaseNotFound for outbound.ErrNotFound; any other hint falls back
+// to CodeValidationFailed.
+func writeErrorResource(w http.ResponseWriter, err error, resource string) {
+	if err == nil {
+		writeJSON(w, http.StatusInternalServerError, contract.ErrorResponse{
+			Code:  contract.CodeInternalError,
+			Error: "unknown error",
+		})
+		return
+	}
+	status, code := mapError(err, resource)
+	writeJSON(w, status, contract.ErrorResponse{
+		Code:  code,
+		Error: err.Error(),
+	})
+}
+
+// writeErrorWithDetails writes an error envelope with structured details.
+// Used by handlers that want to surface validation context (e.g. the
+// invalid limit value for CodeLimitTooLarge).
+func writeErrorWithDetails(w http.ResponseWriter, status int, code, msg string, details map[string]any) {
+	writeJSON(w, status, contract.ErrorResponse{
+		Code:    code,
+		Error:   msg,
+		Details: details,
+	})
+}
+
+func mapError(err error, resource string) (int, string) {
 	switch {
 	case errors.Is(err, outbound.ErrNotFound):
-		return http.StatusNotFound, "not_found"
+		switch resource {
+		case "change":
+			return http.StatusNotFound, contract.CodeChangeNotFound
+		case "phase":
+			return http.StatusNotFound, contract.CodePhaseNotFound
+		default:
+			return http.StatusNotFound, contract.CodeValidationFailed
+		}
 	case errors.Is(err, ids.ErrInvalidID):
-		return http.StatusBadRequest, "invalid_id"
+		return http.StatusBadRequest, contract.CodeValidationFailed
 	case errors.Is(err, change.ErrAlreadyExists):
-		return http.StatusConflict, "already_exists"
+		return http.StatusConflict, contract.CodeChangeAlreadyExists
 	case errors.Is(err, phase.ErrInvalidTransition):
-		return http.StatusConflict, "invalid_transition"
+		return http.StatusConflict, contract.CodeValidationFailed
 	case errors.Is(err, phase.ErrPhaseRunning):
-		return http.StatusConflict, "phase_running"
+		return http.StatusConflict, contract.CodePhaseNotResumable
 	case errors.Is(err, phase.ErrAlreadyTerminal):
-		return http.StatusConflict, "already_terminal"
+		return http.StatusConflict, contract.CodeChangeAlreadyTerminal
+	case errors.Is(err, phase.ErrApproverRequired):
+		return http.StatusBadRequest, contract.CodeApproverRequired
+	case errors.Is(err, phase.ErrPhaseNotGated):
+		return http.StatusConflict, contract.CodePhaseNotGated
+	case errors.Is(err, phase.ErrGateAlreadyDecided):
+		return http.StatusConflict, contract.CodeGateAlreadyDecided
 	case errors.Is(err, domainchange.ErrAlreadyTerminal):
-		return http.StatusConflict, "change_terminal"
+		return http.StatusConflict, contract.CodeChangeAlreadyTerminal
 	case errors.Is(err, domainchange.ErrEmptyName),
 		errors.Is(err, domainchange.ErrEmptyProject),
 		errors.Is(err, domainchange.ErrInvalidArtifactStore),
 		errors.Is(err, domainchange.ErrInvalidTransition):
-		return http.StatusBadRequest, "validation_error"
+		return http.StatusBadRequest, contract.CodeValidationFailed
 	case errors.Is(err, domainphase.ErrInvalidType),
 		errors.Is(err, domainphase.ErrBudgetExhausted):
-		return http.StatusBadRequest, "validation_error"
+		return http.StatusBadRequest, contract.CodeValidationFailed
 	default:
-		return http.StatusInternalServerError, "internal"
+		return http.StatusInternalServerError, contract.CodeInternalError
 	}
 }

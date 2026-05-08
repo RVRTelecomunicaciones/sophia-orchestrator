@@ -43,6 +43,13 @@ type HTTPConfig struct {
 	ShutdownTimeout time.Duration
 	APIKey          string // bootstrap API key (single-tenant V1); empty disables auth
 	APIKeyProject   string // the project the bootstrap key authorizes
+	// AllowAnonLocalhost enables anonymous (no X-Sophia-API-Key) requests
+	// when the listener is bound exclusively to a loopback address. Per
+	// sophia-wire-v1 §3.2 / D-M10-02: the EFFECTIVE allow-anon mode is
+	// (AllowAnonLocalhost && listener-is-loopback). If the listener binds
+	// any non-loopback interface (including 0.0.0.0), the header is
+	// required regardless. Default false (safe default).
+	AllowAnonLocalhost bool
 }
 
 // DBConfig configures Postgres.
@@ -122,6 +129,7 @@ func Load() (Config, error) {
 	c.HTTP.APIKeyProject = envStr("SOPHIA_HTTP_API_KEY_PROJECT", "")
 	c.HTTP.ReadTimeout = envDuration("SOPHIA_HTTP_READ_TIMEOUT", c.HTTP.ReadTimeout)
 	c.HTTP.ShutdownTimeout = envDuration("SOPHIA_HTTP_SHUTDOWN_TIMEOUT", c.HTTP.ShutdownTimeout)
+	c.HTTP.AllowAnonLocalhost = envBool("SOPHIA_HTTP_ALLOW_ANON_LOCALHOST", c.HTTP.AllowAnonLocalhost)
 
 	c.DB.URL = envStr("SOPHIA_DB_URL", "")
 	c.DB.MaxConns = int32(envInt("SOPHIA_DB_MAX_CONNS", int(c.DB.MaxConns)))

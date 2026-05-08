@@ -17,6 +17,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 	"github.com/stretchr/testify/require"
@@ -133,6 +134,16 @@ func defaultDeps() httpinbound.Deps {
 		Auth:      &fakeAuthn{},
 		StartedAt: time.Now(),
 		Ready:     func() error { return nil },
+		IDGen: shared.FixedIDGenerator([]string{
+			"01ARZ3NDEKTSV4RRFFQ69G5EV1",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV2",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV3",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV4",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV5",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV6",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV7",
+			"01ARZ3NDEKTSV4RRFFQ69G5EV8",
+		}),
 	}
 }
 
@@ -235,7 +246,7 @@ func TestSSE_StreamReceivesEvents(t *testing.T) {
 
 	// Subscribe in a goroutine via HTTP.
 	req, _ := http.NewRequest("GET",
-		srv.URL+"/api/v1/changes/01ARZ3NDEKTSV4RRFFQ69G5C01/phases/01ARZ3NDEKTSV4RRFFQ69G5P01/events",
+		srv.URL+"/api/v1/phases/01ARZ3NDEKTSV4RRFFQ69G5P01/events",
 		nil)
 	req.Header.Set("X-Sophia-API-Key", "valid")
 	req.Header.Set("Accept", "text/event-stream")
@@ -273,3 +284,70 @@ func TestNotFound_JSON(t *testing.T) {
 
 // avoid unused import for outbound
 var _ = outbound.ErrNotFound
+
+// --- Phase 3.8: error envelope + new error code coverage ---
+
+// TestErrorEnvelope_Shape asserts the canonical envelope for any error
+// is {code, error, details?} per sophia-wire-v1 §9.1.
+func TestErrorEnvelope_Shape(t *testing.T) {
+	srv := newSrv(t, defaultDeps())
+	resp, err := http.Get(srv.URL + "/api/v1/changes")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var env map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	require.NotEmpty(t, env["code"], "error envelope MUST include `code`")
+	require.NotEmpty(t, env["error"], "error envelope MUST include `error`")
+}
+
+// TestList_LimitTooLarge asserts the changes-list endpoint returns
+// 400 + limit_too_large when limit > 100 (sophia-wire-v1 §9.2).
+func TestList_LimitTooLarge(t *testing.T) {
+	srv := newSrv(t, defaultDeps())
+	req, _ := http.NewRequest("GET", srv.URL+"/api/v1/changes?limit=500", nil)
+	req.Header.Set("X-Sophia-API-Key", "valid")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	var env map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	require.Equal(t, "limit_too_large", env["code"])
+	require.Contains(t, env, "details")
+}
+
+// fakePhasesTerminal returns a phase already in PhaseStatusBlocked, so
+// the SSE handler short-circuits with 410 + phase_terminal_no_events.
+type fakePhasesTerminal struct{ fakePhases }
+
+func (s *fakePhasesTerminal) Get(_ context.Context, _ ids.PhaseID) (*phase.Phase, error) {
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5P01")
+	// Hydrate directly into PhaseStatusBlocked (terminal).
+	return phase.Hydrate(pid, cid, phase.PhaseSpec, phase.PhaseStatusBlocked,
+		nil, 0, 1, 1, nil, nil), nil
+}
+
+// TestSSE_PhaseTerminalNoEvents asserts attaching to a terminal phase
+// returns 410 + phase_terminal_no_events (sophia-wire-v1 §9.2).
+func TestSSE_PhaseTerminalNoEvents(t *testing.T) {
+	deps := defaultDeps()
+	deps.Phases = &fakePhasesTerminal{}
+	srv := newSrv(t, deps)
+
+	req, _ := http.NewRequest("GET",
+		srv.URL+"/api/v1/phases/01ARZ3NDEKTSV4RRFFQ69G5P01/events", nil)
+	req.Header.Set("X-Sophia-API-Key", "valid")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusGone, resp.StatusCode)
+	var env map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&env))
+	require.Equal(t, "phase_terminal_no_events", env["code"])
+}
