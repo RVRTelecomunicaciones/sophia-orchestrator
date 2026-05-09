@@ -3,8 +3,10 @@ package memory_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,4 +178,139 @@ func TestRecordRelation(t *testing.T) {
 	require.NoError(t, c.RecordRelation(context.Background(), outbound.RecordRelationInput{
 		FromID: "1", ToID: "2", RelationType: "supersedes",
 	}))
+}
+
+// --- ADR-0005 P0.1: Get preserves Content -----------------------------------
+
+func TestClient_Get_PreservesContent(t *testing.T) {
+	body := `{"id":"01ARZ3NDEKTSV4RRFFQ69G5MEM","type":"sdd_tasks","status":"active","topic_key":"sdd/foo/tasks","content":"{\"groups\":[]}","created_at":"2026-05-03T12:00:00Z"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	rec, err := c.Get(context.Background(), "01ARZ3NDEKTSV4RRFFQ69G5MEM")
+	require.NoError(t, err)
+	require.Equal(t, `{"groups":[]}`, rec.Content,
+		"Get must populate MemoryRecord.Content (P0.1 wire-shape fix)")
+}
+
+func TestClient_Get_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	_, err := c.Get(context.Background(), "01ARZ3NDEKTSV4RRFFQ69G5MEM")
+	require.Error(t, err)
+	require.ErrorIs(t, err, outbound.ErrNotFound)
+}
+
+// --- ADR-0005 P0.2: GetByTopicKey -------------------------------------------
+
+func TestClient_GetByTopicKey_HappyPath(t *testing.T) {
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path + "?" + r.URL.RawQuery
+		require.Equal(t, "/api/v1/memories/by-topic-key", r.URL.Path)
+		_, _ = w.Write([]byte(`{
+			"id":"01ARZ3NDEKTSV4RRFFQ69G5TKS","type":"sdd_tasks","status":"active",
+			"topic_key":"sdd/feat-x/tasks","content":"{\"groups\":[{\"name\":\"g1\"}]}",
+			"created_at":"2026-05-03T12:00:00Z"
+		}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	rec, err := c.GetByTopicKey(context.Background(), outbound.MemoryScope{
+		TenantID:    "t1",
+		ProjectID:   "proj",
+		RepoID:      "r1",
+		AgentID:     "sophia-orchestator",
+		SessionID:   "01ARZ3NDEKTSV4RRFFQ69G5C01",
+		Environment: "dev",
+	}, "sdd/feat-x/tasks")
+	require.NoError(t, err)
+	require.Equal(t, "01ARZ3NDEKTSV4RRFFQ69G5TKS", rec.ID)
+	require.Equal(t, "sdd_tasks", rec.Type)
+	require.Equal(t, "active", rec.Status)
+	require.Equal(t, "sdd/feat-x/tasks", rec.TopicKey)
+	require.Equal(t, `{"groups":[{"name":"g1"}]}`, rec.Content)
+
+	// All optional scope fields should be in the query string.
+	require.Contains(t, capturedPath, "project_id=proj")
+	require.Contains(t, capturedPath, "topic_key=sdd%2Ffeat-x%2Ftasks")
+	require.Contains(t, capturedPath, "tenant_id=t1")
+	require.Contains(t, capturedPath, "repo_id=r1")
+	require.Contains(t, capturedPath, "agent_id=sophia-orchestator")
+	require.Contains(t, capturedPath, "session_id=01ARZ3NDEKTSV4RRFFQ69G5C01")
+	require.Contains(t, capturedPath, "environment=dev")
+}
+
+func TestClient_GetByTopicKey_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	_, err := c.GetByTopicKey(context.Background(), outbound.MemoryScope{ProjectID: "proj"}, "sdd/missing/tasks")
+	require.Error(t, err)
+	require.ErrorIs(t, err, outbound.ErrNotFound)
+}
+
+func TestClient_GetByTopicKey_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	_, err := c.GetByTopicKey(context.Background(), outbound.MemoryScope{ProjectID: "proj"}, "sdd/feat-x/tasks")
+	require.Error(t, err)
+	require.False(t, errors.Is(err, outbound.ErrNotFound), "5xx must NOT be mapped to ErrNotFound")
+}
+
+func TestClient_GetByTopicKey_EmptyOptionalScope(t *testing.T) {
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path + "?" + r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"id":"x","type":"sdd_tasks","status":"active","topic_key":"k","content":"{}","created_at":"2026-05-03T12:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	_, err := c.GetByTopicKey(context.Background(), outbound.MemoryScope{ProjectID: "proj"}, "k")
+	require.NoError(t, err)
+	require.Contains(t, capturedPath, "project_id=proj")
+	require.Contains(t, capturedPath, "topic_key=k")
+	for _, opt := range []string{"tenant_id", "repo_id", "agent_id", "session_id", "environment"} {
+		require.False(t, strings.Contains(capturedPath, opt+"="),
+			"empty optional scope %q must not appear in the URL: %s", opt, capturedPath)
+	}
+}
+
+func TestClient_GetByTopicKey_RequiredParams(t *testing.T) {
+	// Server should never be hit; using a dead URL would also work but the
+	// client-side validation must fail before the wire.
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+
+	_, err := c.GetByTopicKey(context.Background(), outbound.MemoryScope{ProjectID: ""}, "k")
+	require.Error(t, err)
+	require.ErrorIs(t, err, outbound.ErrInvalidRequest)
+
+	_, err = c.GetByTopicKey(context.Background(), outbound.MemoryScope{ProjectID: "p"}, "")
+	require.Error(t, err)
+	require.ErrorIs(t, err, outbound.ErrInvalidRequest)
+
+	require.False(t, called, "validation must short-circuit before any HTTP call")
 }

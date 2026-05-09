@@ -12,10 +12,17 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/worktree"
 )
 
-// ErrNotFound is the canonical not-found error returned by repositories.
+// ErrNotFound is the canonical not-found error returned by repositories
+// and outbound clients (e.g., MemoryClient.Get / GetByTopicKey on 404).
 // Adapters MUST wrap their backend-specific not-found error with this so
 // application services can rely on errors.Is(err, outbound.ErrNotFound).
 var ErrNotFound = errors.New("repository: not found")
+
+// ErrInvalidRequest is returned by outbound clients when the caller passed
+// a request that fails client-side validation (e.g., missing required
+// query parameters). Surfacing this before the wire avoids spurious 4xx
+// responses and makes the error checkable via errors.Is.
+var ErrInvalidRequest = errors.New("outbound: invalid request")
 
 // ChangeRepository persists Change aggregates. Save uses upsert semantics on
 // the (project, name) UNIQUE constraint.

@@ -27,6 +27,9 @@ func (m *fakeMemory) Ingest(_ context.Context, in outbound.IngestMemoryInput) (*
 func (m *fakeMemory) Get(_ context.Context, _ string) (*outbound.MemoryRecord, error) {
 	return nil, outbound.ErrNotFound
 }
+func (m *fakeMemory) GetByTopicKey(_ context.Context, _ outbound.MemoryScope, _ string) (*outbound.MemoryRecord, error) {
+	return nil, outbound.ErrNotFound
+}
 func (m *fakeMemory) Archive(_ context.Context, _, _, _ string) error { return nil }
 func (m *fakeMemory) Search(_ context.Context, _ outbound.SearchQuery) (*outbound.SearchResults, error) {
 	return nil, nil

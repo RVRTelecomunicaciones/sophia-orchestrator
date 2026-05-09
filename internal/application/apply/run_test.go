@@ -2,7 +2,9 @@ package apply_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -267,25 +269,73 @@ func (e *fakeEvents) types() []string {
 	return out
 }
 
-type fakeMemory struct{}
+// fakeMemory is a programmable MemoryClient used by run_test cases.
+//
+// recordsByTopic maps "sdd/{change}/{phase}" → MemoryRecord. GetByTopicKey
+// looks up there. errByTopic, when set for a topic, overrides the record
+// with the configured error (used to assert ErrNotFound branches).
+type fakeMemory struct {
+	mu             sync.Mutex
+	recordsByTopic map[string]*outbound.MemoryRecord
+	errByTopic     map[string]error
+	getByTopicCalls atomic.Int32
+}
 
-func (fakeMemory) Ingest(_ context.Context, _ outbound.IngestMemoryInput) (*outbound.MemoryRecord, error) {
+func newFakeMemory() *fakeMemory {
+	return &fakeMemory{
+		recordsByTopic: map[string]*outbound.MemoryRecord{},
+		errByTopic:     map[string]error{},
+	}
+}
+
+// putTasksList plants a tasksList JSON record under the canonical topic.
+func (m *fakeMemory) putTasksList(changeName string, tl any) {
+	body, err := json.Marshal(tl)
+	if err != nil {
+		panic(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordsByTopic[fmt.Sprintf("sdd/%s/tasks", changeName)] = &outbound.MemoryRecord{
+		ID:       "01ARZ3NDEKTSV4RRFFQ69G5MEM",
+		Type:     "sdd_tasks",
+		Status:   "active",
+		TopicKey: fmt.Sprintf("sdd/%s/tasks", changeName),
+		Content:  string(body),
+	}
+}
+
+func (m *fakeMemory) Ingest(_ context.Context, _ outbound.IngestMemoryInput) (*outbound.MemoryRecord, error) {
 	return nil, nil
 }
-func (fakeMemory) Get(_ context.Context, _ string) (*outbound.MemoryRecord, error) {
-	return &outbound.MemoryRecord{ID: "01ARZ3NDEKTSV4RRFFQ69G5MEM", Type: "sdd_tasks"}, nil
+func (m *fakeMemory) Get(_ context.Context, _ string) (*outbound.MemoryRecord, error) {
+	return nil, outbound.ErrNotFound
 }
-func (fakeMemory) Archive(_ context.Context, _, _, _ string) error { return nil }
-func (fakeMemory) Search(_ context.Context, _ outbound.SearchQuery) (*outbound.SearchResults, error) {
+func (m *fakeMemory) GetByTopicKey(_ context.Context, _ outbound.MemoryScope, topicKey string) (*outbound.MemoryRecord, error) {
+	m.getByTopicCalls.Add(1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err, ok := m.errByTopic[topicKey]; ok {
+		return nil, err
+	}
+	if rec, ok := m.recordsByTopic[topicKey]; ok {
+		return rec, nil
+	}
+	return nil, outbound.ErrNotFound
+}
+func (m *fakeMemory) Archive(_ context.Context, _, _, _ string) error { return nil }
+func (m *fakeMemory) Search(_ context.Context, _ outbound.SearchQuery) (*outbound.SearchResults, error) {
 	return nil, nil
 }
-func (fakeMemory) BuildContext(_ context.Context, _ outbound.ContextRequest) (*outbound.ContextBundle, error) {
+func (m *fakeMemory) BuildContext(_ context.Context, _ outbound.ContextRequest) (*outbound.ContextBundle, error) {
 	return nil, nil
 }
-func (fakeMemory) RecordDecision(_ context.Context, _ outbound.RecordDecisionInput) (*outbound.MemoryRecord, error) {
+func (m *fakeMemory) RecordDecision(_ context.Context, _ outbound.RecordDecisionInput) (*outbound.MemoryRecord, error) {
 	return nil, nil
 }
-func (fakeMemory) RecordRelation(_ context.Context, _ outbound.RecordRelationInput) error { return nil }
+func (m *fakeMemory) RecordRelation(_ context.Context, _ outbound.RecordRelationInput) error {
+	return nil
+}
 
 // --- helpers ---
 
@@ -306,12 +356,32 @@ func mkPhase(t *testing.T, c *change.Change) *phase.Phase {
 	return p
 }
 
-func newRunService(t *testing.T, opts ...func(*apply.RunDeps)) (*apply.RunService, *fakeBoardRepo, *fakeDispatcher, *fakeSpawnGov, *fakeEvents) {
+// defaultTasksListJSON returns a minimal 1-group/1-task list used as the
+// default seed for tests that don't care about the tasks-list shape.
+func defaultTasksListJSON() any {
+	return map[string]any{
+		"groups": []map[string]any{
+			{
+				"name": "group-1",
+				"tasks": []map[string]any{
+					{
+						"description":   "implement task 1",
+						"files_pattern": []string{"src/**/*.go"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func newRunService(t *testing.T, opts ...func(*apply.RunDeps)) (*apply.RunService, *fakeBoardRepo, *fakeDispatcher, *fakeSpawnGov, *fakeEvents, *fakeMemory) {
 	t.Helper()
 	board := newFakeBoardRepo()
 	disp := &fakeDispatcher{}
 	spawn := &fakeSpawnGov{}
 	events := &fakeEvents{}
+	mem := newFakeMemory()
+	mem.putTasksList("feat-x", defaultTasksListJSON())
 	clock := shared.FixedClock(time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC))
 	idGen := shared.NewSystemIDGenerator(clock)
 
@@ -325,7 +395,7 @@ func newRunService(t *testing.T, opts ...func(*apply.RunDeps)) (*apply.RunServic
 		Prompts:     discipline.NewPromptBuilder(),
 		Audit:       &fakeAudit{},
 		Events:      events,
-		Memory:      fakeMemory{},
+		Memory:      mem,
 		Clock:       clock,
 		IDGen:       idGen,
 		Config: apply.RunConfig{
@@ -339,7 +409,7 @@ func newRunService(t *testing.T, opts ...func(*apply.RunDeps)) (*apply.RunServic
 	for _, o := range opts {
 		o(&deps)
 	}
-	return apply.NewRun(deps), board, disp, spawn, events
+	return apply.NewRun(deps), board, disp, spawn, events, mem
 }
 
 // --- tests ---
@@ -349,7 +419,7 @@ func TestNewRun_PanicsOnNilDeps(t *testing.T) {
 }
 
 func TestExecute_HappyPath_SingleGroupSingleTask(t *testing.T) {
-	svc, _, disp, spawn, events := newRunService(t)
+	svc, _, disp, spawn, events, _ := newRunService(t)
 	c := mkChange(t, "feat-x")
 	p := mkPhase(t, c)
 
@@ -368,7 +438,7 @@ func TestExecute_HappyPath_SingleGroupSingleTask(t *testing.T) {
 }
 
 func TestExecute_DispatchFailureMarksGroupFailed(t *testing.T) {
-	svc, _, disp, _, events := newRunService(t)
+	svc, _, disp, _, events, _ := newRunService(t)
 	disp.envelopeStatus = envelope.StatusBlocked
 	c := mkChange(t, "feat-x")
 	p := mkPhase(t, c)
@@ -383,19 +453,19 @@ func TestExecute_DispatchFailureMarksGroupFailed(t *testing.T) {
 }
 
 func TestExecute_SpawnGovernorBoundsParallelism(t *testing.T) {
-	svc, _, _, spawn, _ := newRunService(t)
+	svc, _, _, spawn, _, _ := newRunService(t)
 	c := mkChange(t, "feat-x")
 	p := mkPhase(t, c)
 
 	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
 	require.NoError(t, err)
-	// Per the synthesized fallback tasks list there's 1 group / 1 task.
+	// The default tasks-list seed has 1 group / 1 task.
 	// SpawnGovernor sees: 1 team-lead Acquire + N implement Acquires.
 	require.GreaterOrEqual(t, spawn.calls, 2)
 }
 
 func TestExecute_ClaimSkippedTaskCountedAsFailure(t *testing.T) {
-	svc, board, _, _, events := newRunService(t)
+	svc, board, _, _, events, _ := newRunService(t)
 	// Force the first task claim to fail (simulate "another team-lead got it").
 	board.claimResults = map[string]bool{}
 	// We don't know the task ID up-front (synthesized), so wildcard via the
@@ -420,20 +490,132 @@ func TestExecute_ClaimSkippedTaskCountedAsFailure(t *testing.T) {
 	require.Contains(t, events.types(), "apply.task.claimed")
 }
 
-func TestExecute_BuildsBoardWithSyntheticTasksWhenMemoryEmpty(t *testing.T) {
-	svc, board, _, _, _ := newRunService(t)
+// TestExecute_BuildsBoardFromMemoryTasksList replaces the deleted
+// "BuildsBoardWithSyntheticTasksWhenMemoryEmpty" test (the synthetic
+// fallback was removed in ADR-0005 P0.1+P0.2). The board is now built
+// from the real tasks-list record planted in the fake memory.
+func TestExecute_BuildsBoardFromMemoryTasksList(t *testing.T) {
+	svc, board, _, _, _, mem := newRunService(t)
 	c := mkChange(t, "feat-x")
 	p := mkPhase(t, c)
 
 	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
 	require.NoError(t, err)
 
-	// Synthesized fallback tasks list ⇒ 1 board, 1 group, 1 task persisted.
+	// Default seed ⇒ 1 board, 1 group, 1 task persisted.
 	board.mu.Lock()
 	defer board.mu.Unlock()
 	require.Len(t, board.boards, 1)
 	require.Len(t, board.groups, 1)
 	require.GreaterOrEqual(t, len(board.tasks), 1)
+	require.GreaterOrEqual(t, mem.getByTopicCalls.Load(), int32(1),
+		"loadTasksList must hit GetByTopicKey, not Get")
+}
+
+// TestExecute_BuildsBoardFromMultiGroupTasksList verifies that a richer,
+// multi-group tasks-list record planted in memory is faithfully translated
+// into a board. This is the test that would have been masked by the
+// removed fallback if the fake memory had returned an empty content.
+func TestExecute_BuildsBoardFromMultiGroupTasksList(t *testing.T) {
+	svc, board, _, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	mem.putTasksList("feat-x", map[string]any{
+		"groups": []map[string]any{
+			{
+				"name": "domain",
+				"tasks": []map[string]any{
+					{"description": "add type", "files_pattern": []string{"internal/domain/*.go"}},
+					{"description": "validate", "files_pattern": []string{"internal/domain/*.go"}},
+				},
+			},
+			{
+				"name":       "application",
+				"depends_on": []string{"domain"},
+				"tasks": []map[string]any{
+					{"description": "wire service", "files_pattern": []string{"internal/application/*.go"}},
+				},
+			},
+			{
+				"name":       "bootstrap",
+				"depends_on": []string{"application"},
+				"tasks": []map[string]any{
+					{"description": "wire deps", "files_pattern": []string{"internal/bootstrap/*.go"}},
+				},
+			},
+		},
+	})
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	require.Len(t, board.groups, 3)
+	require.GreaterOrEqual(t, len(board.tasks), 4)
+}
+
+// TestExecute_BlocksWhenTasksListMissing locks in Iron Law #1: missing
+// tasks list ⇒ apply phase yields a BLOCKED envelope, not a silent
+// fallback run.
+func TestExecute_BlocksWhenTasksListMissing(t *testing.T) {
+	svc, _, _, _, _, mem := newRunService(t)
+	// Wipe the seeded tasks list so GetByTopicKey returns ErrNotFound.
+	mem.mu.Lock()
+	mem.recordsByTopic = map[string]*outbound.MemoryRecord{}
+	mem.mu.Unlock()
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.Error(t, err)
+	require.ErrorIs(t, err, apply.ErrNoTasksList)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusBlocked, env.Status)
+}
+
+// TestExecute_BlocksWhenTasksListMalformed locks in the malformed-content
+// branch: invalid JSON in the record body ⇒ BLOCKED with ErrInvalidTasksList.
+func TestExecute_BlocksWhenTasksListMalformed(t *testing.T) {
+	svc, _, _, _, _, mem := newRunService(t)
+	mem.mu.Lock()
+	mem.recordsByTopic["sdd/feat-x/tasks"] = &outbound.MemoryRecord{
+		ID:       "01ARZ3NDEKTSV4RRFFQ69G5MEM",
+		Type:     "sdd_tasks",
+		Status:   "active",
+		TopicKey: "sdd/feat-x/tasks",
+		Content:  "{not valid json",
+	}
+	mem.mu.Unlock()
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.Error(t, err)
+	require.ErrorIs(t, err, apply.ErrInvalidTasksList)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusBlocked, env.Status)
+}
+
+// TestExecute_BlocksWhenTasksListPropagatesGenericError verifies non-404
+// errors from the memory backend are wrapped, not swallowed.
+func TestExecute_BlocksWhenTasksListPropagatesGenericError(t *testing.T) {
+	svc, _, _, _, _, mem := newRunService(t)
+	mem.mu.Lock()
+	mem.errByTopic["sdd/feat-x/tasks"] = errors.New("boom")
+	mem.mu.Unlock()
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, apply.ErrNoTasksList)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusBlocked, env.Status)
 }
 
 // --- DAG coordinator unit tests ---
