@@ -21,7 +21,7 @@
 #   First build takes ~3-5 min (4 Go service images on cold cache).
 #
 # VERIFY
-#   curl http://localhost:8080/api/v1/health   # orchestator
+#   curl http://localhost:8080/api/v1/ready    # orchestator (200 = pg reachable)
 #   curl http://localhost:8081/health           # memory-engine
 #   # governance-core has no /health route — probe TCP liveness:
 #   curl http://localhost:8082/api/v1/tasks     # 405/404 = service alive

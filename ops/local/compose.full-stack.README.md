@@ -68,8 +68,9 @@ docker compose -f ops/local/compose.full-stack.yaml up -d --build
 ## Verify
 
 ```bash
-# orchestator — health always 200 if process is running
-curl -s http://localhost:8080/api/v1/health
+# orchestator — readiness probes the pg pool; 200 only when DB is reachable
+# (ADR-0005 P1.4). /api/v1/health remains a pure liveness probe.
+curl -s http://localhost:8080/api/v1/ready
 
 # memory-engine — health route registered at /health
 curl -s http://localhost:8081/health
@@ -86,7 +87,8 @@ docker compose -f ops/local/compose.full-stack.yaml ps
 ```
 
 Expected outputs:
-- `orchestator`: `{"status":"ok"}` or similar
+- `orchestator`: `{"status":"ready","checks":{"db":"ok"}}` (200) — or
+  `{"status":"degraded","checks":{"db":"..."}}` (503) when pg-orchestator is down
 - `memory-engine`: `{"status":"ok"}` or `200 OK`
 - `governance-core`: `200 OK` on `/api/v1/approvals/pending`
 - `runtime-adapters`: `200 OK` on `/healthz`

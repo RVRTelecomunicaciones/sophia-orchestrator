@@ -114,14 +114,31 @@ func (h *HealthHandler) Check(w http.ResponseWriter, r *http.Request) {
 }
 
 // Ready handles GET /api/v1/ready (200 only if downstream deps healthy).
+//
+// Response contract (ADR-0005 P1.4):
+//
+//	200  {"status":"ready",    "checks":{"db":"ok"}}
+//	503  {"status":"degraded", "checks":{"db":"<error message>"}}
+//
+// Phase 1 only probes the Postgres pool. Additional checks (memory-engine,
+// runtime-adapters, governance-core) are folded in as the platform matures;
+// any additional probe MUST report ok / error string under its own key in
+// the `checks` map so consumers (compose healthcheck, k8s probes) can keep
+// reading the same envelope.
 func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{"db": "ok"}
 	if h.ready != nil {
 		if err := h.ready(); err != nil {
+			checks["db"] = err.Error()
 			h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"status": "not_ready", "error": err.Error(),
+				"status": "degraded",
+				"checks": checks,
 			})
 			return
 		}
 	}
-	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ready",
+		"checks": checks,
+	})
 }
