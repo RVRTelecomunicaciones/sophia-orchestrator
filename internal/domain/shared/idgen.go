@@ -2,6 +2,7 @@ package shared
 
 import (
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -37,7 +38,15 @@ func FixedIDGenerator(ids []string) IDGenerator {
 // SystemIDGenerator generates monotonic ULIDs from a non-deterministic entropy
 // source. Allowed only in infrastructure/bootstrap; lint forbids ulid.Make in
 // domain/application.
+//
+// Concurrency: oklog/ulid/v2's MonotonicEntropy is NOT safe for concurrent
+// use (mutates an internal uint80 counter + an io.Reader buffer on every
+// Read). The apply phase spawns team-lead + implement subprocesses
+// concurrently (teamlead.go runTeamLead.func1 + runImplementWithRetry),
+// each minting their own agent_session ID. We serialize all NewID calls
+// behind mu to avoid the race that `go test -race` flags in unit tests.
 type SystemIDGenerator struct {
+	mu      sync.Mutex
 	clock   Clock
 	entropy *ulid.MonotonicEntropy
 }
@@ -52,8 +61,10 @@ func NewSystemIDGenerator(c Clock) *SystemIDGenerator {
 	}
 }
 
-// NewID returns a freshly-generated ULID string.
+// NewID returns a freshly-generated ULID string. Safe for concurrent use.
 func (g *SystemIDGenerator) NewID() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return ulid.MustNew(ulid.Timestamp(g.clock.Now()), g.entropy).String()
 }
 
