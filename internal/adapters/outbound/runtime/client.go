@@ -2,7 +2,7 @@
 // sophia-runtime-adapters' HTTP API. The runtime exposes a single endpoint
 // that accepts a capability + payload and returns an ExecutionReceipt:
 //
-//   POST /api/v1/executions
+//   POST /api/v1/execute
 //
 // Receipt status enum (R15 in runtime spec): success | failure | timeout
 // | cancelled | partial. RetryHint enum: retryable | non_retryable | unknown.
@@ -72,7 +72,7 @@ type executionReceiptResponse struct {
 	EndedAt       time.Time `json:"ended_at"`
 }
 
-// Execute POSTs /api/v1/executions and returns the typed receipt.
+// Execute POSTs /api/v1/execute and returns the typed receipt.
 func (c *Client) Execute(ctx context.Context, req outbound.ExecutionRequest) (*outbound.ExecutionReceipt, error) {
 	wireReq := executionRequest{
 		Capability:     req.Capability,
@@ -81,7 +81,7 @@ func (c *Client) Execute(ctx context.Context, req outbound.ExecutionRequest) (*o
 		IdempotencyKey: req.IdempotencyKey,
 	}
 	var resp executionReceiptResponse
-	if err := c.http.PostJSON(ctx, "/api/v1/executions", wireReq, &resp); err != nil {
+	if err := c.http.PostJSON(ctx, "/api/v1/execute", wireReq, &resp); err != nil {
 		return nil, fmt.Errorf("runtime Execute: %w", err)
 	}
 	stdout, err := base64.StdEncoding.DecodeString(resp.StdoutBase64)

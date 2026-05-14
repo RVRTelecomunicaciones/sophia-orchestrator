@@ -30,7 +30,7 @@ func TestNew_RejectsBadConfig(t *testing.T) {
 func TestExecute_Success(t *testing.T) {
 	var capturedReq map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/executions", r.URL.Path)
+		require.Equal(t, "/api/v1/execute", r.URL.Path)
 		_ = json.NewDecoder(r.Body).Decode(&capturedReq)
 
 		resp := map[string]any{
