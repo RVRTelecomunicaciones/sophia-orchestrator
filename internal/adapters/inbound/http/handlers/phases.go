@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -16,11 +17,12 @@ type PhasesHandler struct {
 	svc       inbound.PhaseService
 	writeErr  func(http.ResponseWriter, error)
 	writeJSON func(http.ResponseWriter, int, any)
+	logger    *slog.Logger
 }
 
 // NewPhasesHandler constructs a PhasesHandler.
 func NewPhasesHandler(svc inbound.PhaseService, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any)) *PhasesHandler {
-	return &PhasesHandler{svc: svc, writeErr: writeErr, writeJSON: writeJSON}
+	return &PhasesHandler{svc: svc, writeErr: writeErr, writeJSON: writeJSON, logger: slog.Default()}
 }
 
 type runPhaseReq struct {
@@ -74,14 +76,21 @@ func (h *PhasesHandler) Run(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	out, err := h.svc.Run(r.Context(), inbound.RunPhaseInput{
 		ChangeID: cid, PhaseType: pt,
-		TaskDescription: req.TaskDescription,
+		TaskDescription:  req.TaskDescription,
 		ContextOverrides: req.ContextOverrides,
-		RetryBudget:     req.RetryBudget,
+		RetryBudget:      req.RetryBudget,
 	})
 	if err != nil {
 		h.writeErr(w, err)
 		return
 	}
+	// Showcase ADR-0005 P2.2a: trace_id + span_id are injected automatically
+	// by the TraceHandler wrapper when r.Context() carries a W3C Trace.
+	h.logger.LogAttrs(r.Context(), slog.LevelInfo, "phase run accepted",
+		slog.String("change_id", cid.String()),
+		slog.String("phase_type", string(pt)),
+		slog.String("phase_id", out.PhaseID.String()),
+	)
 	h.writeJSON(w, http.StatusAccepted, runPhaseResp{
 		PhaseID: out.PhaseID.String(), Status: string(out.Status),
 		EventsURL: out.EventsURL, StartedAt: out.StartedAt,

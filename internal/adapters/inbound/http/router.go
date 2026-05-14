@@ -1,6 +1,7 @@
 package http
 
 import (
+	"crypto/rand"
 	"log/slog"
 	"net/http"
 	"time"
@@ -46,6 +47,10 @@ type Deps struct {
 // sophia-wire-v1 §4. Returns a chi.Router ready to be served by net/http.
 func NewRouter(d Deps) chi.Router {
 	r := chi.NewRouter()
+	// TraceW3C MUST be first: it injects the W3C Trace into context so all
+	// subsequent middleware (Logging, Recover, Auth) and handlers can read it
+	// via trace.FromContext(ctx). See ADR-0005 P2.2a.
+	r.Use(middleware.TraceW3C(rand.Reader, d.Logger))
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(middleware.Recover(d.Logger))

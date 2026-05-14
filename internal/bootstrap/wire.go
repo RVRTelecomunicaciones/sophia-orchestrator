@@ -32,6 +32,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/config"
 	dbpkg "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/db"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
+	obslog "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs/log"
 )
 
 // App is the wired application. main.go calls Run; tests can call Close
@@ -297,7 +298,11 @@ func newLogger(cfg config.Config) *slog.Logger {
 	case "error":
 		level = slog.LevelError
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	// Wrap the JSON handler with TraceHandler so every log line emitted within
+	// a request context automatically carries trace_id and span_id attributes
+	// (ADR-0005 P2.2a).
+	base := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	return slog.New(obslog.NewTraceHandler(base))
 }
 
 func readinessFor(pool *pgxpool.Pool) func() error {

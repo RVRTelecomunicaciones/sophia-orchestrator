@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -19,11 +20,12 @@ type ChangesHandler struct {
 	svc       inbound.ChangeService
 	writeErr  func(http.ResponseWriter, error)
 	writeJSON func(http.ResponseWriter, int, any)
+	logger    *slog.Logger
 }
 
 // NewChangesHandler constructs a ChangesHandler.
 func NewChangesHandler(svc inbound.ChangeService, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any)) *ChangesHandler {
-	return &ChangesHandler{svc: svc, writeErr: writeErr, writeJSON: writeJSON}
+	return &ChangesHandler{svc: svc, writeErr: writeErr, writeJSON: writeJSON, logger: slog.Default()}
 }
 
 type createChangeReq struct {
@@ -73,6 +75,12 @@ func (h *ChangesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, err)
 		return
 	}
+	// Showcase ADR-0005 P2.2a: the TraceHandler wrapper on h.logger injects
+	// trace_id and span_id automatically when r.Context() carries a W3C Trace.
+	h.logger.LogAttrs(r.Context(), slog.LevelInfo, "change created",
+		slog.String("change_id", c.ID().String()),
+		slog.String("project", c.Project()),
+	)
 	h.writeJSON(w, http.StatusCreated, toChangeDTO(c))
 }
 
