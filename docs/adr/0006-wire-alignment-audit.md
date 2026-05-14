@@ -18,6 +18,10 @@ services for the first time — no stubs, no mocks. The smoke revealed
 | 3 | orch outbound request: `{capability, payload_b64, timeout_ms}`<br>runtime inbound request: 12 fields including `correlation_id` ULID, separated `adapter_id`/`capability_name`/`capability_version`, raw `payload`, `timeout_budget_ms`, `submitted_at` | runtime returned `400` with `decode request: invalid id: expected 26-char ULID` |
 | 4 | orch payload inside shell.exec: `{cmd, args, stdin (string), timeout_ms}`<br>runtime ExecPayload: `{command, args, stdin (base64 of []byte), env, working_dir, exit_success}` | runtime returned `400` with `decode payload: json: unknown field "cmd"` |
 | 5 | orch dispatcher args: `opencode run --prompt-stdin --output-json --cwd <path>`<br>opencode CLI (current version): `opencode run [--dir <path>] [-m <model>] <message>` (positional, no `--prompt-stdin`, `--format json` replaced `--output-json`) | opencode returned help text to stderr; runtime receipt status=success but no envelope |
+| 6 | orch `createWorktrees` shell.exec payload: `{cmd, args, timeout_ms}` (legacy shape) and tried `git worktree add`<br>runtime ExecPayload requires `{command, args, working_dir, ...}`; also no upstream repo exists yet for V1 smoke | runtime returned `validation_failure` receipt; subsequent dispatch failed with `Failed to change directory to /tmp/sophia/worktrees/...` because the dir was never created |
+| 7 | orch runtime HTTP client `HTTPTimeout = 30 * time.Second` (legacy default) while the inner `timeout_budget_ms` defaults to `1_800_000` (30 min) for apply<br>The HTTP transport cancels the request after 30s regardless of inner budget | every opencode dispatch returned `status=timeout duration_ms=30038` — exactly the orch-side HTTP timeout, NOT the runtime's |
+| 8 | orch dispatcher passed `--dir <worktree>` to opencode<br>opencode permission sandbox honors only the launching shell's actual `cwd`; `--dir` is recorded but NOT propagated to its permission boundary | opencode logged `permission requested: external_directory (...); auto-rejecting` and `read failed`; receipt status=success but no envelope returned. Fixed by setting `working_dir` on the runtime payload so the subprocess is spawned with cwd=worktree |
+| 9 | runtime `valueobjects/catalog.go` shell.exec@v1 `DefaultTimeout = 30 * time.Second`<br>`execute_service.go` applies `effective = min(req.timeout_budget, cap.DefaultTimeout, s.maxTimeout)` — the 30s default capped EVERY shell.exec call regardless of requested budget | opencode + LLM responses can take 7–30s; many dispatches timed out at 30037ms with `error_class=timeout`. Bumped capability default to 10 min for AI-CLI-friendly budgets |
 
 Behind these five gaps, a sixth was uncovered (Anthropic OAuth quota
 exhausted on the test machine). That one is not a code issue but it
@@ -25,8 +29,41 @@ hid the fact that the rest of the pipeline was already working —
 opencode authenticated, called the LLM, and the LLM responded; the
 response was just the API-level usage-cap error. Switching the model
 to `google/gemini-2.5-flash` (the user's Google OAuth provider in
-opencode) closed M-E0 #4 end-to-end with a valid `NEEDS_CONTEXT`
+opencode) closed the EXPLORE phase E2E with a valid `NEEDS_CONTEXT`
 envelope returned by Gemini.
+
+A subsequent **APPLY phase smoke** (M-E0 Validation Gap #5,
+2026-05-14) surfaced **four more wire-alignment gaps** (rows 6–9
+above) that the EXPLORE smoke never exercised because EXPLORE does
+not touch the SpawnGovernor, worktrees, or the apply-loop dispatch
+path. Each was a distinct boundary problem:
+
+- #6 was inside the orch's apply pipeline — `createWorktrees` had
+  not been updated to the new ExecPayload shape and still requested
+  `git worktree add` against a non-existent upstream repo.
+- #7 was a forgotten knob — the runtime HTTP client used a 30-second
+  default that pre-dated AI-CLI integration and clamped every
+  request regardless of `timeout_budget_ms`.
+- #8 was an opencode-CLI surprise — its permission sandbox is keyed
+  off `os.Getwd()` of the subprocess, not the `--dir` flag, so
+  setting `working_dir` on the runtime payload is mandatory to grant
+  the agent file access to its worktree.
+- #9 was inside runtime-adapters — `shell.exec@v1` had a 30-second
+  capability default; combined with `effective = min(...)` in
+  `execute_service`, that default capped every dispatch.
+
+All four were closed in the same session (commits on the
+`m-e0-apply-wire-alignment` branch of orchestator and on
+`m-e0-shell-exec-timeout-bump` of runtime-adapters). After these
+fixes, the apply pipeline reaches the LLM, the LLM responds, and the
+remaining failure mode is **prompt construction**: the apply prompt
+includes the absolute worktree path which the LLM tries to read as
+an absolute argv-style path; opencode's permission system still
+classifies absolute paths under `/tmp/sophia/worktrees/**` as
+`external_directory` even when they match cwd. That is **not a wire
+gap** — it is a known opencode permission quirk that needs the
+prompt to instruct the agent to use cwd-relative paths. Tracked
+separately as `M-WA1 #10` (post-V1 polish).
 
 ### Why this happened
 

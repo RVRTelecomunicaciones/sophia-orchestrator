@@ -103,27 +103,37 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
 	// Flags aligned with current opencode CLI (v0.x):
 	//   opencode run [options] <message>     ← message is POSITIONAL
-	// No --prompt-stdin (legacy), no --output-json (now --format json),
-	// no --cwd (now --dir). The fenced-JSON envelope is extracted from
-	// stdout in default format.
+	// No --prompt-stdin (legacy), no --output-json (now --format json).
+	//
+	// IMPORTANT: do NOT pass --dir. Opencode's sandboxed permission system
+	// classifies any path outside the launching shell's cwd as
+	// "external_directory" and auto-rejects file reads/writes — even if
+	// --dir points there. The only way to grant the worktree access is to
+	// spawn opencode with cwd=<worktree>, which we do by setting
+	// working_dir on the runtime payload below (8th wire-alignment gap,
+	// discovered during M-E0 Validation Gap #5).
 	args := []string{"run"}
 	if d.cfg.Model != "" {
 		args = append(args, "-m", d.cfg.Model)
-	}
-	if req.WorktreePath != "" && req.WorktreePath != "." {
-		args = append(args, "--dir", req.WorktreePath)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
 	args = append(args, req.Prompt) // positional message — full SDD prompt
 
 	// Wire shape mirrors sophia-runtime-adapters shell adapter ExecPayload:
-	//   command (not "cmd"), args. No stdin — opencode reads message from
-	//   positional argv. Outer timeout_budget_ms is on the ExecutionRequest.
+	//   command (not "cmd"), args, working_dir. No stdin — opencode reads
+	//   message from positional argv. working_dir MUST be set: the runtime
+	//   spawns the subprocess with cwd = working_dir, which is the only
+	//   way opencode's permission system grants file access to the
+	//   worktree. Outer timeout_budget_ms is on the ExecutionRequest.
 	//   Runtime decoder is DisallowUnknownFields strict.
-	payload, err := json.Marshal(map[string]any{
+	execPayload := map[string]any{
 		"command": d.cfg.Cmd,
 		"args":    args,
-	})
+	}
+	if req.WorktreePath != "" && req.WorktreePath != "." {
+		execPayload["working_dir"] = req.WorktreePath
+	}
+	payload, err := json.Marshal(execPayload)
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: marshal payload: %w", err)
 	}

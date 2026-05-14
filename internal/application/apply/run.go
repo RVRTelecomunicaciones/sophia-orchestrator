@@ -472,10 +472,15 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 			return fmt.Errorf("persist worktree assignment: %w", err)
 		}
 
+		// M-E0 wire-alignment: payload shape mirrors runtime ExecPayload
+		// (command not cmd; no inner timeout_ms — that's outer).
+		// V1 smoke: mkdir -p the path. V1.5 will swap to git.worktree.create@v1
+		// once runtime ships the typed capability AND we have an upstream repo
+		// to clone from. Plain mkdir lets the dispatcher's --dir flag find a
+		// real directory; opencode will then cd into it.
 		payload, _ := json.Marshal(map[string]any{
-			"cmd":  "git",
-			"args": []string{"worktree", "add", "-b", branch, path},
-			"timeout_ms": 30_000,
+			"command": "mkdir",
+			"args":    []string{"-p", path},
 		})
 		_, err := s.d.Runtime.Execute(ctx, outbound.ExecutionRequest{
 			Capability: "shell.exec@v1",
@@ -483,8 +488,6 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 			TimeoutMS:  30_000,
 		})
 		if err != nil {
-			// V1: log and continue. V1.5 with typed git.worktree.create@v1
-			// will fail-fast with a structured error.
 			s.publishEvent(board.PhaseID(), "apply.worktree.error", map[string]any{
 				"group_id": g.ID().String(), "err": err.Error(),
 			})

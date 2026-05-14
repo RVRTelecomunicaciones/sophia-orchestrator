@@ -91,18 +91,17 @@ func TestDispatch_HappyPath(t *testing.T) {
 	require.Equal(t, "v1", env["schema_version"])
 	require.Equal(t, "DONE", env["status"])
 
-	// Verify args injected --dir and prompt as positional last arg
+	// Verify wire shape: worktree is passed via working_dir (NOT --dir),
+	// prompt is the last positional arg, stdin is absent.
+	// See dispatcher.go M-E0 8th wire-gap fix: opencode's permission
+	// sandbox honors the launching shell's cwd, not --dir.
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
 	args := payload["args"].([]any)
-	foundDir := false
 	for _, a := range args {
-		if a == "--dir" {
-			foundDir = true
-			break
-		}
+		require.NotEqual(t, "--dir", a, "must NOT pass --dir; use working_dir on payload instead")
 	}
-	require.True(t, foundDir)
+	require.Equal(t, "/tmp/wt", payload["working_dir"], "worktree must be set as working_dir on the runtime payload")
 	require.Equal(t, "do the thing", args[len(args)-1], "prompt must be the LAST positional arg")
 	require.NotContains(t, payload, "stdin", "stdin field must NOT be sent — opencode reads from positional argv")
 }
