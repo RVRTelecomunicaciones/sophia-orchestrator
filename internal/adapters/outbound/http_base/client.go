@@ -279,7 +279,7 @@ func (c *Client) executeWithRetry(ctx context.Context, method, fullURL string, p
 		return result, nil
 	}
 	if lastErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAttemptsExhausted, lastErr)
+		return nil, fmt.Errorf("%w: %w", ErrAttemptsExhausted, lastErr)
 	}
 	return nil, ErrAttemptsExhausted
 }

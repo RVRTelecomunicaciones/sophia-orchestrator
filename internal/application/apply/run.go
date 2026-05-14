@@ -129,7 +129,7 @@ func NewRun(d RunDeps) *RunService {
 // from the goroutine that handles RunPhase, after the Phase row is in
 // status=running. On return, the phase has either completed (with envelope)
 // or been marked blocked. The phase.Service caller persists the phase.
-func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error) {
+func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, _ inbound.RunPhaseInput) (*envelope.Envelope, error) {
 	// Step 1: pre-flight — load tasks list from memory-engine.
 	tasksList, err := s.loadTasksList(ctx, c)
 	if err != nil {
@@ -336,7 +336,7 @@ func (s *RunService) finalize(ctx context.Context, c *change.Change, p *phase.Ph
 
 // failEnv constructs a synthetic BLOCKED envelope used by Execute on
 // pre-flight failures. The phase.Service caller persists it.
-func (s *RunService) failEnv(c *change.Change, p *phase.Phase, reason string) *envelope.Envelope {
+func (s *RunService) failEnv(c *change.Change, _ *phase.Phase, reason string) *envelope.Envelope {
 	return &envelope.Envelope{
 		SchemaVersion:    envelope.SchemaVersionV1,
 		Phase:            string(phase.PhaseApply),
@@ -399,7 +399,7 @@ func (s *RunService) loadTasksList(ctx context.Context, c *change.Change) (*task
 
 	var tl tasksList
 	if err := json.Unmarshal([]byte(rec.Content), &tl); err != nil {
-		return nil, fmt.Errorf("loadTasksList %s: %w: %v", topic, ErrInvalidTasksList, err)
+		return nil, fmt.Errorf("loadTasksList %s: %w: %w", topic, ErrInvalidTasksList, err)
 	}
 	return &tl, nil
 }

@@ -256,7 +256,7 @@ func TestExecute_FailureWithRetryHint(t *testing.T) {
 // TestExecute_BadCapabilityFormat verifies the client rejects a malformed
 // capability string before making any HTTP request.
 func TestExecute_BadCapabilityFormat(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatalf("server must not be called for bad capability")
 	}))
 	defer srv.Close()
@@ -264,17 +264,17 @@ func TestExecute_BadCapabilityFormat(t *testing.T) {
 	c := newClient(t, srv)
 	cases := []string{
 		"",
-		"shell.exec",      // missing @version
-		"shellexec@v1",    // missing .name
-		"shell.@v1",       // empty name
-		".exec@v1",        // empty adapter
-		"shell.exec@",     // empty version
+		"shell.exec",   // missing @version
+		"shellexec@v1", // missing .name
+		"shell.@v1",    // empty name
+		".exec@v1",     // empty adapter
+		"shell.exec@",  // empty version
 	}
-	for _, cap := range cases {
-		cap := cap
-		t.Run(cap, func(t *testing.T) {
+	for _, canonical := range cases {
+		canonical := canonical
+		t.Run(canonical, func(t *testing.T) {
 			_, err := c.Execute(context.Background(), outbound.ExecutionRequest{
-				Capability: cap, Payload: []byte(`{}`), TimeoutMS: 1000,
+				Capability: canonical, Payload: []byte(`{}`), TimeoutMS: 1000,
 			})
 			require.Error(t, err)
 		})
@@ -298,7 +298,7 @@ func TestExecute_HTTPError(t *testing.T) {
 // TestExecute_RejectsInvalidPayload verifies the client refuses to send
 // non-JSON payloads, since the runtime requires a valid JSON object.
 func TestExecute_RejectsInvalidPayload(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatalf("server must not be called when payload is invalid")
 	}))
 	defer srv.Close()

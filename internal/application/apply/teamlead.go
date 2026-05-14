@@ -208,9 +208,10 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		return false
 	}
 
-	if err := sess.MarkRunning(); err != nil && err.Error() != "" {
-		// Already running on a previous attempt — that's fine, continue.
-	}
+	// MarkRunning is idempotent — a non-nil error means "already running"
+	// on a previous attempt, which is fine. Discard the return value
+	// rather than guarding with an empty block (revive flags empty blocks).
+	_ = sess.MarkRunning()
 
 	res, err := s.d.Dispatcher.Dispatch(ctx, outbound.DispatchRequest{
 		Prompt:       prompt,

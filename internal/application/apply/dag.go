@@ -80,7 +80,7 @@ func (d *DAGCoordinator) Wait(ctx context.Context, deps []ids.GroupID, timeout t
 			// re-reads) can still see it.
 			d.Signal(dep, res.failed, res.err)
 			if res.failed {
-				return fmt.Errorf("%w: dependency %s failed: %v", ErrGroupFailed, dep.String(), res.err)
+				return fmt.Errorf("%w: dependency %s failed: %w", ErrGroupFailed, dep.String(), res.err)
 			}
 		case <-ctx.Done():
 			return ctx.Err()

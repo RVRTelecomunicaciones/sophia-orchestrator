@@ -68,5 +68,8 @@ func (g *SystemIDGenerator) NewID() string {
 	return ulid.MustNew(ulid.Timestamp(g.clock.Now()), g.entropy).String()
 }
 
-// Now is exposed only to keep test ergonomics simple.
-var _ = time.Now
+// Now is exposed only to keep test ergonomics simple. forbidigo bans
+// time.Now in `internal/domain` but this is documentation — no runtime
+// call. Keeping the reference visible at the bottom of the file is
+// clearer than moving it elsewhere.
+var _ = time.Now //nolint:forbidigo // doc reference, no runtime call

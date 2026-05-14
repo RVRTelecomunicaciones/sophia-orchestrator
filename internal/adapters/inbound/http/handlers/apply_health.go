@@ -105,7 +105,7 @@ func NewHealthHandler(startedAt time.Time, ready func() error, writeJSON func(ht
 }
 
 // Check handles GET /api/v1/health (always 200 if process is up).
-func (h *HealthHandler) Check(w http.ResponseWriter, r *http.Request) {
+func (h *HealthHandler) Check(w http.ResponseWriter, _ *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"status":     "ok",
 		"uptime_s":   int(time.Since(h.startedAt).Seconds()),
@@ -125,7 +125,7 @@ func (h *HealthHandler) Check(w http.ResponseWriter, r *http.Request) {
 // any additional probe MUST report ok / error string under its own key in
 // the `checks` map so consumers (compose healthcheck, k8s probes) can keep
 // reading the same envelope.
-func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
+func (h *HealthHandler) Ready(w http.ResponseWriter, _ *http.Request) {
 	checks := map[string]string{"db": "ok"}
 	if h.ready != nil {
 		if err := h.ready(); err != nil {

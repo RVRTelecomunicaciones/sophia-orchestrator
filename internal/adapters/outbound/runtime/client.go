@@ -164,21 +164,20 @@ type executionReceiptResponse struct {
 
 // parseCapability splits "<adapter>.<name>@<version>" into its parts.
 // Returns an error if the format is invalid.
-func parseCapability(cap string) (adapter, name, version string, err error) {
-	atIdx := strings.LastIndex(cap, "@")
+func parseCapability(canonical string) (adapter, name, version string, err error) {
+	atIdx := strings.LastIndex(canonical, "@")
 	if atIdx < 0 {
-		return "", "", "", fmt.Errorf("capability missing @version: %q", cap)
+		return "", "", "", fmt.Errorf("capability missing @version: %q", canonical)
 	}
-	version = cap[atIdx+1:]
-	left := cap[:atIdx]
-	dotIdx := strings.Index(left, ".")
-	if dotIdx < 0 {
-		return "", "", "", fmt.Errorf("capability missing adapter.name: %q", cap)
+	version = canonical[atIdx+1:]
+	left := canonical[:atIdx]
+	var found bool
+	adapter, name, found = strings.Cut(left, ".")
+	if !found {
+		return "", "", "", fmt.Errorf("capability missing adapter.name: %q", canonical)
 	}
-	adapter = left[:dotIdx]
-	name = left[dotIdx+1:]
 	if adapter == "" || name == "" || version == "" {
-		return "", "", "", fmt.Errorf("capability has empty part(s): %q", cap)
+		return "", "", "", fmt.Errorf("capability has empty part(s): %q", canonical)
 	}
 	return adapter, name, version, nil
 }
