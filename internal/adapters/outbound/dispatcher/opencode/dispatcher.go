@@ -105,11 +105,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
 
+	// Wire shape mirrors sophia-runtime-adapters shell adapter ExecPayload:
+	//   command (not "cmd"), args, stdin ([]byte → JSON base64), env, working_dir.
+	// Outer timeout_budget_ms is handled by the runtime client; do NOT send it here.
+	// Runtime decoder is DisallowUnknownFields strict.
 	payload, err := json.Marshal(map[string]any{
-		"cmd":        d.cfg.Cmd,
-		"args":       args,
-		"stdin":      req.Prompt,
-		"timeout_ms": req.TimeoutMS,
+		"command": d.cfg.Cmd,
+		"args":    args,
+		"stdin":   []byte(req.Prompt), // encoding/json marshals []byte as base64
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: marshal payload: %w", err)
