@@ -21,7 +21,7 @@
 #   First build takes ~3-5 min (4 Go service images on cold cache).
 #
 # VERIFY
-#   curl http://localhost:8080/api/v1/health   # orchestator
+#   curl http://localhost:8080/api/v1/ready    # orchestator (200 = pg reachable)
 #   curl http://localhost:8081/health           # memory-engine
 #   # governance-core has no /health route — probe TCP liveness:
 #   curl http://localhost:8082/api/v1/tasks     # 405/404 = service alive
@@ -173,7 +173,9 @@ services:
       - "up"
     networks:
       - sophia-net
-    restart: "no"
+    # Init container: retry up to 3 times on transient PG connect races, then
+    # exit cleanly. Never restart on success — these run-to-completion sidecars.
+    restart: on-failure:3
 
   migrate-governance-core:
     # governance-core migrations use goose format (-- +goose Up / Down).
@@ -224,7 +226,9 @@ services:
         echo "governance-core migrations done"
     networks:
       - sophia-net
-    restart: "no"
+    # Init container: retry up to 3 times on transient PG connect races, then
+    # exit cleanly. Never restart on success — these run-to-completion sidecars.
+    restart: on-failure:3
 
   # =========================================================================
   # APPLICATION SERVICES
@@ -269,6 +273,12 @@ services:
       # Downstream service URLs (Docker network hostnames)
       # Verified from internal/infrastructure/config/config.go
       SOPHIA_MEMORY_URL: "http://memory-engine:8080"
+      # P1.2 (ADR-0005): memory-engine now enforces X-API-Key on /api/v1/*.
+      # The plaintext below is the dev bootstrap key seeded by
+      # sophia-memory-engine/migrations/postgres/003_create_api_keys.up.sql.
+      # NEVER use this key outside local dev. Rotate before any non-local
+      # deployment: UPDATE api_keys SET status='revoked' WHERE id='01J0DEVKEY00000000000000XX'.
+      SOPHIA_MEMORY_API_KEY: "memdev_a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef"
       SOPHIA_GOVERNANCE_URL: "http://governance-core:8080"
       SOPHIA_RUNTIME_URL: "http://runtime-adapters:8080"
       # Observability

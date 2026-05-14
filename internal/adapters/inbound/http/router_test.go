@@ -155,14 +155,32 @@ func TestHealth_Public(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+// TestReady_OK asserts the happy path returns 200 + the canonical envelope
+// {"status":"ready","checks":{"db":"ok"}} per ADR-0005 P1.4.
 func TestReady_OK(t *testing.T) {
 	srv := newSrv(t, defaultDeps())
+	start := time.Now()
 	resp, err := http.Get(srv.URL + "/api/v1/ready")
+	elapsed := time.Since(start)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	// Latency budget per ADR-0005 P1.4 (happy path < 100ms). The probe is
+	// a no-op fake, so anything above 100ms here would be loopback/scheduler
+	// noise rather than a real regression; still useful as a smoke check.
+	require.Less(t, elapsed, 100*time.Millisecond, "ready happy path must be <100ms")
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, "ready", body["status"])
+	checks, ok := body["checks"].(map[string]any)
+	require.True(t, ok, "checks must be a JSON object")
+	require.Equal(t, "ok", checks["db"])
 }
 
+// TestReady_NotReady asserts 503 + degraded envelope including the underlying
+// error string under checks.db when the readiness probe fails.
 func TestReady_NotReady(t *testing.T) {
 	deps := defaultDeps()
 	deps.Ready = func() error { return errors.New("db down") }
@@ -170,6 +188,43 @@ func TestReady_NotReady(t *testing.T) {
 	resp, _ := http.Get(srv.URL + "/api/v1/ready")
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, "degraded", body["status"])
+	checks, ok := body["checks"].(map[string]any)
+	require.True(t, ok, "checks must be a JSON object")
+	require.Equal(t, "db down", checks["db"])
+}
+
+// TestReady_ContextTimeout asserts that a probe which exceeds its own
+// deadline surfaces as 503 + the timeout error string. The orchestrator's
+// readinessFor() in bootstrap caps the probe at 2s with context.WithTimeout;
+// here we simulate that contract by returning a context.DeadlineExceeded.
+func TestReady_ContextTimeout(t *testing.T) {
+	deps := defaultDeps()
+	deps.Ready = func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+		defer cancel()
+		// Force the deadline to elapse before observing it.
+		time.Sleep(5 * time.Millisecond)
+		// Simulate "pg ping timeout" wrapping context.DeadlineExceeded.
+		if err := ctx.Err(); err != nil {
+			return errors.New("readiness: pg: " + err.Error())
+		}
+		return nil
+	}
+	srv := newSrv(t, deps)
+	resp, _ := http.Get(srv.URL + "/api/v1/ready")
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, "degraded", body["status"])
+	checks := body["checks"].(map[string]any)
+	require.Contains(t, checks["db"], "context deadline exceeded")
 }
 
 func TestAuth_RequiredOnProtectedEndpoints(t *testing.T) {
