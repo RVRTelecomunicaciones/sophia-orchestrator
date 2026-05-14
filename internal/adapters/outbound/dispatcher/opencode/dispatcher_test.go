@@ -2,7 +2,6 @@ package opencode_test
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
