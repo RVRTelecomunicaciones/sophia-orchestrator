@@ -124,6 +124,25 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 		return nil, fmt.Errorf("opencode Dispatch: %w", err)
 	}
 
+	// M-E0 #3: check receipt.Status BEFORE attempting envelope extraction.
+	// If the runtime did not succeed (e.g. the opencode binary is missing, the
+	// process timed out, or was cancelled) the agent never ran — stdout is
+	// empty or partial and must not be parsed as an envelope.
+	//
+	// Event semantics:
+	//   runtime.dispatch_failed         — receipt.Status != "success"
+	//                                     (shell.exec could not run the agent CLI)
+	//   apply.envelope.validation_failed — agent ran (receipt.Status="success") but
+	//                                      produced no fenced JSON or invalid envelope
+	//   apply.dispatch.error            — transport-level failure (HTTP error, ctx cancel)
+	if receipt.Status != outbound.ReceiptSuccess {
+		return nil, fmt.Errorf("%w: status=%q stderr=%q",
+			outbound.ErrDispatchFailed,
+			receipt.Status,
+			receipt.Stderr,
+		)
+	}
+
 	envRaw := extractLastFencedJSON(receipt.Stdout)
 	return &outbound.DispatchResult{
 		ExitCode:    receipt.ExitCode,

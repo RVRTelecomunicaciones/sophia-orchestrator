@@ -2,9 +2,17 @@ package outbound
 
 import (
 	"context"
+	"errors"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 )
+
+// ErrDispatchFailed is returned by AgentDispatcher.Dispatch when the underlying
+// runtime execution did NOT succeed (e.g., the agent CLI was not found in the
+// runtime's AllowedCommandsPath, shell.exec returned status="failure"/"timeout").
+// In this case, no envelope extraction is attempted; the caller must NOT treat
+// this as a "bad envelope from the agent" — the agent never ran.
+var ErrDispatchFailed = errors.New("dispatcher: runtime execution did not succeed")
 
 // AgentDispatcher launches an AI CLI subprocess (V1: OpenCode) inside the
 // orchestrator-managed worktree, captures stdout, and extracts the JSON
