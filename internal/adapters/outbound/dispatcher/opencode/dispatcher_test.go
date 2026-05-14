@@ -2,6 +2,7 @@ package opencode_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -46,7 +47,7 @@ func TestNew_DefaultsCmd(t *testing.T) {
 	_ = d.HealthCheck(context.Background())
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
-	require.Equal(t, "opencode", payload["cmd"])
+	require.Equal(t, "opencode", payload["command"])
 }
 
 func TestHealthCheck_Success(t *testing.T) {
@@ -103,7 +104,12 @@ func TestDispatch_HappyPath(t *testing.T) {
 		}
 	}
 	require.True(t, foundCwd)
-	require.Equal(t, "do the thing", payload["stdin"])
+	// stdin is now []byte → JSON base64; decode to assert original content
+	stdinB64, ok := payload["stdin"].(string)
+	require.True(t, ok, "stdin must be base64 string")
+	decoded, derr := base64.StdEncoding.DecodeString(stdinB64)
+	require.NoError(t, derr)
+	require.Equal(t, "do the thing", string(decoded))
 }
 
 func TestDispatch_NoEnvelopeReturnsNil(t *testing.T) {

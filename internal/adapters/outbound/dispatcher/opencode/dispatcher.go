@@ -77,9 +77,8 @@ func (d *Dispatcher) SuggestedMaxConcurrent() int { return d.cfg.Suggested }
 // reachable. Returns nil on success.
 func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 	payload, _ := json.Marshal(map[string]any{
-		"cmd":        d.cfg.Cmd,
-		"args":       []string{"--version"},
-		"timeout_ms": 5000,
+		"command": d.cfg.Cmd,
+		"args":    []string{"--version"},
 	})
 	receipt, err := d.runtime.Execute(ctx, outbound.ExecutionRequest{
 		Capability: "shell.exec@v1",
