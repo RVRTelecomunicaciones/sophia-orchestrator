@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -211,14 +212,37 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		EnvelopeOut:  "stdout-fenced-json",
 	})
 	if err != nil {
+		// M-E0 #3: distinguish runtime-level dispatch failure from transport errors.
+		// ErrDispatchFailed means the agent CLI never ran (e.g. binary not found,
+		// shell.exec timeout). This is NOT an envelope validation failure.
+		if errors.Is(err, outbound.ErrDispatchFailed) {
+			s.publishEvent(p.ID(), "runtime.dispatch_failed", map[string]any{
+				"task_id": task.ID().String(),
+				"err":     err.Error(),
+			})
+			return false
+		}
+		// Transport-level failure (HTTP error, context cancellation, etc.).
 		s.publishEvent(p.ID(), "apply.dispatch.error", map[string]any{
 			"task_id": task.ID().String(), "err": err.Error(),
 		})
 		return false
 	}
 
+	// Defensive guard: should not happen after hardening (Dispatch returns
+	// ErrDispatchFailed instead of nil-result on non-success receipts).
+	// Preserved for forward-compatibility with other AgentDispatcher impls.
+	if res.EnvelopeRaw == nil {
+		s.publishEvent(p.ID(), "apply.envelope.validation_failed", map[string]any{
+			"task_id": task.ID().String(), "err": "agent produced no fenced JSON envelope",
+		})
+		return false
+	}
+
 	env, err := s.d.Validator.Validate(res.EnvelopeRaw, phase.PhaseApply)
 	if err != nil {
+		// TRUE meaning of validation_failed: agent ran (receipt.Status="success")
+		// but its output is invalid JSON or fails the envelope schema.
 		s.publishEvent(p.ID(), "apply.envelope.validation_failed", map[string]any{
 			"task_id": task.ID().String(), "err": err.Error(),
 		})

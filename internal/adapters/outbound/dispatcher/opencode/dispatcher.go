@@ -37,6 +37,9 @@ type Config struct {
 	ExtraArgs []string
 	// Suggested is the value returned by SuggestedMaxConcurrent.
 	Suggested int
+	// Model, if non-empty, is passed via opencode `-m <provider/model>`.
+	// Empty = opencode picks its default model from its config.
+	Model string
 }
 
 // DefaultConfig returns production defaults.
@@ -77,9 +80,8 @@ func (d *Dispatcher) SuggestedMaxConcurrent() int { return d.cfg.Suggested }
 // reachable. Returns nil on success.
 func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 	payload, _ := json.Marshal(map[string]any{
-		"cmd":        d.cfg.Cmd,
-		"args":       []string{"--version"},
-		"timeout_ms": 5000,
+		"command": d.cfg.Cmd,
+		"args":    []string{"--version"},
 	})
 	receipt, err := d.runtime.Execute(ctx, outbound.ExecutionRequest{
 		Capability: "shell.exec@v1",
@@ -99,17 +101,28 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 // Captures stdout, extracts the LAST fenced ```json``` block as
 // EnvelopeRaw, and returns the structured result.
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
-	args := []string{"run", "--prompt-stdin", "--output-json"}
+	// Flags aligned with current opencode CLI (v0.x):
+	//   opencode run [options] <message>     ← message is POSITIONAL
+	// No --prompt-stdin (legacy), no --output-json (now --format json),
+	// no --cwd (now --dir). The fenced-JSON envelope is extracted from
+	// stdout in default format.
+	args := []string{"run"}
+	if d.cfg.Model != "" {
+		args = append(args, "-m", d.cfg.Model)
+	}
 	if req.WorktreePath != "" && req.WorktreePath != "." {
-		args = append(args, "--cwd", req.WorktreePath)
+		args = append(args, "--dir", req.WorktreePath)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
+	args = append(args, req.Prompt) // positional message — full SDD prompt
 
+	// Wire shape mirrors sophia-runtime-adapters shell adapter ExecPayload:
+	//   command (not "cmd"), args. No stdin — opencode reads message from
+	//   positional argv. Outer timeout_budget_ms is on the ExecutionRequest.
+	//   Runtime decoder is DisallowUnknownFields strict.
 	payload, err := json.Marshal(map[string]any{
-		"cmd":        d.cfg.Cmd,
-		"args":       args,
-		"stdin":      req.Prompt,
-		"timeout_ms": req.TimeoutMS,
+		"command": d.cfg.Cmd,
+		"args":    args,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: marshal payload: %w", err)
@@ -122,6 +135,25 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: %w", err)
+	}
+
+	// M-E0 #3: check receipt.Status BEFORE attempting envelope extraction.
+	// If the runtime did not succeed (e.g. the opencode binary is missing, the
+	// process timed out, or was cancelled) the agent never ran — stdout is
+	// empty or partial and must not be parsed as an envelope.
+	//
+	// Event semantics:
+	//   runtime.dispatch_failed         — receipt.Status != "success"
+	//                                     (shell.exec could not run the agent CLI)
+	//   apply.envelope.validation_failed — agent ran (receipt.Status="success") but
+	//                                      produced no fenced JSON or invalid envelope
+	//   apply.dispatch.error            — transport-level failure (HTTP error, ctx cancel)
+	if receipt.Status != outbound.ReceiptSuccess {
+		return nil, fmt.Errorf("%w: status=%q stderr=%q",
+			outbound.ErrDispatchFailed,
+			receipt.Status,
+			receipt.Stderr,
+		)
 	}
 
 	envRaw := extractLastFencedJSON(receipt.Stdout)

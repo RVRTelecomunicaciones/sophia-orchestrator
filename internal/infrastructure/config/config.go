@@ -71,6 +71,10 @@ type ServiceConfig struct {
 type DispatcherConfig struct {
 	Cmd                 string
 	SuggestedConcurrent int
+	// Model is the opencode `-m <provider/model>` flag value. Empty = let
+	// opencode pick its default. Examples: "anthropic/claude-opus-4-7",
+	// "google/gemini-2.5-flash", "google/gemini-2.5-pro".
+	Model string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -146,6 +150,7 @@ func Load() (Config, error) {
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)
+	c.Dispatcher.Model = envStr("SOPHIA_DISPATCHER_MODEL", c.Dispatcher.Model)
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
 

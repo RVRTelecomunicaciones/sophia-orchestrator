@@ -704,3 +704,110 @@ func TestDefaultRunConfig_HasV1Defaults(t *testing.T) {
 	require.Equal(t, 2, c.MaxParallelImplementsPerGroup)
 	require.Equal(t, 600, c.DepWaitTimeout)
 }
+
+// --- M-E0 #3: dispatch event semantics tests ---
+
+// fakeDispatcherErrDispatch always returns outbound.ErrDispatchFailed, simulating
+// a runtime where the agent CLI is not found or the shell.exec timed out.
+type fakeDispatcherErrDispatch struct {
+	calls atomic.Int32
+}
+
+func (d *fakeDispatcherErrDispatch) Provider() session.Provider    { return session.ProviderOpenCode }
+func (d *fakeDispatcherErrDispatch) SuggestedMaxConcurrent() int   { return 4 }
+func (d *fakeDispatcherErrDispatch) HealthCheck(_ context.Context) error { return nil }
+
+func (d *fakeDispatcherErrDispatch) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	d.calls.Add(1)
+	return nil, errors.Join(
+		outbound.ErrDispatchFailed,
+		errors.New(`status="failure" stderr="exec: opencode: no such file or directory"`),
+	)
+}
+
+// fakeDispatcherBadEnvelope returns a DispatchResult with EnvelopeRaw set to
+// content that is syntactically valid JSON but fails schema validation (missing
+// required fields). This simulates the agent running and producing bad output.
+type fakeDispatcherBadEnvelope struct {
+	calls atomic.Int32
+}
+
+func (d *fakeDispatcherBadEnvelope) Provider() session.Provider    { return session.ProviderOpenCode }
+func (d *fakeDispatcherBadEnvelope) SuggestedMaxConcurrent() int   { return 4 }
+func (d *fakeDispatcherBadEnvelope) HealthCheck(_ context.Context) error { return nil }
+
+func (d *fakeDispatcherBadEnvelope) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	d.calls.Add(1)
+	// Missing required fields — Validator will reject this.
+	return &outbound.DispatchResult{
+		ExitCode:    0,
+		EnvelopeRaw: []byte(`{"invalid_key":"not_a_real_envelope"}`),
+	}, nil
+}
+
+// TestDispatchImplement_RuntimeDispatchFailed_EmitsCorrectEvent verifies that
+// when the dispatcher returns ErrDispatchFailed (agent never ran), the service
+// emits "runtime.dispatch_failed" — NOT "apply.envelope.validation_failed".
+// Iron Law #5: the failure counts as an attempt; after 3 → task escalated.
+func TestDispatchImplement_RuntimeDispatchFailed_EmitsCorrectEvent(t *testing.T) {
+	disp := &fakeDispatcherErrDispatch{}
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+	// Must emit runtime.dispatch_failed — not apply.envelope.validation_failed.
+	require.Contains(t, types, "runtime.dispatch_failed",
+		"expected runtime.dispatch_failed event when agent CLI did not run")
+	require.NotContains(t, types, "apply.envelope.validation_failed",
+		"apply.envelope.validation_failed must not be emitted when agent never ran")
+
+	// Iron Law #5: after 3 failed attempts the task is escalated.
+	require.Contains(t, types, "apply.task.escalated")
+	// The call count must be >= 3 (3 attempts per task).
+	require.GreaterOrEqual(t, int(disp.calls.Load()), 3)
+
+	// The board-level result is BLOCKED (escalation → phase failure).
+	require.Equal(t, envelope.StatusBlocked, env.Status)
+}
+
+// TestDispatchImplement_EnvelopeInvalid_EmitsValidationFailed verifies that
+// when the agent DID run (receipt.Status="success") but produced an invalid
+// envelope, the service emits "apply.envelope.validation_failed" — preserving
+// the true semantic: agent ran, output is bad.
+func TestDispatchImplement_EnvelopeInvalid_EmitsValidationFailed(t *testing.T) {
+	disp := &fakeDispatcherBadEnvelope{}
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+	// The true validation_failed path: agent ran, envelope schema failed.
+	require.Contains(t, types, "apply.envelope.validation_failed",
+		"expected apply.envelope.validation_failed when agent produced bad envelope")
+	require.NotContains(t, types, "runtime.dispatch_failed",
+		"runtime.dispatch_failed must not be emitted when the agent ran successfully")
+
+	// Iron Law #5: 3 bad envelopes → escalation.
+	require.Contains(t, types, "apply.task.escalated")
+	require.GreaterOrEqual(t, int(disp.calls.Load()), 3)
+	require.Equal(t, envelope.StatusBlocked, env.Status)
+}

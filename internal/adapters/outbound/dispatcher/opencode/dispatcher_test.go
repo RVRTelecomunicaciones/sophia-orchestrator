@@ -46,7 +46,7 @@ func TestNew_DefaultsCmd(t *testing.T) {
 	_ = d.HealthCheck(context.Background())
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
-	require.Equal(t, "opencode", payload["cmd"])
+	require.Equal(t, "opencode", payload["command"])
 }
 
 func TestHealthCheck_Success(t *testing.T) {
@@ -91,19 +91,20 @@ func TestDispatch_HappyPath(t *testing.T) {
 	require.Equal(t, "v1", env["schema_version"])
 	require.Equal(t, "DONE", env["status"])
 
-	// Verify args injected --cwd
+	// Verify args injected --dir and prompt as positional last arg
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
 	args := payload["args"].([]any)
-	foundCwd := false
+	foundDir := false
 	for _, a := range args {
-		if a == "--cwd" {
-			foundCwd = true
+		if a == "--dir" {
+			foundDir = true
 			break
 		}
 	}
-	require.True(t, foundCwd)
-	require.Equal(t, "do the thing", payload["stdin"])
+	require.True(t, foundDir)
+	require.Equal(t, "do the thing", args[len(args)-1], "prompt must be the LAST positional arg")
+	require.NotContains(t, payload, "stdin", "stdin field must NOT be sent — opencode reads from positional argv")
 }
 
 func TestDispatch_NoEnvelopeReturnsNil(t *testing.T) {
@@ -139,7 +140,7 @@ func TestDispatch_WorktreePathDotOmitsCwdArg(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
 	args := payload["args"].([]any)
 	for _, a := range args {
-		require.NotEqual(t, "--cwd", a, "WorktreePath \".\" should not inject --cwd")
+		require.NotEqual(t, "--dir", a, "WorktreePath \".\" should not inject --cwd")
 	}
 }
 
@@ -157,4 +158,67 @@ func TestDispatch_ExtraArgsAppended(t *testing.T) {
 		}
 	}
 	require.True(t, hasNoColor)
+}
+
+// --- M-E0 #3: receipt.Status guard tests ---
+
+// TestDispatch_ReceiptFailure_ReturnsErrDispatchFailed verifies that when the
+// runtime reports status="failure" (e.g. opencode binary not found), Dispatch
+// returns outbound.ErrDispatchFailed and does NOT attempt envelope extraction.
+func TestDispatch_ReceiptFailure_ReturnsErrDispatchFailed(t *testing.T) {
+	rt := &fakeRuntime{returnRecp: &outbound.ExecutionReceipt{
+		Status:   outbound.ReceiptFailure,
+		Stderr:   []byte("exec: opencode: no such file or directory"),
+		ExitCode: 127,
+	}}
+	d := opencode.New(rt, opencode.DefaultConfig())
+
+	res, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "x"})
+
+	require.Error(t, err)
+	require.True(t, errors.Is(err, outbound.ErrDispatchFailed),
+		"expected ErrDispatchFailed, got: %v", err)
+	require.Nil(t, res, "result must be nil when dispatch fails")
+}
+
+// TestDispatch_ReceiptTimeout_ReturnsErrDispatchFailed verifies that a
+// status="timeout" receipt (agent CLI hung) also produces ErrDispatchFailed.
+func TestDispatch_ReceiptTimeout_ReturnsErrDispatchFailed(t *testing.T) {
+	rt := &fakeRuntime{returnRecp: &outbound.ExecutionReceipt{
+		Status:   outbound.ReceiptTimeout,
+		Stderr:   []byte("process timed out after 30s"),
+		ExitCode: -1,
+	}}
+	d := opencode.New(rt, opencode.DefaultConfig())
+
+	res, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "x"})
+
+	require.Error(t, err)
+	require.True(t, errors.Is(err, outbound.ErrDispatchFailed),
+		"expected ErrDispatchFailed, got: %v", err)
+	require.Nil(t, res, "result must be nil on timeout")
+}
+
+// TestDispatch_ReceiptSuccess_StillReturnsResult confirms that the happy path
+// is not regressed: status="success" with valid fenced JSON yields a populated
+// DispatchResult with EnvelopeRaw set.
+func TestDispatch_ReceiptSuccess_StillReturnsResult(t *testing.T) {
+	stdout := []byte("thinking...\n```json\n{\"schema_version\":\"v1\",\"status\":\"DONE\"}\n```\n")
+	rt := &fakeRuntime{returnRecp: &outbound.ExecutionReceipt{
+		Status:     outbound.ReceiptSuccess,
+		Stdout:     stdout,
+		ExitCode:   0,
+		DurationMS: 500,
+	}}
+	d := opencode.New(rt, opencode.DefaultConfig())
+
+	res, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "x"})
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.NotEmpty(t, res.EnvelopeRaw, "EnvelopeRaw must be populated on success")
+	var env map[string]any
+	require.NoError(t, json.Unmarshal(res.EnvelopeRaw, &env))
+	require.Equal(t, "v1", env["schema_version"])
+	require.Equal(t, 500, res.DurationMS)
 }

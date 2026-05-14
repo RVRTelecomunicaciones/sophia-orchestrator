@@ -93,6 +93,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	dispatcher := opencode.New(rtClient, opencode.Config{
 		Cmd:       cfg.Dispatcher.Cmd,
 		Suggested: cfg.Dispatcher.SuggestedConcurrent,
+		Model:     cfg.Dispatcher.Model,
 	})
 
 	// Discipline services.
