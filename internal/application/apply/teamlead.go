@@ -13,6 +13,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -37,7 +38,7 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 	if err != nil {
 		return groupOutcome{failed: true, err: err}
 	}
-	s.publishEvent(p.ID(), "apply.team_lead.spawned", map[string]any{
+	s.publishEvent(p.ID(), inbound.EventApplyTeamLeadSpawned, map[string]any{
 		"session_id": teamLeadSess.ID().String(),
 		"group_id":   group.ID().String(),
 	})
@@ -125,20 +126,20 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 	// (the other lead owns it).
 	implSession, err := s.makeSession(ctx, c, p, group, session.RoleImplement, task.Description())
 	if err != nil {
-		s.publishEvent(p.ID(), "apply.implement.spawn_failed", map[string]any{
+		s.publishEvent(p.ID(), inbound.EventApplyImplementSpawnFailed, map[string]any{
 			"task_id": task.ID().String(), "err": err.Error(),
 		})
 		return false
 	}
 	claimed, err := s.d.BoardRepo.ClaimTask(ctx, task.ID(), implSession.ID())
 	if err != nil || !claimed {
-		s.publishEvent(p.ID(), "apply.task.claim_skipped", map[string]any{
+		s.publishEvent(p.ID(), inbound.EventApplyTaskClaimSkipped, map[string]any{
 			"task_id": task.ID().String(),
 			"err":     fmtErr(err),
 		})
 		return false
 	}
-	s.publishEvent(p.ID(), "apply.task.claimed", map[string]any{
+	s.publishEvent(p.ID(), inbound.EventApplyTaskClaimed, map[string]any{
 		"task_id":    task.ID().String(),
 		"session_id": implSession.ID().String(),
 	})
@@ -149,7 +150,7 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		}
 		// SpawnGovernor gating per implement attempt.
 		if err := s.d.SpawnGov.Acquire(ctx); err != nil {
-			s.publishEvent(p.ID(), "apply.implement.spawn_governor_error", map[string]any{
+			s.publishEvent(p.ID(), inbound.EventApplyImplementSpawnGovernorError, map[string]any{
 				"task_id": task.ID().String(), "err": err.Error(),
 			})
 			return false
@@ -165,14 +166,14 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		}
 		if recordErr != nil {
 			// Escalation: 3rd consecutive failure.
-			s.publishEvent(p.ID(), "apply.task.escalated", map[string]any{
+			s.publishEvent(p.ID(), inbound.EventApplyTaskEscalated, map[string]any{
 				"task_id":  task.ID().String(),
 				"attempts": task.Attempts(),
 				"reason":   recordErr.Error(),
 			})
 			return false
 		}
-		s.publishEvent(p.ID(), "apply.task.retry", map[string]any{
+		s.publishEvent(p.ID(), inbound.EventApplyTaskRetry, map[string]any{
 			"task_id":  task.ID().String(),
 			"attempts": task.Attempts(),
 		})
@@ -218,14 +219,14 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		// ErrDispatchFailed means the agent CLI never ran (e.g. binary not found,
 		// shell.exec timeout). This is NOT an envelope validation failure.
 		if errors.Is(err, outbound.ErrDispatchFailed) {
-			s.publishEvent(p.ID(), "runtime.dispatch_failed", map[string]any{
+			s.publishEvent(p.ID(), inbound.EventRuntimeDispatchFailed, map[string]any{
 				"task_id": task.ID().String(),
 				"err":     err.Error(),
 			})
 			return false
 		}
 		// Transport-level failure (HTTP error, context cancellation, etc.).
-		s.publishEvent(p.ID(), "apply.dispatch.error", map[string]any{
+		s.publishEvent(p.ID(), inbound.EventApplyDispatchError, map[string]any{
 			"task_id": task.ID().String(), "err": err.Error(),
 		})
 		return false
@@ -235,7 +236,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	// ErrDispatchFailed instead of nil-result on non-success receipts).
 	// Preserved for forward-compatibility with other AgentDispatcher impls.
 	if res.EnvelopeRaw == nil {
-		s.publishEvent(p.ID(), "apply.envelope.validation_failed", map[string]any{
+		s.publishEvent(p.ID(), inbound.EventApplyEnvelopeValidationFailed, map[string]any{
 			"task_id": task.ID().String(), "err": "agent produced no fenced JSON envelope",
 		})
 		return false
@@ -245,7 +246,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	if err != nil {
 		// TRUE meaning of validation_failed: agent ran (receipt.Status="success")
 		// but its output is invalid JSON or fails the envelope schema.
-		s.publishEvent(p.ID(), "apply.envelope.validation_failed", map[string]any{
+		s.publishEvent(p.ID(), inbound.EventApplyEnvelopeValidationFailed, map[string]any{
 			"task_id": task.ID().String(), "err": err.Error(),
 		})
 		return false

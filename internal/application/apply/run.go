@@ -166,7 +166,7 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("save board: %v", err)), err
 	}
-	s.publishEvent(p.ID(), "apply.board.created", map[string]any{
+	s.publishEvent(p.ID(), inbound.EventApplyBoardCreated, map[string]any{
 		"board_id": board.ID().String(),
 		"groups":   len(board.Groups()),
 	})
@@ -205,7 +205,7 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 				resultsMu.Lock()
 				results[group.ID()] = groupOutcome{failed: true, err: err}
 				resultsMu.Unlock()
-				s.publishEvent(p.ID(), "apply.group.failed", map[string]any{
+				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, map[string]any{
 					"group_id": group.ID().String(), "reason": err.Error(),
 				})
 				return
@@ -237,11 +237,11 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 
 			dag.Signal(group.ID(), outcome.failed, outcome.err)
 			if outcome.failed {
-				s.publishEvent(p.ID(), "apply.group.failed", map[string]any{
+				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, map[string]any{
 					"group_id": group.ID().String(), "reason": fmtErr(outcome.err),
 				})
 			} else {
-				s.publishEvent(p.ID(), "apply.group.completed", map[string]any{
+				s.publishEvent(p.ID(), inbound.EventApplyGroupCompleted, map[string]any{
 					"group_id":   group.ID().String(),
 					"tasks_done": outcome.tasksDone,
 				})
@@ -279,7 +279,7 @@ func (s *RunService) finalize(ctx context.Context, c *change.Change, p *phase.Ph
 		_ = board.Complete()
 	}
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
-		s.publishEvent(p.ID(), "apply.board.save_failed", map[string]any{"err": err.Error()})
+		s.publishEvent(p.ID(), inbound.EventApplyBoardSaveFailed, map[string]any{"err": err.Error()})
 	}
 
 	// Metrics: record per-group + per-task aggregates.
@@ -551,7 +551,7 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 			TimeoutMS:  30_000,
 		})
 		if err != nil {
-			s.publishEvent(board.PhaseID(), "apply.worktree.error", map[string]any{
+			s.publishEvent(board.PhaseID(), inbound.EventApplyWorktreeError, map[string]any{
 				"group_id": g.ID().String(), "err": err.Error(),
 			})
 		}

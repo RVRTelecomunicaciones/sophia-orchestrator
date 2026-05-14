@@ -8,8 +8,12 @@ import (
 )
 
 // Event is one SSE event emitted by the orchestrator during a phase run.
+//
+// Type MUST be one of the constants declared in event_types.go (Event*).
+// Free-form strings compile but are an audit risk — IsKnownEventType
+// can be used in tests or middleware to enforce the constraint.
 type Event struct {
-	Type      string // "phase.started" | "agent.spawned" | "phase.completed" | "heartbeat" | ...
+	Type      string // see event_types.go for the catalogue
 	Timestamp time.Time
 	Payload   map[string]any
 	TraceID   string

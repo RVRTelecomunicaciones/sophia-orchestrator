@@ -236,7 +236,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("governance error: %v", err))
 		return
 	}
-	s.publishEvent(p.ID(), "governance.decision", map[string]any{
+	s.publishEvent(p.ID(), inbound.EventGovernanceDecision, map[string]any{
 		"decision":  string(decision.Decision),
 		"reason":    decision.Reason,
 		"agent_role": decision.AgentRole,
@@ -365,7 +365,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 	_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
 	_ = s.d.SessionRepo.Save(ctx, sess)
-	s.publishEvent(p.ID(), "agent.envelope.received", map[string]any{
+	s.publishEvent(p.ID(), inbound.EventAgentEnvelopeReceived, map[string]any{
 		"status":     string(env.Status),
 		"confidence": env.Confidence,
 	})
