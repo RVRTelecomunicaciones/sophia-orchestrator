@@ -1,20 +1,25 @@
 // Package memory implements outbound.MemoryClient against sophia-memory-engine's
-// HTTP API. Endpoints used (per ADR-0003 and inspection of memory-engine
-// source):
+// HTTP API. Endpoints used (per ADR-0003, amended by ADR-0005 P0.1+P0.2):
 //
-//   POST /api/v1/memories                  → Ingest
-//   GET  /api/v1/memories/{id}             → Get
-//   POST /api/v1/memories/{id}/archive     → Archive
-//   POST /api/v1/search                    → Search
-//   POST /api/v1/search/context            → BuildContext
-//   POST /api/v1/decisions                 → RecordDecision
-//   POST /api/v1/relations                 → RecordRelation
+//   POST /api/v1/memories                       → Ingest
+//   GET  /api/v1/memories/{id}                  → Get (preserves content)
+//   GET  /api/v1/memories/by-topic-key          → GetByTopicKey
+//   POST /api/v1/memories/{id}/archive          → Archive
+//   POST /api/v1/search                         → Search
+//   POST /api/v1/search/context                 → BuildContext
+//   POST /api/v1/decisions                      → RecordDecision
+//   POST /api/v1/relations                      → RecordRelation
+//
+// 404 responses on Get / GetByTopicKey are translated to outbound.ErrNotFound
+// so application-layer callers can rely on errors.Is.
 package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
@@ -93,6 +98,7 @@ type memoryResponse struct {
 	Type      string    `json:"type"`
 	Status    string    `json:"status"`
 	TopicKey  string    `json:"topic_key,omitempty"`
+	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -195,10 +201,14 @@ func (c *Client) Ingest(ctx context.Context, in outbound.IngestMemoryInput) (*ou
 	}, nil
 }
 
-// Get GETs /api/v1/memories/{id}.
+// Get GETs /api/v1/memories/{id}. Returns outbound.ErrNotFound on 404 so
+// callers can branch on errors.Is(err, outbound.ErrNotFound).
 func (c *Client) Get(ctx context.Context, id string) (*outbound.MemoryRecord, error) {
 	var resp memoryResponse
 	if err := c.http.GetJSON(ctx, "/api/v1/memories/"+id, &resp); err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("memory Get: %w", outbound.ErrNotFound)
+		}
 		return nil, fmt.Errorf("memory Get: %w", err)
 	}
 	return &outbound.MemoryRecord{
@@ -206,8 +216,65 @@ func (c *Client) Get(ctx context.Context, id string) (*outbound.MemoryRecord, er
 		Type:      resp.Type,
 		Status:    resp.Status,
 		TopicKey:  resp.TopicKey,
+		Content:   resp.Content,
 		CreatedAt: resp.CreatedAt,
 	}, nil
+}
+
+// GetByTopicKey GETs /api/v1/memories/by-topic-key. project_id and topicKey
+// are required; remaining scope fields are forwarded as optional filters
+// (server policy: latest active record wins). Returns outbound.ErrNotFound
+// when the server reports 404. Validation of required fields happens
+// client-side so we never hit the wire with an obviously-invalid request.
+func (c *Client) GetByTopicKey(ctx context.Context, scope outbound.MemoryScope, topicKey string) (*outbound.MemoryRecord, error) {
+	if scope.ProjectID == "" {
+		return nil, fmt.Errorf("memory GetByTopicKey: %w: project_id required", outbound.ErrInvalidRequest)
+	}
+	if topicKey == "" {
+		return nil, fmt.Errorf("memory GetByTopicKey: %w: topic_key required", outbound.ErrInvalidRequest)
+	}
+
+	q := url.Values{}
+	q.Set("project_id", scope.ProjectID)
+	q.Set("topic_key", topicKey)
+	if scope.TenantID != "" {
+		q.Set("tenant_id", scope.TenantID)
+	}
+	if scope.RepoID != "" {
+		q.Set("repo_id", scope.RepoID)
+	}
+	if scope.AgentID != "" {
+		q.Set("agent_id", scope.AgentID)
+	}
+	if scope.SessionID != "" {
+		q.Set("session_id", scope.SessionID)
+	}
+	if scope.Environment != "" {
+		q.Set("environment", scope.Environment)
+	}
+
+	path := "/api/v1/memories/by-topic-key?" + q.Encode()
+	var resp memoryResponse
+	if err := c.http.GetJSON(ctx, path, &resp); err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("memory GetByTopicKey: %w", outbound.ErrNotFound)
+		}
+		return nil, fmt.Errorf("memory GetByTopicKey: %w", err)
+	}
+	return &outbound.MemoryRecord{
+		ID:        resp.ID,
+		Type:      resp.Type,
+		Status:    resp.Status,
+		TopicKey:  resp.TopicKey,
+		Content:   resp.Content,
+		CreatedAt: resp.CreatedAt,
+	}, nil
+}
+
+// isNotFound returns true if err is a 404 response from http_base.
+func isNotFound(err error) bool {
+	var hbe *http_base.Error
+	return errors.As(err, &hbe) && hbe.StatusCode == http.StatusNotFound
 }
 
 // Archive POSTs /api/v1/memories/{id}/archive.

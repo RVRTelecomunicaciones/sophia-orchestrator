@@ -73,6 +73,10 @@ type RunConfig struct {
 	DepWaitTimeout                int // seconds; 0 ⇒ default 600 (10min)
 	DispatchTimeoutMS             int
 	WorktreeRoot                  string // base dir for per-group worktrees
+	// Environment is the orchestrator's deployment env ("dev" | "staging" |
+	// "prod"). Forwarded as a memory-engine scope filter on topic-key lookups
+	// so we read records saved within the same environment.
+	Environment string
 }
 
 // DefaultRunConfig returns V1 defaults aligned with spec § 5.2:
@@ -356,41 +360,36 @@ type taskItemSpec struct {
 	FilesPattern []string `json:"files_pattern"`
 }
 
+// loadTasksList retrieves the tasks list saved by the upstream tasks phase
+// from sophia-memory-engine, addressed by topic_key (per ADR-0005 P0.2).
+//
+// Iron Law #1: BLOCKED-on-memory-failure is correct behavior. There is NO
+// fallback — if the tasks list is missing or malformed we fail loudly so
+// the operator sees the real failure rather than a silent stub run.
 func (s *RunService) loadTasksList(ctx context.Context, c *change.Change) (*tasksList, error) {
 	topic := fmt.Sprintf("sdd/%s/tasks", c.Name())
-	rec, err := s.d.Memory.Get(ctx, topic)
+	scope := outbound.MemoryScope{
+		ProjectID:   c.Project(),
+		AgentID:     "sophia-orchestator",
+		SessionID:   c.ID().String(),
+		Environment: s.d.Config.Environment,
+	}
+	rec, err := s.d.Memory.GetByTopicKey(ctx, scope, topic)
 	if err != nil {
 		if errors.Is(err, outbound.ErrNotFound) {
-			return nil, ErrNoTasksList
+			return nil, fmt.Errorf("loadTasksList %s: %w", topic, ErrNoTasksList)
 		}
-		return nil, err
+		return nil, fmt.Errorf("loadTasksList %s: %w", topic, err)
 	}
-	if rec == nil {
-		return nil, ErrNoTasksList
+	if rec == nil || rec.Content == "" {
+		return nil, fmt.Errorf("loadTasksList %s: %w", topic, ErrNoTasksList)
 	}
-	// In V1 we trust the upstream tasks phase to have stored the structured
-	// list as the record's content. The MemoryClient interface returns a
-	// MemoryRecord that does not echo content (see ADR-0003 limitations);
-	// real content fetch comes via Search-by-topic-key in V2. For V1 we
-	// fall back to a synthetic single-group list when content is empty,
-	// so the orchestrator demonstrates parallel team-lead behavior with
-	// the stub memory backend.
-	return s.synthesizeFallbackTasksList(c), nil
-}
 
-// synthesizeFallbackTasksList returns a deterministic minimal DAG used when
-// the upstream tasks list cannot be retrieved (V1 limitation noted above).
-func (s *RunService) synthesizeFallbackTasksList(_ *change.Change) *tasksList {
-	return &tasksList{
-		Groups: []taskGroupSpec{
-			{
-				Name: "group-1",
-				Tasks: []taskItemSpec{
-					{Description: "implement task 1", FilesPattern: []string{"src/**/*.go"}},
-				},
-			},
-		},
+	var tl tasksList
+	if err := json.Unmarshal([]byte(rec.Content), &tl); err != nil {
+		return nil, fmt.Errorf("loadTasksList %s: %w: %v", topic, ErrInvalidTasksList, err)
 	}
+	return &tl, nil
 }
 
 func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksList) (*apply.Board, error) {

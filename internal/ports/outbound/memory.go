@@ -7,21 +7,27 @@ import (
 
 // MemoryClient is the outbound port for sophia-memory-engine.
 // Operations are a curated subset of the memory-engine HTTP API matched to
-// what the orchestrator needs (per ADR-0003):
+// what the orchestrator needs (per ADR-0003, amended by ADR-0005 P0.1+P0.2):
 //
-//   POST /api/v1/memories                  → Ingest
-//   GET  /api/v1/memories/{id}             → Get
-//   POST /api/v1/memories/{id}/archive     → Archive
-//   POST /api/v1/search                    → Search
-//   POST /api/v1/search/context            → BuildContext
-//   POST /api/v1/decisions                 → RecordDecision
-//   POST /api/v1/relations                 → RecordRelation
+//   POST /api/v1/memories                       → Ingest
+//   GET  /api/v1/memories/{id}                  → Get (returns full record incl. content)
+//   GET  /api/v1/memories/by-topic-key          → GetByTopicKey (latest active record)
+//   POST /api/v1/memories/{id}/archive          → Archive
+//   POST /api/v1/search                         → Search
+//   POST /api/v1/search/context                 → BuildContext
+//   POST /api/v1/decisions                      → RecordDecision
+//   POST /api/v1/relations                      → RecordRelation
 //
 // Heuristics, feedback, profile, and purge endpoints are intentionally not
 // exposed to the orchestrator — those are used by other ecosystem clients.
+//
+// Both Get and GetByTopicKey populate MemoryRecord.Content with the full
+// record body (string; may carry JSON, markdown, or any text). Callers that
+// need bytes can convert via []byte(rec.Content).
 type MemoryClient interface {
 	Ingest(ctx context.Context, in IngestMemoryInput) (*MemoryRecord, error)
 	Get(ctx context.Context, id string) (*MemoryRecord, error)
+	GetByTopicKey(ctx context.Context, scope MemoryScope, topicKey string) (*MemoryRecord, error)
 	Archive(ctx context.Context, id, reason, requestedBy string) error
 	Search(ctx context.Context, q SearchQuery) (*SearchResults, error)
 	BuildContext(ctx context.Context, in ContextRequest) (*ContextBundle, error)
@@ -62,13 +68,17 @@ type IngestMemoryInput struct {
 	ValidUntil  *time.Time
 }
 
-// MemoryRecord is a returned record (id + minimal echo). For full record
-// shape, see sophia-memory-engine's docs.
+// MemoryRecord is a returned record. Content carries the full record body
+// (markdown, JSON, or any text) and is populated by Get and GetByTopicKey.
+// Ingest returns a record with Content empty (the caller already has it).
+// For the full record shape returned by sophia-memory-engine, see its docs;
+// only fields actually consumed by the orchestrator are echoed here.
 type MemoryRecord struct {
 	ID        string
 	Type      string
 	Status    string
 	TopicKey  string
+	Content   string
 	CreatedAt time.Time
 }
 

@@ -194,6 +194,10 @@ func (m *fakeMemory) Get(_ context.Context, _ string) (*outbound.MemoryRecord, e
 	return nil, m.getErr
 }
 
+func (m *fakeMemory) GetByTopicKey(_ context.Context, _ outbound.MemoryScope, _ string) (*outbound.MemoryRecord, error) {
+	return nil, m.getErr
+}
+
 func (m *fakeMemory) Archive(_ context.Context, _, _, _ string) error {
 	return nil
 }
