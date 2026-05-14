@@ -195,8 +195,7 @@ func fmtSprintf(tpl string, args ...any) string {
 func sprintf(tpl string, args ...any) string {
 	out := tpl
 	for _, a := range args {
-		switch v := a.(type) {
-		case string:
+		if v, ok := a.(string); ok {
 			out = strings.Replace(out, "%q", `"`+v+`"`, 1)
 		}
 	}

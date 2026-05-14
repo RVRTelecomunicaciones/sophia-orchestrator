@@ -90,7 +90,7 @@ func Parse(traceparent string) (Trace, error) {
 	}
 	flagBytes, err := hex.DecodeString(flags)
 	if err != nil {
-		return Trace{}, fmt.Errorf("%w: flags not valid hex: %s", ErrInvalidTraceparent, err)
+		return Trace{}, fmt.Errorf("%w: flags not valid hex: %w", ErrInvalidTraceparent, err)
 	}
 	return Trace{
 		TraceID: strings.ToLower(traceID),

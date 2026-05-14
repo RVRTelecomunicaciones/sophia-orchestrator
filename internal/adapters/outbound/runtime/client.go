@@ -171,12 +171,11 @@ func parseCapability(canonical string) (adapter, name, version string, err error
 	}
 	version = canonical[atIdx+1:]
 	left := canonical[:atIdx]
-	dotIdx := strings.Index(left, ".")
-	if dotIdx < 0 {
+	var found bool
+	adapter, name, found = strings.Cut(left, ".")
+	if !found {
 		return "", "", "", fmt.Errorf("capability missing adapter.name: %q", canonical)
 	}
-	adapter = left[:dotIdx]
-	name = left[dotIdx+1:]
 	if adapter == "" || name == "" || version == "" {
 		return "", "", "", fmt.Errorf("capability has empty part(s): %q", canonical)
 	}

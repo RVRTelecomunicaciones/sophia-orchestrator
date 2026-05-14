@@ -336,7 +336,7 @@ func (s *RunService) finalize(ctx context.Context, c *change.Change, p *phase.Ph
 
 // failEnv constructs a synthetic BLOCKED envelope used by Execute on
 // pre-flight failures. The phase.Service caller persists it.
-func (s *RunService) failEnv(c *change.Change, p *phase.Phase, reason string) *envelope.Envelope {
+func (s *RunService) failEnv(c *change.Change, _ *phase.Phase, reason string) *envelope.Envelope {
 	return &envelope.Envelope{
 		SchemaVersion:    envelope.SchemaVersionV1,
 		Phase:            string(phase.PhaseApply),
