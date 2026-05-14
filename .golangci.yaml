@@ -134,6 +134,15 @@ issues:
     - path: internal/application/phase/service\.go
       linters: [unparam]
       text: "appendAudit"
+    # runAllGroups returns (results, error) for symmetry with future
+    # error paths (e.g. ctx cancellation during fan-out, persistence
+    # failures). Today every code path completes via the goroutines
+    # without propagating an outer error, so unparam flags the second
+    # result as always-nil. Keep the signature stable to avoid
+    # ripple-back through Execute when those paths get wired.
+    - path: internal/application/apply/run\.go
+      linters: [unparam]
+      text: "runAllGroups"
     # ops/local/stubs is a local-dev mock binary, not production
     # orchestrator code. Forbidigo's time.Now / ulid.Make bans don't
     # apply — these stubs intentionally use stdlib directly.

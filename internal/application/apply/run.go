@@ -399,7 +399,7 @@ func (s *RunService) loadTasksList(ctx context.Context, c *change.Change) (*task
 
 	var tl tasksList
 	if err := json.Unmarshal([]byte(rec.Content), &tl); err != nil {
-		return nil, fmt.Errorf("loadTasksList %s: %w: %v", topic, ErrInvalidTasksList, err)
+		return nil, fmt.Errorf("loadTasksList %s: %w: %w", topic, ErrInvalidTasksList, err)
 	}
 	return &tl, nil
 }
