@@ -939,3 +939,90 @@ func TestExecute_PropagatesPriorContextError(t *testing.T) {
 	require.Error(t, err, "non-NotFound memory error on spec must abort apply")
 	require.Contains(t, err.Error(), "memory transport down")
 }
+
+// ---------------------------------------------------------------------------
+// refreshApplyProgress — per-implement enrichment (V1.5 follow-up)
+// ---------------------------------------------------------------------------
+
+// TestExecute_RefreshAppendsApplyProgress verifies that when an
+// apply-progress record exists in memory, the implement-agent prompt
+// includes a "## Recent progress" section appended to the base
+// priorContext (spec + design).
+func TestExecute_RefreshAppendsApplyProgress(t *testing.T) {
+	svc, _, disp, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	// Base context.
+	mem.putPhaseRecord("feat-x", "spec", "SPEC BODY.")
+	mem.putPhaseRecord("feat-x", "design", "DESIGN BODY.")
+	// Per-implement refresh source.
+	mem.putPhaseRecord("feat-x", "apply-progress",
+		"PROGRESS: group-domain completed (added type X, validator Y)")
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	prompt := disp.LastPrompt()
+	require.Contains(t, prompt, "## spec",
+		"base spec context must still be present after refresh")
+	require.Contains(t, prompt, "## Recent progress (sdd/feat-x/apply-progress)",
+		"refresh must append the apply-progress section header")
+	require.Contains(t, prompt, "PROGRESS: group-domain completed",
+		"refresh must include the apply-progress content")
+}
+
+// TestExecute_RefreshNoRecord_LeavesBaseUnchanged verifies that when
+// no apply-progress record exists (ErrNotFound), the prompt contains
+// the base context but NO "Recent progress" section.
+func TestExecute_RefreshNoRecord_LeavesBaseUnchanged(t *testing.T) {
+	svc, _, disp, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	mem.putPhaseRecord("feat-x", "spec", "SPEC BODY.")
+	// no apply-progress record planted → ErrNotFound from fake memory
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	prompt := disp.LastPrompt()
+	require.Contains(t, prompt, "SPEC BODY.")
+	require.NotContains(t, prompt, "## Recent progress",
+		"Recent progress section must be absent when no apply-progress record exists")
+}
+
+// TestExecute_RefreshTransportError_FailSoft verifies that a non-NotFound
+// error on the apply-progress lookup does NOT abort the implement attempt.
+// The base context is used unchanged and apply completes normally. This is
+// the deliberate divergence from loadPriorContext's IL1 behavior — refresh
+// is enrichment, not correctness, and transient memory failures here must
+// not penalize the apply phase.
+func TestExecute_RefreshTransportError_FailSoft(t *testing.T) {
+	svc, _, disp, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	mem.putPhaseRecord("feat-x", "spec", "SPEC BODY.")
+	// Inject a hard transport error on the apply-progress lookup ONLY.
+	// The base spec/design loads happen synchronously in Execute before
+	// fan-out, so they're unaffected.
+	mem.putPhaseError("feat-x", "apply-progress",
+		errors.New("apply-progress transport failure"))
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err,
+		"apply must complete even when apply-progress refresh errors (fail-soft)")
+
+	prompt := disp.LastPrompt()
+	require.Contains(t, prompt, "SPEC BODY.",
+		"base context must still be present after refresh error")
+	require.NotContains(t, prompt, "## Recent progress",
+		"Recent progress section must be absent when refresh fails")
+}
