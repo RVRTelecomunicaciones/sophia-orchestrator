@@ -188,16 +188,18 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 //   - File reservation (lock.acquire@v1) is replaced by the atomic ClaimTask
 //     above. Per-file locking is V1.5 once runtime ships Phase 2.
 //   - priorContext (spec + design) is loaded once in RunService.Execute
-//     and forwarded through runTeamLead → runImplementWithRetry. A
-//     follow-up V1.5 item will refresh it per-implement to pick up
-//     downstream artifacts written by sibling tasks (e.g., apply-progress
-//     mid-run); for now it's stable for the duration of the apply phase.
+//     and stays stable for the duration of the apply phase. Per-implement
+//     enrichment with apply-progress happens here via refreshApplyProgress,
+//     so every attempt sees the freshest snapshot of sibling tasks'
+//     outcomes. Fail-soft: a memory failure on the refresh leaves the
+//     base context intact rather than blocking the attempt.
 func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) bool {
+	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:           phase.PhaseApply,
 		ChangeName:      c.Name(),
 		Project:         c.Project(),
-		PriorContext:    priorContext,
+		PriorContext:    enrichedContext,
 		TaskDescription: fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
 	})
 	if err != nil {

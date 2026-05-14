@@ -402,6 +402,43 @@ func (s *RunService) loadTasksList(ctx context.Context, c *change.Change) (*task
 	return &tl, nil
 }
 
+// refreshApplyProgress enriches the base prior context (spec + design,
+// loaded once in Execute) with the latest apply-progress snapshot from
+// memory-engine. Called per-implement so each attempt sees the freshest
+// view of what sibling tasks in the same phase have finished — useful
+// when a later task needs to avoid duplicating files a sibling already
+// created, or wants to know what got merged before its turn.
+//
+// Returns the combined context: base + "\n\n## Recent progress …" when
+// a progress record exists, or base unchanged otherwise.
+//
+// Failure semantics: FAIL-SOFT. Any error (ErrNotFound, transport,
+// deserialization) returns the base unchanged. The refresh is
+// enrichment — losing it does NOT block the implement attempt. This
+// differs from loadPriorContext which propagates non-NotFound errors
+// per Iron Law #1 (those happen pre-fan-out, in the synchronous prep).
+func (s *RunService) refreshApplyProgress(ctx context.Context, c *change.Change, base string) string {
+	scope := outbound.MemoryScope{
+		ProjectID:   c.Project(),
+		AgentID:     "sophia-orchestator",
+		SessionID:   c.ID().String(),
+		Environment: s.d.Config.Environment,
+	}
+	topic := fmt.Sprintf("sdd/%s/apply-progress", c.Name())
+	rec, err := s.d.Memory.GetByTopicKey(ctx, scope, topic)
+	if err != nil || rec == nil || rec.Content == "" {
+		// Silent fail-soft: enrichment optional, base context is enough
+		// to keep the implement-agent informed about spec + design.
+		return base
+	}
+	section := fmt.Sprintf("## Recent progress (sdd/%s/apply-progress)\n\n%s",
+		c.Name(), rec.Content)
+	if base == "" {
+		return section
+	}
+	return base + "\n\n" + section
+}
+
 // loadPriorContext pulls the spec and design artifacts from memory-engine
 // (saved by their respective phases via topic_key) and concatenates them
 // with section headers so the implement-agent gets architectural context
