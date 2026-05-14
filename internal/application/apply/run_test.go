@@ -751,7 +751,7 @@ func (d *fakeDispatcherBadEnvelope) Dispatch(_ context.Context, _ outbound.Dispa
 // Iron Law #5: the failure counts as an attempt; after 3 → task escalated.
 func TestDispatchImplement_RuntimeDispatchFailed_EmitsCorrectEvent(t *testing.T) {
 	disp := &fakeDispatcherErrDispatch{}
-	svc, _, _, _, events := newRunService(t, func(d *apply.RunDeps) {
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
 		d.Dispatcher = disp
 	})
 
@@ -786,7 +786,7 @@ func TestDispatchImplement_RuntimeDispatchFailed_EmitsCorrectEvent(t *testing.T)
 // the true semantic: agent ran, output is bad.
 func TestDispatchImplement_EnvelopeInvalid_EmitsValidationFailed(t *testing.T) {
 	disp := &fakeDispatcherBadEnvelope{}
-	svc, _, _, _, events := newRunService(t, func(d *apply.RunDeps) {
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
 		d.Dispatcher = disp
 	})
 
