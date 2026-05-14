@@ -42,6 +42,10 @@ SOPHIA_ENV="${SOPHIA_ENV:-dev}"
 SOPHIA_LOG_LEVEL="${SOPHIA_LOG_LEVEL:-info}"
 SOPHIA_METRICS_ENABLED="${SOPHIA_METRICS_ENABLED:-true}"
 SOPHIA_TRACES_ENABLED="${SOPHIA_TRACES_ENABLED:-false}"
+# OpenCode model: empty = opencode default; switch provider via this var.
+# Examples: anthropic/claude-opus-4-7, google/gemini-2.5-flash, google/gemini-2.5-pro
+SOPHIA_DISPATCHER_MODEL="${SOPHIA_DISPATCHER_MODEL:-google/gemini-2.5-flash}"
+export SOPHIA_DISPATCHER_MODEL
 
 # ---------------------------------------------------------------------------
 # HELPERS

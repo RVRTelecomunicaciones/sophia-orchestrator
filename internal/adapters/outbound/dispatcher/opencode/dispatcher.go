@@ -37,6 +37,9 @@ type Config struct {
 	ExtraArgs []string
 	// Suggested is the value returned by SuggestedMaxConcurrent.
 	Suggested int
+	// Model, if non-empty, is passed via opencode `-m <provider/model>`.
+	// Empty = opencode picks its default model from its config.
+	Model string
 }
 
 // DefaultConfig returns production defaults.
@@ -104,6 +107,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	// no --cwd (now --dir). The fenced-JSON envelope is extracted from
 	// stdout in default format.
 	args := []string{"run"}
+	if d.cfg.Model != "" {
+		args = append(args, "-m", d.cfg.Model)
+	}
 	if req.WorktreePath != "" && req.WorktreePath != "." {
 		args = append(args, "--dir", req.WorktreePath)
 	}
