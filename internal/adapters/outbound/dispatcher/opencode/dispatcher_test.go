@@ -104,6 +104,21 @@ func TestDispatch_HappyPath(t *testing.T) {
 	require.Equal(t, "/tmp/wt", payload["working_dir"], "worktree must be set as working_dir on the runtime payload")
 	require.Equal(t, "do the thing", args[len(args)-1], "prompt must be the LAST positional arg")
 	require.NotContains(t, payload, "stdin", "stdin field must NOT be sent — opencode reads from positional argv")
+
+	// 10th wire-gap fix: env carries OPENCODE_CONFIG_CONTENT to allowlist
+	// the worktree under opencode's permission system. Without this,
+	// opencode auto-rejects every read/edit as external_directory.
+	envMap, ok := payload["env"].(map[string]any)
+	require.True(t, ok, "payload must include env map with OPENCODE_CONFIG_CONTENT")
+	cfgRaw, ok := envMap["OPENCODE_CONFIG_CONTENT"].(string)
+	require.True(t, ok, "env must include OPENCODE_CONFIG_CONTENT string")
+	require.NotEmpty(t, cfgRaw)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cfgRaw), &cfg), "OPENCODE_CONFIG_CONTENT must be valid JSON")
+	perm := cfg["permission"].(map[string]any)
+	extDir := perm["external_directory"].(map[string]any)
+	require.Equal(t, "allow", extDir["/tmp/wt"], "worktree must be allowed under external_directory")
+	require.Equal(t, "allow", extDir["/tmp/wt/**"], "worktree recursive glob must be allowed under external_directory")
 }
 
 func TestDispatch_NoEnvelopeReturnsNil(t *testing.T) {
