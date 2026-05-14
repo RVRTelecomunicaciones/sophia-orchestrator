@@ -15,6 +15,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
 // Deps bundles the dependencies of NewRouter.
@@ -22,8 +23,9 @@ type Deps struct {
 	Changes   inbound.ChangeService
 	Phases    inbound.PhaseService
 	Apply     inbound.ApplyService
-	Events    inbound.EventStream
-	Auth      middleware.Authenticator
+	Events     inbound.EventStream
+	EventStore outbound.EventStore // durable history for Last-Event-ID resume (audit rojo #3)
+	Auth       middleware.Authenticator
 	Logger    *slog.Logger
 	StartedAt time.Time
 	Ready     func() error
@@ -89,7 +91,7 @@ func NewRouter(d Deps) chi.Router {
 		ch := handlers.NewChangesHandler(d.Changes, writeChangeErr, writeJSON)
 		ph := handlers.NewPhasesHandler(d.Phases, writePhaseErr, writeJSON)
 		ap := handlers.NewApplyHandler(d.Apply, writePhaseErr, writeJSON)
-		sh := handlers.NewSSEHandler(d.Events, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen)
+		sh := handlers.NewSSEHandler(d.Events, d.EventStore, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen)
 
 		// Change-scoped: create, list, get, abort, plus phase creation
 		// (phase doesn't yet exist when /run is invoked, so the parent

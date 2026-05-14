@@ -13,6 +13,7 @@ import (
 
 	httpinbound "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/eventstream"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
@@ -91,7 +92,21 @@ func (s *fakeEvents) Subscribe(_ context.Context, _ ids.PhaseID) (<-chan inbound
 	s.mu.Lock()
 	s.channels = append(s.channels, ch)
 	s.mu.Unlock()
-	return ch, func() { close(ch) }, nil
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for i, c := range s.channels {
+				if c == ch {
+					s.channels = append(s.channels[:i], s.channels[i+1:]...)
+					break
+				}
+			}
+			close(ch)
+		})
+	}
+	return ch, cancel, nil
 }
 
 func (s *fakeEvents) Publish(_ context.Context, _ ids.PhaseID, ev inbound.Event) error {
@@ -127,13 +142,14 @@ func newSrv(t *testing.T, deps httpinbound.Deps) *httptest.Server {
 
 func defaultDeps() httpinbound.Deps {
 	return httpinbound.Deps{
-		Changes:   &fakeChanges{},
-		Phases:    &fakePhases{},
-		Apply:     &fakeApply{},
-		Events:    &fakeEvents{},
-		Auth:      &fakeAuthn{},
-		StartedAt: time.Now(),
-		Ready:     func() error { return nil },
+		Changes:    &fakeChanges{},
+		Phases:     &fakePhases{},
+		Apply:      &fakeApply{},
+		Events:     &fakeEvents{},
+		EventStore: &eventstream.NoopEventStore{}, // no replay history in unit tests
+		Auth:       &fakeAuthn{},
+		StartedAt:  time.Now(),
+		Ready:      func() error { return nil },
 		IDGen: shared.FixedIDGenerator([]string{
 			"01ARZ3NDEKTSV4RRFFQ69G5EV1",
 			"01ARZ3NDEKTSV4RRFFQ69G5EV2",

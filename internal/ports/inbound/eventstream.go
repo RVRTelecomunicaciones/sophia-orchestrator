@@ -20,11 +20,18 @@ import (
 // `map[string]any` shape is still accepted for backward compatibility
 // with tests and gradual-migration callers — both produce identical
 // JSON bytes downstream.
+// Sequence is the monotonic per-phase id assigned by the EventStore when
+// the event is persisted. Zero means the event has not (yet) been
+// persisted — e.g. events constructed in tests or fed through pub/sub
+// without going through the durable Append path. The SSE handler
+// echoes Sequence as the wire-format `id:` field, and the CLI sends it
+// back via `Last-Event-ID` on reconnect to drive replay.
 type Event struct {
 	Type      string // see event_types.go for the catalogue
 	Timestamp time.Time
 	Payload   any // see event_payloads.go for the typed payload structs
 	TraceID   string
+	Sequence  int64 // assigned by EventStore.Append; 0 = not persisted
 }
 
 // EventStream is the publish-subscribe abstraction backing the

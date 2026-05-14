@@ -1,7 +1,12 @@
-// Package eventstream implements an in-memory pub/sub used by the SSE HTTP
+// Package eventstream implements a durable pub/sub used by the SSE HTTP
 // endpoint. One Stream serves all changes; subscribers are keyed by PhaseID.
-// Slow subscribers are dropped (non-blocking publish) to protect the
-// orchestrator's goroutines.
+//
+// Durability (audit rojo #3 fix): every Publish FIRST appends the event to
+// the injected outbound.EventStore (Postgres-backed), then broadcasts
+// in-memory. Slow subscribers may still miss the in-memory broadcast and
+// are tracked via dropFn — but the event is durable, so a client that
+// reconnects with Last-Event-ID can replay everything via EventStore.Replay
+// invoked by the SSE handler.
 package eventstream
 
 import (
@@ -10,18 +15,23 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
 // DefaultBufferSize is the default per-subscriber channel size. Tuned for
 // the typical SDD phase event rate (~10-20 events/second peak during apply).
 const DefaultBufferSize = 32
 
-// Stream is an in-memory pub/sub implementation of inbound.EventStream.
+// Stream is the durable pub/sub implementation of inbound.EventStream.
+// EventStore-backed; in-memory channels are an optimization for live
+// subscribers — the system of record is the durable store.
 type Stream struct {
 	mu      sync.RWMutex
 	topics  map[ids.PhaseID][]*subscriber
 	bufSize int
-	dropFn  func(phaseID ids.PhaseID, eventType string) // metric hook
+	store   outbound.EventStore                                          // durable backing
+	dropFn  func(phaseID ids.PhaseID, eventType string)                  // metric hook for in-memory drops
+	errFn   func(phaseID ids.PhaseID, eventType string, err error)       // metric hook for Append failures
 }
 
 type subscriber struct {
@@ -29,17 +39,29 @@ type subscriber struct {
 }
 
 // New constructs a Stream with the given per-subscriber buffer size. If
-// bufSize ≤ 0, DefaultBufferSize is used. dropFn is invoked when an event
-// is dropped because a subscriber's channel is full (use to bump metrics);
-// nil drops silently.
-func New(bufSize int, dropFn func(ids.PhaseID, string)) *Stream {
+// bufSize ≤ 0, DefaultBufferSize is used.
+//
+// store MUST be non-nil — Stream is durable-by-default. Tests that don't
+// care about persistence can pass a Noop implementation
+// (see ports/outbound/testdoubles or the embedded NoopEventStore below).
+//
+// dropFn is invoked when an in-memory broadcast is dropped (subscriber
+// channel full); nil drops silently. errFn is invoked when EventStore.Append
+// returns an error; nil logs nothing. Both are intended to be wired to
+// Prometheus counters in production.
+func New(bufSize int, store outbound.EventStore, dropFn func(ids.PhaseID, string), errFn func(ids.PhaseID, string, error)) *Stream {
+	if store == nil {
+		panic("eventstream.New: store is required (use NoopEventStore for non-durable tests)")
+	}
 	if bufSize <= 0 {
 		bufSize = DefaultBufferSize
 	}
 	return &Stream{
 		topics:  map[ids.PhaseID][]*subscriber{},
 		bufSize: bufSize,
+		store:   store,
 		dropFn:  dropFn,
+		errFn:   errFn,
 	}
 }
 
@@ -77,9 +99,32 @@ func (s *Stream) Subscribe(_ context.Context, phaseID ids.PhaseID) (<-chan inbou
 	return sub.ch, cancel, nil
 }
 
-// Publish broadcasts ev to every active subscriber of phaseID. Non-blocking:
-// if a subscriber's channel is full the event is dropped and dropFn is called.
-func (s *Stream) Publish(_ context.Context, phaseID ids.PhaseID, ev inbound.Event) error {
+// Publish first persists ev via EventStore.Append (assigning ev.Sequence),
+// then broadcasts to every active in-memory subscriber of phaseID.
+//
+// On Append failure: errFn is invoked and the broadcast still proceeds
+// with Sequence=0 — degraded mode keeps the live-stream UX usable for
+// currently-connected clients even when the DB is briefly unavailable.
+// The error is returned so callers can decide whether to surface it
+// (the orch-internal publishEvent helpers swallow the return value,
+// matching the prior non-blocking behavior).
+//
+// In-memory broadcast remains non-blocking: subscribers with full
+// channels miss the live event and dropFn fires. Those clients still
+// recover the event on next reconnect via Last-Event-ID + Replay.
+func (s *Stream) Publish(ctx context.Context, phaseID ids.PhaseID, ev inbound.Event) error {
+	seq, err := s.store.Append(ctx, phaseID, ev)
+	if err != nil {
+		if s.errFn != nil {
+			s.errFn(phaseID, ev.Type, err)
+		}
+		// degraded: continue with Sequence=0 so live subscribers still
+		// see the event (with the caveat that Last-Event-ID resume
+		// cannot recover what's not in the DB).
+	} else {
+		ev.Sequence = seq
+	}
+
 	s.mu.RLock()
 	subs := append([]*subscriber{}, s.topics[phaseID]...) // snapshot under read lock
 	s.mu.RUnlock()
@@ -94,7 +139,7 @@ func (s *Stream) Publish(_ context.Context, phaseID ids.PhaseID, ev inbound.Even
 			}
 		}
 	}
-	return nil
+	return err
 }
 
 // SubscriberCount returns the number of active subscribers for phaseID.
@@ -104,3 +149,29 @@ func (s *Stream) SubscriberCount(phaseID ids.PhaseID) int {
 	defer s.mu.RUnlock()
 	return len(s.topics[phaseID])
 }
+
+// NoopEventStore is a non-durable EventStore for tests that don't care
+// about persistence. Append assigns a monotonic in-memory sequence;
+// Replay always returns an empty slice (no history is recoverable).
+//
+// Production code must use the real outbound.EventStore (pg.EventStore).
+type NoopEventStore struct {
+	mu  sync.Mutex
+	seq int64
+}
+
+// Append assigns an in-memory monotonic sequence and discards the event.
+func (n *NoopEventStore) Append(_ context.Context, _ ids.PhaseID, _ inbound.Event) (int64, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.seq++
+	return n.seq, nil
+}
+
+// Replay always returns nil — Noop has no durable history.
+func (n *NoopEventStore) Replay(_ context.Context, _ ids.PhaseID, _ int64) ([]inbound.Event, error) {
+	return nil, nil
+}
+
+// Compile-time interface check.
+var _ outbound.EventStore = (*NoopEventStore)(nil)
