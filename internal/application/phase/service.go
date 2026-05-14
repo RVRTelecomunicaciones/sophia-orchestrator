@@ -201,11 +201,11 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 
 	// Audit + event: phase.started (sophia-wire-v1 §5.3).
 	s.appendAudit(ctx, &in.ChangeID, &pid, nil, "phase.started", nil)
-	s.publishEvent(p.ID(), contract.EventPhaseStarted, map[string]any{
-		"phase_id":   p.ID().String(),
-		"phase_type": string(in.PhaseType),
-		"change_id":  in.ChangeID.String(),
-		"started_at": s.d.Clock.Now().UTC(),
+	s.publishEvent(p.ID(), contract.EventPhaseStarted, inbound.PhaseStartedPayload{
+		PhaseID:   p.ID().String(),
+		PhaseType: string(in.PhaseType),
+		ChangeID:  in.ChangeID.String(),
+		StartedAt: s.d.Clock.Now().UTC(),
 	})
 
 	// Step 9: Schedule async work (steps 10-16).
@@ -236,10 +236,10 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("governance error: %v", err))
 		return
 	}
-	s.publishEvent(p.ID(), inbound.EventGovernanceDecision, map[string]any{
-		"decision":  string(decision.Decision),
-		"reason":    decision.Reason,
-		"agent_role": decision.AgentRole,
+	s.publishEvent(p.ID(), inbound.EventGovernanceDecision, inbound.GovernanceDecisionPayload{
+		Decision:  string(decision.Decision),
+		Reason:    decision.Reason,
+		AgentRole: decision.AgentRole,
 	})
 
 	// Step 5: branch on decision.
@@ -253,10 +253,10 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		// §5.3 + §8 (approval flow): emit `approval.required` with phase_id,
 		// gate_url, reason, plus risk/policy when the governance decision
 		// surfaces them (Optional per Phase 1.5 amendment).
-		approvalPayload := map[string]any{
-			"phase_id": p.ID().String(),
-			"gate_url": s.approvalURL(decision),
-			"reason":   decision.Reason,
+		approvalPayload := inbound.ApprovalRequiredPayload{
+			PhaseID: p.ID().String(),
+			GateURL: s.approvalURL(decision),
+			Reason:  decision.Reason,
 		}
 		s.publishEvent(p.ID(), contract.EventApprovalRequired, approvalPayload)
 		return
@@ -323,11 +323,11 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("save session: %v", err))
 		return
 	}
-	s.publishEvent(p.ID(), contract.EventAgentDispatched, map[string]any{
-		"phase_id":   p.ID().String(),
-		"session_id": sid.String(),
-		"role":       string(roleFor(p.Type())),
-		"provider":   string(s.d.Dispatcher.Provider()),
+	s.publishEvent(p.ID(), contract.EventAgentDispatched, inbound.AgentDispatchedPayload{
+		PhaseID:   p.ID().String(),
+		SessionID: sid.String(),
+		Role:      string(roleFor(p.Type())),
+		Provider:  string(s.d.Dispatcher.Provider()),
 	})
 
 	// Step 9-10: spawn governor acquire + dispatch.
@@ -365,9 +365,9 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 	_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
 	_ = s.d.SessionRepo.Save(ctx, sess)
-	s.publishEvent(p.ID(), inbound.EventAgentEnvelopeReceived, map[string]any{
-		"status":     string(env.Status),
-		"confidence": env.Confidence,
+	s.publishEvent(p.ID(), inbound.EventAgentEnvelopeReceived, inbound.AgentEnvelopeReceivedPayload{
+		Status:     string(env.Status),
+		Confidence: env.Confidence,
 	})
 
 	// Step 13: complete phase + persist (Iron Law #1: persisted-before-return).
@@ -396,13 +396,13 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	pidLocal := p.ID()
 	eventType := eventTypeForStatus(p.Status())
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventType, env)
-	payload := map[string]any{
-		"phase_id":            p.ID().String(),
-		"phase_type":          string(p.Type()),
-		"ended_at":            s.d.Clock.Now().UTC(),
-		"confidence":          env.Confidence,
-		"envelope_status":     string(env.Status),
-		"envelope_confidence": env.Confidence,
+	payload := inbound.PhaseCompletedPayload{
+		PhaseID:            p.ID().String(),
+		PhaseType:          string(p.Type()),
+		EndedAt:            s.d.Clock.Now().UTC(),
+		Confidence:         env.Confidence,
+		EnvelopeStatus:     string(env.Status),
+		EnvelopeConfidence: env.Confidence,
 	}
 	s.publishEvent(p.ID(), eventType, payload)
 }
@@ -440,9 +440,9 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 	cidLocal := c.ID()
 	pidLocal := p.ID()
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
-	s.publishEvent(p.ID(), eventTypeForStatus(p.Status()), map[string]any{
-		"envelope_status":     string(env.Status),
-		"envelope_confidence": env.Confidence,
+	s.publishEvent(p.ID(), eventTypeForStatus(p.Status()), inbound.PhaseCompletedFromApplyPayload{
+		EnvelopeStatus:     string(env.Status),
+		EnvelopeConfidence: env.Confidence,
 	})
 }
 
@@ -513,12 +513,12 @@ func (s *Service) Approve(ctx context.Context, id ids.PhaseID, approver, reason 
 		"approver": approver,
 		"reason":   reason,
 	})
-	s.publishEvent(id, contract.EventApprovalResolved, map[string]any{
-		"phase_id":   id.String(),
-		"decision":   contract.DecisionApproved,
-		"approver":   approver,
-		"reason":     reason,
-		"decided_at": s.d.Clock.Now().UTC(),
+	s.publishEvent(id, contract.EventApprovalResolved, inbound.ApprovalResolvedPayload{
+		PhaseID:   id.String(),
+		Decision:  contract.DecisionApproved,
+		Approver:  approver,
+		Reason:    reason,
+		DecidedAt: s.d.Clock.Now().UTC(),
 	})
 	return nil
 }
@@ -571,12 +571,12 @@ func (s *Service) Reject(ctx context.Context, id ids.PhaseID, approver, reason s
 	})
 	// Symmetric to Approve: single `approval.resolved` event with
 	// decision="rejected".
-	s.publishEvent(id, contract.EventApprovalResolved, map[string]any{
-		"phase_id":   id.String(),
-		"decision":   contract.DecisionRejected,
-		"approver":   approver,
-		"reason":     reason,
-		"decided_at": s.d.Clock.Now().UTC(),
+	s.publishEvent(id, contract.EventApprovalResolved, inbound.ApprovalResolvedPayload{
+		PhaseID:   id.String(),
+		Decision:  contract.DecisionRejected,
+		Approver:  approver,
+		Reason:    reason,
+		DecidedAt: s.d.Clock.Now().UTC(),
 	})
 	return nil
 }
@@ -614,11 +614,11 @@ func (s *Service) failPhase(ctx context.Context, p *phase.Phase, reason string) 
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, contract.EventPhaseFailed, map[string]any{"reason": reason})
 	// sophia-wire-v1 §5.3: phase.failed payload carries phase_id +
 	// phase_type + ended_at + error.
-	s.publishEvent(p.ID(), contract.EventPhaseFailed, map[string]any{
-		"phase_id":   p.ID().String(),
-		"phase_type": string(p.Type()),
-		"ended_at":   s.d.Clock.Now().UTC(),
-		"error":      reason,
+	s.publishEvent(p.ID(), contract.EventPhaseFailed, inbound.PhaseFailedPayload{
+		PhaseID:   p.ID().String(),
+		PhaseType: string(p.Type()),
+		EndedAt:   s.d.Clock.Now().UTC(),
+		Error:     reason,
 	})
 }
 
@@ -729,7 +729,12 @@ func (s *Service) appendAudit(ctx context.Context, cid *ids.ChangeID, pid *ids.P
 	})
 }
 
-func (s *Service) publishEvent(pid ids.PhaseID, eventType string, payload map[string]any) {
+// publishEvent emits an SSE event with the given typed payload.
+// payload should be one of the typed structs from
+// internal/ports/inbound/event_payloads.go (e.g. PhaseStartedPayload)
+// so the producer gets compile-time validation of field names.
+// map[string]any is still accepted for tests and gradual migration.
+func (s *Service) publishEvent(pid ids.PhaseID, eventType string, payload any) {
 	_ = s.d.Events.Publish(context.Background(), pid, inbound.Event{
 		Type:      eventType,
 		Timestamp: s.d.Clock.Now(),

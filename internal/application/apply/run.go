@@ -166,9 +166,9 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("save board: %v", err)), err
 	}
-	s.publishEvent(p.ID(), inbound.EventApplyBoardCreated, map[string]any{
-		"board_id": board.ID().String(),
-		"groups":   len(board.Groups()),
+	s.publishEvent(p.ID(), inbound.EventApplyBoardCreated, inbound.ApplyBoardCreatedPayload{
+		BoardID: board.ID().String(),
+		Groups:  len(board.Groups()),
 	})
 
 	// Steps 5-17: dispatch all team-leads in parallel + DAG-aware wait.
@@ -205,8 +205,9 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 				resultsMu.Lock()
 				results[group.ID()] = groupOutcome{failed: true, err: err}
 				resultsMu.Unlock()
-				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, map[string]any{
-					"group_id": group.ID().String(), "reason": err.Error(),
+				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
+					GroupID: group.ID().String(),
+					Reason:  err.Error(),
 				})
 				return
 			}
@@ -237,13 +238,14 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 
 			dag.Signal(group.ID(), outcome.failed, outcome.err)
 			if outcome.failed {
-				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, map[string]any{
-					"group_id": group.ID().String(), "reason": fmtErr(outcome.err),
+				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
+					GroupID: group.ID().String(),
+					Reason:  fmtErr(outcome.err),
 				})
 			} else {
-				s.publishEvent(p.ID(), inbound.EventApplyGroupCompleted, map[string]any{
-					"group_id":   group.ID().String(),
-					"tasks_done": outcome.tasksDone,
+				s.publishEvent(p.ID(), inbound.EventApplyGroupCompleted, inbound.ApplyGroupCompletedPayload{
+					GroupID:   group.ID().String(),
+					TasksDone: outcome.tasksDone,
 				})
 			}
 		}(g)
@@ -279,7 +281,7 @@ func (s *RunService) finalize(ctx context.Context, c *change.Change, p *phase.Ph
 		_ = board.Complete()
 	}
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
-		s.publishEvent(p.ID(), inbound.EventApplyBoardSaveFailed, map[string]any{"err": err.Error()})
+		s.publishEvent(p.ID(), inbound.EventApplyBoardSaveFailed, inbound.ApplyBoardSaveFailedPayload{Err: err.Error()})
 	}
 
 	// Metrics: record per-group + per-task aggregates.
@@ -588,8 +590,9 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 			TimeoutMS:  30_000,
 		})
 		if err != nil {
-			s.publishEvent(board.PhaseID(), inbound.EventApplyWorktreeError, map[string]any{
-				"group_id": g.ID().String(), "err": err.Error(),
+			s.publishEvent(board.PhaseID(), inbound.EventApplyWorktreeError, inbound.ApplyWorktreeErrorPayload{
+				GroupID: g.ID().String(),
+				Err:     err.Error(),
 			})
 		}
 	}
@@ -605,7 +608,12 @@ type depDuration int
 
 func (d depDuration) ToDuration() time.Duration { return time.Duration(d) * time.Second }
 
-func (s *RunService) publishEvent(phaseID ids.PhaseID, eventType string, payload map[string]any) {
+// publishEvent emits an SSE event with the given typed payload.
+// payload should be one of the typed structs from
+// internal/ports/inbound/event_payloads.go (e.g. ApplyTaskClaimedPayload)
+// so the producer gets compile-time validation of field names.
+// map[string]any is still accepted for tests and gradual migration.
+func (s *RunService) publishEvent(phaseID ids.PhaseID, eventType string, payload any) {
 	_ = s.d.Events.Publish(context.Background(), phaseID, inbound.Event{
 		Type:      eventType,
 		Timestamp: s.d.Clock.Now(),

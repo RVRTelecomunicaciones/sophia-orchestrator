@@ -901,12 +901,12 @@ func TestRun_PhaseStartedPayloadShape(t *testing.T) {
 		}
 	}
 	require.Equal(t, contract.EventPhaseStarted, started.Type, "phase.started event must be published")
-	payload := started.Payload
-	require.NotNil(t, payload, "phase.started payload must not be nil")
-	require.Equal(t, out.PhaseID.String(), payload["phase_id"])
-	require.Equal(t, string(phase.PhaseSpec), payload["phase_type"])
-	require.Equal(t, cid.String(), payload["change_id"])
-	require.NotNil(t, payload["started_at"], "phase.started must include started_at")
+	payload, ok := started.Payload.(inbound.PhaseStartedPayload)
+	require.True(t, ok, "phase.started payload must be inbound.PhaseStartedPayload, got %T", started.Payload)
+	require.Equal(t, out.PhaseID.String(), payload.PhaseID)
+	require.Equal(t, string(phase.PhaseSpec), payload.PhaseType)
+	require.Equal(t, cid.String(), payload.ChangeID)
+	require.False(t, payload.StartedAt.IsZero(), "phase.started must include started_at")
 }
 
 func TestRun_PhaseCompletedPayloadShape(t *testing.T) {
@@ -923,12 +923,12 @@ func TestRun_PhaseCompletedPayloadShape(t *testing.T) {
 		}
 	}
 	require.Equal(t, contract.EventPhaseCompleted, completed.Type, "phase.completed event must be published")
-	payload := completed.Payload
-	require.NotNil(t, payload)
-	require.Equal(t, out.PhaseID.String(), payload["phase_id"])
-	require.Equal(t, string(phase.PhaseSpec), payload["phase_type"])
-	require.NotNil(t, payload["ended_at"], "phase.completed must include ended_at")
-	require.NotNil(t, payload["confidence"], "phase.completed must include confidence")
+	payload, ok := completed.Payload.(inbound.PhaseCompletedPayload)
+	require.True(t, ok, "phase.completed payload must be inbound.PhaseCompletedPayload, got %T", completed.Payload)
+	require.Equal(t, out.PhaseID.String(), payload.PhaseID)
+	require.Equal(t, string(phase.PhaseSpec), payload.PhaseType)
+	require.False(t, payload.EndedAt.IsZero(), "phase.completed must include ended_at")
+	require.NotZero(t, payload.Confidence, "phase.completed must include confidence")
 }
 
 func TestRun_PhaseFailedPayloadShape(t *testing.T) {
@@ -946,12 +946,12 @@ func TestRun_PhaseFailedPayloadShape(t *testing.T) {
 		}
 	}
 	require.Equal(t, contract.EventPhaseFailed, failed.Type, "phase.failed event must be published")
-	payload := failed.Payload
-	require.NotNil(t, payload)
-	require.Equal(t, out.PhaseID.String(), payload["phase_id"])
-	require.Equal(t, string(phase.PhaseSpec), payload["phase_type"])
-	require.NotNil(t, payload["ended_at"])
-	require.NotNil(t, payload["error"])
+	payload, ok := failed.Payload.(inbound.PhaseFailedPayload)
+	require.True(t, ok, "phase.failed payload must be inbound.PhaseFailedPayload, got %T", failed.Payload)
+	require.Equal(t, out.PhaseID.String(), payload.PhaseID)
+	require.Equal(t, string(phase.PhaseSpec), payload.PhaseType)
+	require.False(t, payload.EndedAt.IsZero())
+	require.NotEmpty(t, payload.Error)
 }
 
 func TestRun_FallbackToMemoryWhenEnvelopeEmpty(t *testing.T) {
