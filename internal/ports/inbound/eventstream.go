@@ -12,10 +12,18 @@ import (
 // Type MUST be one of the constants declared in event_types.go (Event*).
 // Free-form strings compile but are an audit risk — IsKnownEventType
 // can be used in tests or middleware to enforce the constraint.
+//
+// Payload accepts any JSON-marshalable value. Production code is
+// expected to pass one of the typed structs declared in
+// event_payloads.go (e.g. ApplyTaskClaimedPayload) so the producer
+// gets compile-time validation of the field names. The legacy
+// `map[string]any` shape is still accepted for backward compatibility
+// with tests and gradual-migration callers — both produce identical
+// JSON bytes downstream.
 type Event struct {
 	Type      string // see event_types.go for the catalogue
 	Timestamp time.Time
-	Payload   map[string]any
+	Payload   any // see event_payloads.go for the typed payload structs
 	TraceID   string
 }
 
