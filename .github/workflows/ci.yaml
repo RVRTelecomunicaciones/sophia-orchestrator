@@ -23,6 +23,17 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          # install-mode: goinstall builds golangci-lint with the repo's
+          # pinned Go (1.26.2 via actions/setup-go above). The default
+          # `binary` mode downloads a release built with an older Go
+          # (currently go1.24) which then refuses to lint our go1.26-
+          # targeted module:
+          #   "the Go language version (go1.24) used to build golangci-lint
+          #    is lower than the targeted Go version (1.26)"
+          # Runtime-adapters uses goinstall for the same reason. ~30s
+          # extra per CI run versus the binary download — well worth it
+          # to stop forcing admin merges on every orch PR.
+          install-mode: goinstall
           args: --timeout=5m
 
   unit:

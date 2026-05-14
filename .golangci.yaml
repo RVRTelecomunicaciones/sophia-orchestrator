@@ -50,6 +50,14 @@ issues:
         - wrapcheck
         - gosec
         - forbidigo
+    # Test signatures are dictated by `testing.T` / `http.HandlerFunc` /
+    # similar stdlib interfaces — every test function has `t *testing.T`
+    # whether or not it's used (e.g. coverage-only tests). Renaming to `_`
+    # is more confusing than the warning is helpful, so skip revive
+    # unused-parameter for tests entirely.
+    - path: _test\.go
+      linters: [revive]
+      text: "unused-parameter"
     - path: internal/infrastructure
       linters:
         - forbidigo  # infrastructure may use time.Now/ulid.Make
@@ -59,3 +67,19 @@ issues:
     - path: internal/adapters
       linters:
         - forbidigo  # adapters may use time.Now/ulid.Make at the boundary
+    # `phase.PhaseType` and `phase.PhaseStatus` are intentional — the
+    # "stutter" lint here is a stylistic preference; the domain types
+    # have semantic value (a PhaseType IS a phase type), and renaming
+    # to bare `Type` / `Status` collides with stdlib conventions
+    # (reflect.Type, fmt.Stringer, etc.). Rename would force ~30
+    # call-site updates across the codebase for a stylistic win.
+    - path: internal/domain/phase
+      linters: [revive]
+      text: "exported: type name will be used as phase\\."
+    # The package name `http_base` predates the var-naming rule (the
+    # `_` separator is legal Go but disliked by revive). Renaming the
+    # package would force every importer to update — high churn, low
+    # value. Locking in via exclusion until a deliberate v2 rename.
+    - path: internal/adapters/outbound/http_base
+      linters: [revive]
+      text: "var-naming: don't use an underscore in package name"

@@ -13,9 +13,9 @@ import "context"
 // acquire/release operations under the configured Max cap.
 type SpawnGovernorRepo interface {
 	// Acquire attempts to reserve a slot. Returns (acquired, currentCount, err).
-	// Acquired is true iff the active count was < max BEFORE this call and
-	// the row has now been incremented.
-	Acquire(ctx context.Context, max int) (acquired bool, current int, err error)
+	// Acquired is true iff the active count was < maxConcurrent BEFORE this
+	// call and the row has now been incremented.
+	Acquire(ctx context.Context, maxConcurrent int) (acquired bool, current int, err error)
 
 	// Release decrements the active count atomically. Idempotent: releasing
 	// while the count is 0 is a no-op (logged), not an error.

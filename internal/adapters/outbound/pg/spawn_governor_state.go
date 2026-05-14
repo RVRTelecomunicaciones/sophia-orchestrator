@@ -27,7 +27,7 @@ func NewSpawnGovernorRepo(pool *pgxpool.Pool) *SpawnGovernorRepo {
 
 // Acquire atomically tests-and-increments the active counter under a
 // transaction-scoped advisory lock.
-func (r *SpawnGovernorRepo) Acquire(ctx context.Context, max int) (bool, int, error) {
+func (r *SpawnGovernorRepo) Acquire(ctx context.Context, maxConcurrent int) (bool, int, error) {
 	var ok bool
 	var current int
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
@@ -38,13 +38,13 @@ func (r *SpawnGovernorRepo) Acquire(ctx context.Context, max int) (bool, int, er
 		if err := tx.QueryRow(ctx, "SELECT active_count FROM spawn_governor_state WHERE id = 1").Scan(&active); err != nil {
 			return err
 		}
-		if active >= max {
+		if active >= maxConcurrent {
 			current = active
 			return nil
 		}
 		if _, err := tx.Exec(ctx,
 			"UPDATE spawn_governor_state SET active_count = active_count + 1, max_count = $1, updated_at = $2 WHERE id = 1",
-			max, time.Now(),
+			maxConcurrent, time.Now(),
 		); err != nil {
 			return err
 		}

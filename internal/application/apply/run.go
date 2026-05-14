@@ -129,7 +129,7 @@ func NewRun(d RunDeps) *RunService {
 // from the goroutine that handles RunPhase, after the Phase row is in
 // status=running. On return, the phase has either completed (with envelope)
 // or been marked blocked. The phase.Service caller persists the phase.
-func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error) {
+func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, _ inbound.RunPhaseInput) (*envelope.Envelope, error) {
 	// Step 1: pre-flight — load tasks list from memory-engine.
 	tasksList, err := s.loadTasksList(ctx, c)
 	if err != nil {
