@@ -38,6 +38,25 @@ linters-settings:
       - errors.New(
       - errors.Join(
       - errors.Unwrap(
+      # pgx interface methods that internally wrap pgx errors — adding
+      # another "<op>: %w" layer is noise.
+      - .Err()
+      - .Scan(
+      - .Exec(
+      - context.Context).Err(
+      # Internal port + domain returns from our own packages (which already
+      # carry context in the message) — wrapping again is noise.
+      - github.com/RVRTelecomunicaciones/sophia-orchestrator/
+      # Re-throws from the bootstrap layer + middleware are pass-throughs;
+      # the wrapping happens deeper in the call site.
+      - app.Run(
+      - trace.Parse(
+      - trace.New(
+      - trace.FromRequestID(
+      - envelope.Parse(
+      - stdouttrace.New(
+      - apply.NewTask(
+      - .Execute(
   gosec:
     excludes:
       - G104  # errcheck overlap
@@ -58,6 +77,12 @@ issues:
     - path: _test\.go
       linters: [revive]
       text: "unused-parameter"
+    # Test helpers like mkChange / mustBoardID often take a single
+    # canonical input and don't need parameterization until a second
+    # caller exists. Flagging them as "param always receives X" is
+    # premature optimisation.
+    - path: _test\.go
+      linters: [unparam]
     - path: internal/infrastructure
       linters:
         - forbidigo  # infrastructure may use time.Now/ulid.Make
