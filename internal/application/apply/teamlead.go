@@ -23,7 +23,7 @@ import (
 // Iron Law #5 enforcement: each implement-agent retries up to MaxAttempts
 // times (apply.MaxAttempts = 3); on the third failure the task is marked
 // BLOCKED and ErrEscalationRequired propagates to the group outcome.
-func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group) groupOutcome {
+func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, priorContext string) groupOutcome {
 	// Mark group running.
 	if err := group.Start(); err != nil {
 		return groupOutcome{failed: true, err: fmt.Errorf("group start: %w", err)}
@@ -60,7 +60,7 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 			}
 			defer func() { <-implSem }()
 
-			ok := s.runImplementWithRetry(ctx, c, p, b, group, task)
+			ok := s.runImplementWithRetry(ctx, c, p, b, group, task, priorContext)
 			mu.Lock()
 			taskOutcomes[task.ID()] = ok
 			mu.Unlock()
@@ -118,7 +118,7 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 // agent invocations, with SpawnGovernor gating per attempt and Iron Law #5
 // escalation on the 3rd consecutive failure. Returns true iff the task
 // reached envelope.StatusDone.
-func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task) bool {
+func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task, priorContext string) bool {
 	// Atomically claim the task before spending compute on it. If another
 	// in-flight team-lead claimed the same task (shouldn't happen given
 	// one team-lead per group, but defensive) we early-out as success
@@ -154,7 +154,7 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 			})
 			return false
 		}
-		ok := s.dispatchImplement(ctx, c, p, b, group, task, implSession)
+		ok := s.dispatchImplement(ctx, c, p, b, group, task, implSession, priorContext)
 		_ = s.d.SpawnGov.Release(ctx)
 
 		// Iron Law #5: record attempt; escalation triggers BLOCKED on 3rd fail.
@@ -186,15 +186,17 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 // V1 simplifications:
 //   - File reservation (lock.acquire@v1) is replaced by the atomic ClaimTask
 //     above. Per-file locking is V1.5 once runtime ships Phase 2.
-//   - Prompt is built with the dispatched task's description, the group's
-//     worktree path, and the change's prior context (loaded once in
-//     RunApply.Execute and reused — V1.5 will refresh per-implement).
-func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session) bool {
+//   - priorContext (spec + design) is loaded once in RunService.Execute
+//     and forwarded through runTeamLead → runImplementWithRetry. A
+//     follow-up V1.5 item will refresh it per-implement to pick up
+//     downstream artifacts written by sibling tasks (e.g., apply-progress
+//     mid-run); for now it's stable for the duration of the apply phase.
+func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) bool {
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:           phase.PhaseApply,
 		ChangeName:      c.Name(),
 		Project:         c.Project(),
-		PriorContext:    "", // V1.5: pull per-task context
+		PriorContext:    priorContext,
 		TaskDescription: fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
 	})
 	if err != nil {
