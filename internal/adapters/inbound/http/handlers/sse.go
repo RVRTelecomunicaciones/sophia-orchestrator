@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -36,6 +37,7 @@ type PhaseLookup interface {
 // (§4.3) without timestamp collisions.
 type SSEHandler struct {
 	stream    inbound.EventStream
+	store     outbound.EventStore // durable history for Last-Event-ID resume
 	phases    PhaseLookup
 	heartbeat time.Duration
 	writeErr  func(http.ResponseWriter, error)
@@ -46,19 +48,40 @@ type SSEHandler struct {
 // NewSSEHandler constructs an SSEHandler. heartbeat ≤ 0 defaults to 5s.
 // idGen MUST be a working ULID generator (NewSystemIDGenerator in
 // production, FixedIDGenerator in tests). phases MUST be a working
-// PhaseService for the terminal-phase short-circuit.
-func NewSSEHandler(stream inbound.EventStream, phases PhaseLookup, heartbeat time.Duration, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any), idGen shared.IDGenerator) *SSEHandler {
+// PhaseService for the terminal-phase short-circuit. store MUST be a
+// working EventStore so the handler can honour Last-Event-ID resume
+// (audit rojo #3 fix).
+func NewSSEHandler(stream inbound.EventStream, store outbound.EventStore, phases PhaseLookup, heartbeat time.Duration, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any), idGen shared.IDGenerator) *SSEHandler {
 	if heartbeat <= 0 {
 		heartbeat = 5 * time.Second
 	}
 	return &SSEHandler{
 		stream:    stream,
+		store:     store,
 		phases:    phases,
 		heartbeat: heartbeat,
 		writeErr:  writeErr,
 		writeJSON: writeJSON,
 		idGen:     idGen,
 	}
+}
+
+// parseLastEventID returns the int64 sequence from the Last-Event-ID
+// header, or 0 if the header is absent / unparseable. Unparseable values
+// are tolerated (returned as 0 = full replay) rather than rejected
+// because the spec intentionally treats Last-Event-ID as opaque to the
+// client; a corrupted value should not break the reconnect — the worst
+// case is a from-the-beginning replay.
+func parseLastEventID(r *http.Request) int64 {
+	raw := r.Header.Get("Last-Event-ID")
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // Stream handles GET /api/v1/phases/{phase_id}/events.
@@ -109,6 +132,9 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
 	w.WriteHeader(http.StatusOK)
 
+	// Subscribe live BEFORE replaying history, so any event published
+	// during the replay is captured in the channel buffer rather than
+	// dropped on the floor. We deduplicate by Sequence at send time.
 	ch, cancel, err := h.stream.Subscribe(r.Context(), phaseID)
 	if err != nil {
 		h.writeErr(w, err)
@@ -116,22 +142,52 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
+	// Audit rojo #3 fix: replay events from the durable store since the
+	// client's Last-Event-ID (0 = full history). Failing here is fatal —
+	// silently skipping replay would leave the client with a hole in its
+	// event stream and no way to detect it.
+	sinceSeq := parseLastEventID(r)
+	historical, err := h.store.Replay(r.Context(), phaseID, sinceSeq)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+
 	hb := time.NewTicker(h.heartbeat)
 	defer hb.Stop()
 
 	// `open` event with {phase_id} payload (sophia-wire-v1 §5.3
 	// Phase 1.5 amendment: documented as Optional; clients MAY use
-	// for fast reconnect detection).
+	// for fast reconnect detection). Carries a fresh ULID — `open`
+	// is not persisted in the EventStore, so we keep the synthesized
+	// id for client-side reconnect detection.
 	openID := h.idGen.NewID()
 	fmt.Fprintf(w, "id: %s\nevent: %s\ndata: {\"phase_id\":%q}\n\n",
 		openID, contract.EventOpen, phaseID.String())
 	flusher.Flush()
+
+	// Stream replayed events first. Track maxReplayedSeq so the live
+	// loop can dedup any overlap (events that landed in `ch` while we
+	// were replaying — common when a client reconnects mid-phase).
+	var maxReplayedSeq int64
+	for _, ev := range historical {
+		payload, _ := json.Marshal(ev.Payload)
+		fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n",
+			ev.Sequence, ev.Type, payload)
+		flusher.Flush()
+		if ev.Sequence > maxReplayedSeq {
+			maxReplayedSeq = ev.Sequence
+		}
+	}
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-hb.C:
+			// Heartbeat carries a synthesized ULID — it's not persisted
+			// (heartbeats are a transport concern, not state). Clients
+			// MUST ignore non-numeric Last-Event-IDs on reconnect.
 			id := h.idGen.NewID()
 			fmt.Fprintf(w, "id: %s\nevent: %s\ndata: {\"ts\":%q}\n\n",
 				id, contract.EventHeartbeat, time.Now().UTC().Format(time.RFC3339))
@@ -140,10 +196,26 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			// Dedup against the replayed slice. Without this, a client
+			// reconnecting mid-phase would see e.g. events 1..50 from
+			// replay AND from the live channel (if they were buffered
+			// between Subscribe and Replay completing).
+			if ev.Sequence > 0 && ev.Sequence <= maxReplayedSeq {
+				continue
+			}
 			payload, _ := json.Marshal(ev.Payload)
-			id := h.idGen.NewID()
+			// Use the persisted Sequence as the `id:` so the client can
+			// resume from it on reconnect. Events with Sequence=0 (i.e.
+			// the store Append failed for some reason — degraded mode)
+			// fall back to a synthesized ULID so the stream still flows.
+			var idField string
+			if ev.Sequence > 0 {
+				idField = strconv.FormatInt(ev.Sequence, 10)
+			} else {
+				idField = h.idGen.NewID()
+			}
 			fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n",
-				id, ev.Type, payload)
+				idField, ev.Type, payload)
 			flusher.Flush()
 		}
 	}

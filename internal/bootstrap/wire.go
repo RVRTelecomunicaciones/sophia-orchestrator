@@ -121,8 +121,11 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		metrics = obs.NewMetrics()
 	}
 
-	// Application services.
-	events := eventstream.New(0, nil)
+	// Application services. EventStore is required for durable SSE
+	// (audit rojo #3): every Publish persists before broadcasting, so
+	// the CLI can resume via Last-Event-ID after a server restart.
+	eventStore := pg.NewEventStore(pool)
+	events := eventstream.New(0, eventStore, nil, nil)
 	changeSvc := change.New(changeRepo, clock, idGen).WithMetrics(metrics)
 	applySvc := apply.New(boardRepo)
 
@@ -199,6 +202,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Phases:             phaseSvc,
 		Apply:              applySvc,
 		Events:             events,
+		EventStore:         eventStore,
 		Auth:               auth,
 		Logger:             logger,
 		StartedAt:          time.Now(),
