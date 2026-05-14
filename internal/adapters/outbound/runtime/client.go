@@ -2,7 +2,29 @@
 // sophia-runtime-adapters' HTTP API. The runtime exposes a single endpoint
 // that accepts a capability + payload and returns an ExecutionReceipt:
 //
-//   POST /api/v1/execute
+//	POST /api/v1/execute
+//
+// Wire shape (request, snake_case per runtime D5.14):
+//
+//	correlation_id      string  // 26-char Crockford ULID, REQUIRED
+//	adapter_id          string  // e.g. "shell"
+//	capability_name     string  // e.g. "exec"
+//	capability_version  string  // e.g. "v1"
+//	payload             json    // RAW JSON object (NOT base64)
+//	timeout_budget_ms   int64
+//	idempotency_key     string  // optional
+//	actor_id / task_id / workflow_run_id  string  // optional
+//	retry_attempt       int     // optional
+//	submitted_at        string  // RFC3339, runtime treats as informational
+//
+// Wire shape (response, ExecutionReceipt — nested):
+//
+//	receipt_id, schema_version, request{...}, handle{...},
+//	result { status, retryable, exit_code, duration_ms,
+//	         stdout_ref{ mode, data, size_bytes }, stderr_ref{...},
+//	         completed_at, ... },
+//	provenance{...}, timings { submitted_at, started_at, completed_at },
+//	created_at, persisted_at (optional)
 //
 // Receipt status enum (R15 in runtime spec): success | failure | timeout
 // | cancelled | partial. RetryHint enum: retryable | non_retryable | unknown.
@@ -10,19 +32,30 @@ package runtime
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
-// Config tunes Client.
+// Config tunes Client. Clock and Entropy are injectable for tests (R12);
+// nil values fall back to shared.SystemClock and crypto/rand.Reader.
 type Config struct {
 	HTTPBase http_base.Config
 	APIKey   string
+	// Clock supplies submitted_at on every request. Injectable for tests.
+	Clock shared.Clock
+	// Entropy is the source of ULID randomness. Defaults to crypto/rand.
+	Entropy io.Reader
 }
 
 // DefaultConfig returns production defaults.
@@ -38,70 +71,182 @@ func DefaultConfig(baseURL, apiKey string) Config {
 
 // Client implements outbound.RuntimeClient.
 type Client struct {
-	cfg  Config
-	http *http_base.Client
+	cfg     Config
+	http    *http_base.Client
+	clock   shared.Clock
+	entropy io.Reader
 }
 
-// New constructs a Client.
+// New constructs a Client. Defaults Clock to shared.SystemClock and
+// Entropy to crypto/rand.Reader when not set.
 func New(cfg Config) (*Client, error) {
 	hc, err := http_base.New(cfg.HTTPBase)
 	if err != nil {
 		return nil, fmt.Errorf("runtime client: %w", err)
 	}
-	return &Client{cfg: cfg, http: hc}, nil
+	clk := cfg.Clock
+	if clk == nil {
+		clk = shared.SystemClock{}
+	}
+	ent := cfg.Entropy
+	if ent == nil {
+		ent = rand.Reader
+	}
+	return &Client{cfg: cfg, http: hc, clock: clk, entropy: ent}, nil
 }
 
-// --- wire shapes ---
+// --- request wire shape (matches runtime ExecutionRequest.MarshalJSON) ---
 
 type executionRequest struct {
-	Capability     string `json:"capability"`
-	PayloadBase64  string `json:"payload_b64"`
-	TimeoutMS      int    `json:"timeout_ms"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	CorrelationID     string          `json:"correlation_id"`
+	AdapterID         string          `json:"adapter_id"`
+	CapabilityName    string          `json:"capability_name"`
+	CapabilityVersion string          `json:"capability_version"`
+	Payload           json.RawMessage `json:"payload"`
+	TimeoutBudgetMs   int64           `json:"timeout_budget_ms"`
+	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
+	ActorID           string          `json:"actor_id,omitempty"`
+	TaskID            string          `json:"task_id,omitempty"`
+	WorkflowRunID     string          `json:"workflow_run_id,omitempty"`
+	RetryAttempt      int             `json:"retry_attempt,omitempty"`
+	SubmittedAt       string          `json:"submitted_at"`
+}
+
+// --- response wire shapes (mirror runtime entities.ExecutionReceipt) ---
+
+type streamRefWire struct {
+	Mode            string `json:"mode,omitempty"`
+	Data            []byte `json:"data,omitempty"` // base64 on wire, native []byte in Go
+	SizeBytes       int64  `json:"size_bytes,omitempty"`
+	TruncatedAtByte int64  `json:"truncated_at_byte,omitempty"`
+}
+
+type executionResultWire struct {
+	Status       string         `json:"status"`
+	Retryable    string         `json:"retryable"`
+	ErrorClass   string         `json:"error_class,omitempty"`
+	ErrorMessage string         `json:"error_message,omitempty"`
+	StdoutRef    *streamRefWire `json:"stdout_ref,omitempty"`
+	StderrRef    *streamRefWire `json:"stderr_ref,omitempty"`
+	ExitCode     *int           `json:"exit_code,omitempty"`
+	DurationMs   int64          `json:"duration_ms"`
+	CompletedAt  time.Time      `json:"completed_at"`
+}
+
+type executionHandleWire struct {
+	HandleID      string    `json:"handle_id"`
+	CorrelationID string    `json:"correlation_id"`
+	AdapterID     string    `json:"adapter_id"`
+	Capability    string    `json:"capability"`
+	StartedAt     time.Time `json:"started_at"`
 }
 
 type executionReceiptResponse struct {
-	Status        string    `json:"status"`
-	StdoutBase64  string    `json:"stdout_b64,omitempty"`
-	StderrBase64  string    `json:"stderr_b64,omitempty"`
-	ExitCode      int       `json:"exit_code"`
-	DurationMS    int       `json:"duration_ms"`
-	ReceiptID     string    `json:"receipt_id"`
-	RetryHint     string    `json:"retry_hint,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	EndedAt       time.Time `json:"ended_at"`
+	ReceiptID     string              `json:"receipt_id"`
+	SchemaVersion string              `json:"schema_version"`
+	Handle        executionHandleWire `json:"handle"`
+	Result        executionResultWire `json:"result"`
+	// Request, Provenance, Timings are present but we only need a subset.
+	Timings struct {
+		SubmittedAt time.Time  `json:"submitted_at"`
+		StartedAt   time.Time  `json:"started_at"`
+		CompletedAt time.Time  `json:"completed_at"`
+		PersistedAt *time.Time `json:"persisted_at,omitempty"`
+	} `json:"timings"`
+}
+
+// parseCapability splits "<adapter>.<name>@<version>" into its parts.
+// Returns an error if the format is invalid.
+func parseCapability(cap string) (adapter, name, version string, err error) {
+	atIdx := strings.LastIndex(cap, "@")
+	if atIdx < 0 {
+		return "", "", "", fmt.Errorf("capability missing @version: %q", cap)
+	}
+	version = cap[atIdx+1:]
+	left := cap[:atIdx]
+	dotIdx := strings.Index(left, ".")
+	if dotIdx < 0 {
+		return "", "", "", fmt.Errorf("capability missing adapter.name: %q", cap)
+	}
+	adapter = left[:dotIdx]
+	name = left[dotIdx+1:]
+	if adapter == "" || name == "" || version == "" {
+		return "", "", "", fmt.Errorf("capability has empty part(s): %q", cap)
+	}
+	return adapter, name, version, nil
+}
+
+// newCorrelationID mints a fresh 26-char Crockford-base32 ULID using the
+// injected entropy reader and the clock's current time (millisecond
+// precision per ulid.Timestamp).
+func (c *Client) newCorrelationID() (string, error) {
+	ms := ulid.Timestamp(c.clock.Now())
+	id, err := ulid.New(ms, c.entropy)
+	if err != nil {
+		return "", fmt.Errorf("ulid: %w", err)
+	}
+	return id.String(), nil
 }
 
 // Execute POSTs /api/v1/execute and returns the typed receipt.
 func (c *Client) Execute(ctx context.Context, req outbound.ExecutionRequest) (*outbound.ExecutionReceipt, error) {
+	adapter, name, version, err := parseCapability(req.Capability)
+	if err != nil {
+		return nil, fmt.Errorf("runtime Execute: %w", err)
+	}
+	cid, err := c.newCorrelationID()
+	if err != nil {
+		return nil, fmt.Errorf("runtime Execute: %w", err)
+	}
+	// Validate that req.Payload is valid JSON before sending; the runtime
+	// will reject a malformed payload with 400.
+	if len(req.Payload) == 0 || !json.Valid(req.Payload) {
+		return nil, fmt.Errorf("runtime Execute: payload must be non-empty valid JSON")
+	}
 	wireReq := executionRequest{
-		Capability:     req.Capability,
-		PayloadBase64:  base64.StdEncoding.EncodeToString(req.Payload),
-		TimeoutMS:      req.TimeoutMS,
-		IdempotencyKey: req.IdempotencyKey,
+		CorrelationID:     cid,
+		AdapterID:         adapter,
+		CapabilityName:    name,
+		CapabilityVersion: version,
+		Payload:           json.RawMessage(req.Payload),
+		TimeoutBudgetMs:   int64(req.TimeoutMS),
+		IdempotencyKey:    req.IdempotencyKey,
+		SubmittedAt:       c.clock.Now().UTC().Format(time.RFC3339),
 	}
 	var resp executionReceiptResponse
 	if err := c.http.PostJSON(ctx, "/api/v1/execute", wireReq, &resp); err != nil {
 		return nil, fmt.Errorf("runtime Execute: %w", err)
 	}
-	stdout, err := base64.StdEncoding.DecodeString(resp.StdoutBase64)
-	if err != nil {
-		return nil, fmt.Errorf("runtime decode stdout: %w", err)
+	// Map nested receipt → flat orch outbound.ExecutionReceipt.
+	var stdout, stderr []byte
+	if resp.Result.StdoutRef != nil {
+		stdout = resp.Result.StdoutRef.Data
 	}
-	stderr, err := base64.StdEncoding.DecodeString(resp.StderrBase64)
-	if err != nil {
-		return nil, fmt.Errorf("runtime decode stderr: %w", err)
+	if resp.Result.StderrRef != nil {
+		stderr = resp.Result.StderrRef.Data
+	}
+	exit := 0
+	if resp.Result.ExitCode != nil {
+		exit = *resp.Result.ExitCode
+	}
+	startedAt := resp.Handle.StartedAt
+	if startedAt.IsZero() {
+		startedAt = resp.Timings.StartedAt
+	}
+	endedAt := resp.Result.CompletedAt
+	if endedAt.IsZero() {
+		endedAt = resp.Timings.CompletedAt
 	}
 	return &outbound.ExecutionReceipt{
-		Status:     outbound.ReceiptStatus(resp.Status),
+		Status:     outbound.ReceiptStatus(resp.Result.Status),
 		Stdout:     stdout,
 		Stderr:     stderr,
-		ExitCode:   resp.ExitCode,
-		DurationMS: resp.DurationMS,
+		ExitCode:   exit,
+		DurationMS: int(resp.Result.DurationMs),
 		ReceiptID:  resp.ReceiptID,
-		RetryHint:  outbound.RetryHint(resp.RetryHint),
-		StartedAt:  resp.StartedAt,
-		EndedAt:    resp.EndedAt,
+		RetryHint:  outbound.RetryHint(resp.Result.Retryable),
+		StartedAt:  startedAt,
+		EndedAt:    endedAt,
 	}, nil
 }
 
