@@ -27,6 +27,13 @@
 #   curl http://localhost:8082/api/v1/tasks     # 405/404 = service alive
 #   curl http://localhost:8083/healthz          # runtime-adapters
 #
+# Trace ID flow (P2.2):
+#   - Generate a trace_id locally: TRACE=$(openssl rand -hex 16)
+#   - Hit any endpoint: curl -H "X-Request-ID: $TRACE" http://localhost:8080/api/v1/health
+#   - All four services' logs will carry trace_id=$TRACE (or its derived form)
+#   - Or use a full traceparent: curl -H "Traceparent: 00-${TRACE}-0000000000000001-01" \
+#       http://localhost:8080/api/v1/ready
+#
 # TEAR DOWN
 #   docker compose -f ops/local/compose.full-stack.yaml down -v
 
