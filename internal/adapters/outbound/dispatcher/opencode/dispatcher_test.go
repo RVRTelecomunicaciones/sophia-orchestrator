@@ -91,20 +91,34 @@ func TestDispatch_HappyPath(t *testing.T) {
 	require.Equal(t, "v1", env["schema_version"])
 	require.Equal(t, "DONE", env["status"])
 
-	// Verify args injected --dir and prompt as positional last arg
+	// Verify wire shape: worktree is passed via working_dir (NOT --dir),
+	// prompt is the last positional arg, stdin is absent.
+	// See dispatcher.go M-E0 8th wire-gap fix: opencode's permission
+	// sandbox honors the launching shell's cwd, not --dir.
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
 	args := payload["args"].([]any)
-	foundDir := false
 	for _, a := range args {
-		if a == "--dir" {
-			foundDir = true
-			break
-		}
+		require.NotEqual(t, "--dir", a, "must NOT pass --dir; use working_dir on payload instead")
 	}
-	require.True(t, foundDir)
+	require.Equal(t, "/tmp/wt", payload["working_dir"], "worktree must be set as working_dir on the runtime payload")
 	require.Equal(t, "do the thing", args[len(args)-1], "prompt must be the LAST positional arg")
 	require.NotContains(t, payload, "stdin", "stdin field must NOT be sent — opencode reads from positional argv")
+
+	// 10th wire-gap fix: env carries OPENCODE_CONFIG_CONTENT to allowlist
+	// the worktree under opencode's permission system. Without this,
+	// opencode auto-rejects every read/edit as external_directory.
+	envMap, ok := payload["env"].(map[string]any)
+	require.True(t, ok, "payload must include env map with OPENCODE_CONFIG_CONTENT")
+	cfgRaw, ok := envMap["OPENCODE_CONFIG_CONTENT"].(string)
+	require.True(t, ok, "env must include OPENCODE_CONFIG_CONTENT string")
+	require.NotEmpty(t, cfgRaw)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal([]byte(cfgRaw), &cfg), "OPENCODE_CONFIG_CONTENT must be valid JSON")
+	perm := cfg["permission"].(map[string]any)
+	extDir := perm["external_directory"].(map[string]any)
+	require.Equal(t, "allow", extDir["/tmp/wt"], "worktree must be allowed under external_directory")
+	require.Equal(t, "allow", extDir["/tmp/wt/**"], "worktree recursive glob must be allowed under external_directory")
 }
 
 func TestDispatch_NoEnvelopeReturnsNil(t *testing.T) {

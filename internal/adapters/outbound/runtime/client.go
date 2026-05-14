@@ -64,8 +64,15 @@ func DefaultConfig(baseURL, apiKey string) Config {
 	if apiKey != "" {
 		hb.DefaultHeaders = http.Header{"X-API-Key": {apiKey}}
 	}
-	hb.HTTPTimeout = 30 * time.Second // shell.exec subprocess can be long
-	hb.MaxAttempts = 1                // runtime is replay-everything; we don't retry on top
+	// HTTP client timeout MUST exceed the maximum inner timeout_budget_ms we
+	// will ever send (apply phase default = 1_800_000ms = 30min). The HTTP
+	// transport cancels the request when this elapses, so a tight setting
+	// here makes runtime return timeout receipts even when the inner budget
+	// would allow the subprocess to keep going (e.g. opencode + LLM call).
+	// 35min gives a 5min buffer above the apply default; phase service uses
+	// 600s so this also covers explore/proposal/spec/design/tasks.
+	hb.HTTPTimeout = 35 * time.Minute
+	hb.MaxAttempts = 1 // runtime is replay-everything; we don't retry on top
 	return Config{HTTPBase: hb, APIKey: apiKey}
 }
 

@@ -103,27 +103,51 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
 	// Flags aligned with current opencode CLI (v0.x):
 	//   opencode run [options] <message>     ← message is POSITIONAL
-	// No --prompt-stdin (legacy), no --output-json (now --format json),
-	// no --cwd (now --dir). The fenced-JSON envelope is extracted from
-	// stdout in default format.
+	// No --prompt-stdin (legacy), no --output-json (now --format json).
+	//
+	// IMPORTANT: do NOT pass --dir. Opencode's sandboxed permission system
+	// classifies any path outside the launching shell's cwd as
+	// "external_directory" and auto-rejects file reads/writes — even if
+	// --dir points there. The only way to grant the worktree access is to
+	// spawn opencode with cwd=<worktree>, which we do by setting
+	// working_dir on the runtime payload below (8th wire-alignment gap,
+	// discovered during M-E0 Validation Gap #5).
 	args := []string{"run"}
 	if d.cfg.Model != "" {
 		args = append(args, "-m", d.cfg.Model)
-	}
-	if req.WorktreePath != "" && req.WorktreePath != "." {
-		args = append(args, "--dir", req.WorktreePath)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
 	args = append(args, req.Prompt) // positional message — full SDD prompt
 
 	// Wire shape mirrors sophia-runtime-adapters shell adapter ExecPayload:
-	//   command (not "cmd"), args. No stdin — opencode reads message from
-	//   positional argv. Outer timeout_budget_ms is on the ExecutionRequest.
+	//   command (not "cmd"), args, working_dir, env. No stdin — opencode
+	//   reads message from positional argv. working_dir MUST be set: the
+	//   runtime spawns the subprocess with cwd = working_dir, which is
+	//   the only way opencode's permission system grants file access to
+	//   the worktree. Outer timeout_budget_ms is on the ExecutionRequest.
 	//   Runtime decoder is DisallowUnknownFields strict.
-	payload, err := json.Marshal(map[string]any{
+	//
+	// env carries OPENCODE_CONFIG_CONTENT — an inline JSON config that
+	// allowlists the worktree under opencode's permission system.
+	// Without this, opencode auto-rejects every read/edit against the
+	// worktree with "permission requested: external_directory; auto-
+	// rejecting" because (a) external_directory defaults to "ask" and
+	// (b) the subprocess has no TTY, so "ask" prompts auto-reject.
+	// This is the 10th wire-alignment gap discovered during M-E0
+	// Validation Gap #5 — see ADR-0006.
+	execPayload := map[string]any{
 		"command": d.cfg.Cmd,
 		"args":    args,
-	})
+	}
+	if req.WorktreePath != "" && req.WorktreePath != "." {
+		execPayload["working_dir"] = req.WorktreePath
+		if cfg := opencodeWorktreeConfigJSON(req.WorktreePath); cfg != "" {
+			execPayload["env"] = map[string]string{
+				"OPENCODE_CONFIG_CONTENT": cfg,
+			}
+		}
+	}
+	payload, err := json.Marshal(execPayload)
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: marshal payload: %w", err)
 	}
@@ -178,6 +202,58 @@ func extractLastFencedJSON(stdout []byte) []byte {
 		return nil
 	}
 	return bytes.TrimSpace(matches[len(matches)-1][1])
+}
+
+// opencodeWorktreeConfigJSON returns a marshaled opencode config that
+// allowlists the given worktree path under opencode's permission system.
+// Returns "" if worktree is empty.
+//
+// opencode loads config (in order of precedence) from:
+//  1. remote config
+//  2. ~/.config/opencode/opencode.json (global)
+//  3. OPENCODE_CONFIG env var (custom file path)
+//  4. ./opencode.json walking up to nearest .git/
+//  5. .opencode/ directories
+//  6. OPENCODE_CONFIG_CONTENT env var (inline JSON, this is what we use)
+//
+// Inline content is preferred because it (a) avoids writing files to
+// every worktree, (b) is scoped to the orch-spawned subprocess (does
+// NOT bleed into the user's interactive opencode sessions), and (c) is
+// auditable in code review — the rules live next to the dispatcher.
+//
+// Empirically verified against opencode v1.3.14: only the
+// `external_directory` permission key accepts a dict-of-patterns map.
+// Adding `read`/`edit`/`write`/`webfetch` with the same dict shape
+// makes opencode exit with "Configuration is invalid at
+// OPENCODE_CONFIG_CONTENT — Invalid input permission" at startup.
+// Those tool-level permissions are inherited from the user's global
+// ~/.config/opencode/opencode.json (which typically allows `*` for
+// `read`/`bash`). Our job is only to allowlist the worktree itself —
+// the actual filesystem boundary check.
+//
+// Without this allowlist, opencode logs `permission requested:
+// external_directory; auto-rejecting` for every tool call against
+// the worktree because (a) the worktree lives under /tmp (outside
+// the user's home), (b) external_directory defaults to "ask", and
+// (c) the subprocess has no TTY so "ask" prompts auto-reject.
+func opencodeWorktreeConfigJSON(worktreePath string) string {
+	if worktreePath == "" {
+		return ""
+	}
+	cfg := map[string]any{
+		"$schema": "https://opencode.ai/config.json",
+		"permission": map[string]any{
+			"external_directory": map[string]string{
+				worktreePath:          "allow",
+				worktreePath + "/**":  "allow",
+			},
+		},
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // Compile-time interface check.
