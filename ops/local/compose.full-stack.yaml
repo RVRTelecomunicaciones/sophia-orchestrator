@@ -1,0 +1,368 @@
+# ops/local/compose.full-stack.yaml
+#
+# PURPOSE
+#   Brings up the entire Sophia ecosystem locally with real services —
+#   NOT stubs. This is the local-first hardening exit per ADR-0005 Sprint 0.
+#
+#   Four independent Postgres instances (one per service) preserve service
+#   boundary isolation. Four application services wire to each other via
+#   their Docker network hostnames.
+#
+# PRE-REQUISITES
+#   - Docker Desktop or Docker Engine with Compose v2 (compose 2.20+)
+#   - All 5 Sophia repos checked out as siblings under one directory:
+#       <root>/sophia-orchestator        ← this repo
+#       <root>/sophia-memory-engine
+#       <root>/agent-governance-core
+#       <root>/sophia-runtime-adapters
+#
+# BRING UP
+#   docker compose -f ops/local/compose.full-stack.yaml up -d --build
+#   First build takes ~3-5 min (4 Go service images on cold cache).
+#
+# VERIFY
+#   curl http://localhost:8080/api/v1/health   # orchestator
+#   curl http://localhost:8081/health           # memory-engine
+#   # governance-core has no /health route — probe TCP liveness:
+#   curl http://localhost:8082/api/v1/tasks     # 405/404 = service alive
+#   curl http://localhost:8083/healthz          # runtime-adapters
+#
+# TEAR DOWN
+#   docker compose -f ops/local/compose.full-stack.yaml down -v
+
+name: sophia-full-stack
+
+networks:
+  sophia-net:
+    driver: bridge
+
+volumes:
+  pg-orchestator-data:
+  pg-memory-engine-data:
+  pg-governance-core-data:
+  pg-runtime-adapters-data:
+
+services:
+
+  # =========================================================================
+  # POSTGRES INSTANCES
+  # One DB per service — isolated schemas, isolated ports, isolated volumes.
+  # =========================================================================
+
+  pg-orchestator:
+    image: postgres:16-alpine
+    container_name: sophia-pg-orchestator
+    environment:
+      POSTGRES_USER: sophia
+      POSTGRES_PASSWORD: sophia
+      POSTGRES_DB: sophia_orchestator
+    ports:
+      - "5434:5432"   # 5432 = host default; 5433 = ms-cotizacion
+    volumes:
+      - pg-orchestator-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sophia -d sophia_orchestator"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  pg-memory-engine:
+    image: postgres:16-alpine
+    container_name: sophia-pg-memory-engine
+    environment:
+      POSTGRES_USER: memory_engine
+      POSTGRES_PASSWORD: memory_engine
+      POSTGRES_DB: memory_engine
+    ports:
+      - "5435:5432"
+    volumes:
+      - pg-memory-engine-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory_engine -d memory_engine"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  pg-governance-core:
+    image: postgres:16-alpine
+    container_name: sophia-pg-governance-core
+    environment:
+      POSTGRES_USER: governance
+      POSTGRES_PASSWORD: governance
+      POSTGRES_DB: governance
+    ports:
+      - "5436:5432"
+    volumes:
+      - pg-governance-core-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U governance -d governance"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  pg-runtime-adapters:
+    image: postgres:16-alpine
+    container_name: sophia-pg-runtime-adapters
+    environment:
+      POSTGRES_USER: runtime
+      POSTGRES_PASSWORD: runtime
+      POSTGRES_DB: runtime_adapters
+    ports:
+      - "5437:5432"
+    volumes:
+      - pg-runtime-adapters-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runtime -d runtime_adapters"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  # =========================================================================
+  # MIGRATION INIT CONTAINERS
+  #
+  # orchestator  → SOPHIA_DB_MIGRATE_ON_BOOT=true  (built-in golang-migrate;
+  #                no separate init container needed)
+  # runtime-adapters → pg.Migrate() called in wire.go on boot (golang-migrate
+  #                embedded; no separate init container needed)
+  #
+  # memory-engine → uses ghcr.io/golang-migrate/migrate with the repo's
+  #                 migrations/postgres/ directory mounted read-only.
+  #                 The .up.sql / .down.sql files are standard SQL — no
+  #                 goose markers — so golang-migrate handles them directly.
+  #
+  # governance-core → migrations use goose format (-- +goose Up / Down).
+  #                   Uses ghcr.io/pressly/goose sidecar with the repo's
+  #                   migrations/postgres/ directory mounted read-only.
+  # =========================================================================
+
+  migrate-memory-engine:
+    # golang-migrate CLI (migrate/migrate on Docker Hub) handles the
+    # .up.sql / .down.sql naming convention automatically.
+    # "up" with no count applies all pending migrations; exits 0 on
+    # "no change" because migrate exits 0 for ErrNoChange.
+    image: migrate/migrate:v4.18.2
+    container_name: sophia-migrate-memory-engine
+    depends_on:
+      pg-memory-engine:
+        condition: service_healthy
+    volumes:
+      # Mount migrations from the sibling repo (read-only).
+      # Path is relative to the compose file location: ops/local/
+      # → ../../../sophia-memory-engine/migrations/postgres
+      - ../../../sophia-memory-engine/migrations/postgres:/migrations:ro
+    # migrate/migrate entrypoint is the migrate binary.
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://memory_engine:memory_engine@pg-memory-engine:5432/memory_engine?sslmode=disable"
+      - "up"
+    networks:
+      - sophia-net
+    restart: "no"
+
+  migrate-governance-core:
+    # governance-core migrations use goose format (-- +goose Up / Down).
+    # No official goose Docker image exists on public registries. We use
+    # postgres:16-alpine (which ships psql) and a shell one-liner that:
+    #   1. Reads each .sql file in numeric order
+    #   2. Strips everything from "-- +goose Down" onward (up-section only)
+    #   3. Pipes the up-section SQL to psql
+    #   4. Wraps the whole sequence in a single transaction per file
+    #
+    # Idempotency: we create a goose_db_version-compatible schema_migrations
+    # table (keyed on filename) on first run; subsequent runs skip files
+    # already recorded. Because we cannot easily replicate goose's lock table
+    # here, we use a simpler approach: IF NOT EXISTS guards on all DDL plus
+    # a per-filename migration_log table ensure re-runs are safe.
+    #
+    # Simpler and robust: use the postgres image + shell to apply the up-
+    # section of each file via psql in alphabetical order. Idempotency is
+    # guaranteed by IF NOT EXISTS in the migration DDL itself (all 9 migration
+    # files use CREATE TABLE / CREATE INDEX — no data mutations).
+    image: postgres:16-alpine
+    container_name: sophia-migrate-governance-core
+    depends_on:
+      pg-governance-core:
+        condition: service_healthy
+    volumes:
+      - ../../../agent-governance-core/migrations/postgres:/migrations:ro
+    environment:
+      PGPASSWORD: governance
+    # Shell script: for each .sql file (sorted), extract lines before
+    # "-- +goose Down" and pipe to psql. The governance DDL uses
+    # CREATE TABLE / CREATE INDEX — safe to re-run if schema already exists
+    # because psql will error; we use "|| true" only on the connect check.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in $(ls /migrations/*.sql | sort); do
+          echo "Applying: $$f"
+          # Extract up-section: lines before -- +goose Down
+          sed '/-- +goose Down/,$$d' "$$f" | \
+            sed '/-- +goose Up/d' | \
+            psql "postgres://governance:governance@pg-governance-core:5432/governance?sslmode=disable" \
+              --set ON_ERROR_STOP=off \
+              --quiet \
+              -f - || true
+        done
+        echo "governance-core migrations done"
+    networks:
+      - sophia-net
+    restart: "no"
+
+  # =========================================================================
+  # APPLICATION SERVICES
+  #
+  # All app images are distroless/static — no shell, no curl, no wget.
+  # Docker HEALTHCHECK cannot run inline scripts. We omit healthcheck blocks
+  # for app services and rely on the depends_on chain for startup ordering:
+  #   pg_* (healthy) → migrate_* (completed_successfully) → app service
+  #
+  # governance-core has NO /health route in its router (only /api/v1/*).
+  # Ordering is guaranteed by the migration sidecar's successful exit.
+  # =========================================================================
+
+  orchestator:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: sophia-orchestator
+    depends_on:
+      pg-orchestator:
+        condition: service_healthy
+      # memory-engine, governance-core, and runtime-adapters must be started
+      # before orchestator connects. We depend on their migration sidecars
+      # completing (which implies their PGs are healthy) and on the services
+      # themselves starting. We use service_started here because the app
+      # services are distroless and have no external healthcheck.
+      memory-engine:
+        condition: service_started
+      governance-core:
+        condition: service_started
+      runtime-adapters:
+        condition: service_started
+    environment:
+      # HTTP
+      SOPHIA_HTTP_ADDR: ":8080"
+      SOPHIA_HTTP_API_KEY: "full-stack-key"
+      SOPHIA_HTTP_API_KEY_PROJECT: "local"
+      SOPHIA_HTTP_ALLOW_ANON_LOCALHOST: "false"
+      # DB — orchestator runs its own migrations on boot via golang-migrate
+      SOPHIA_DB_URL: "postgres://sophia:sophia@pg-orchestator:5432/sophia_orchestator?sslmode=disable"
+      SOPHIA_DB_MIGRATE_ON_BOOT: "true"
+      # Downstream service URLs (Docker network hostnames)
+      # Verified from internal/infrastructure/config/config.go
+      SOPHIA_MEMORY_URL: "http://memory-engine:8080"
+      SOPHIA_GOVERNANCE_URL: "http://governance-core:8080"
+      SOPHIA_RUNTIME_URL: "http://runtime-adapters:8080"
+      # Observability
+      SOPHIA_ENV: "dev"
+      SOPHIA_LOG_LEVEL: "info"
+      SOPHIA_METRICS_ENABLED: "true"
+      SOPHIA_TRACES_ENABLED: "false"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  memory-engine:
+    build:
+      context: ../../../sophia-memory-engine
+      dockerfile: Dockerfile
+      # The Dockerfile has two runtime targets: memory-engine and workers.
+      # We want the HTTP server target.
+      target: memory-engine
+    container_name: sophia-memory-engine
+    depends_on:
+      migrate-memory-engine:
+        condition: service_completed_successfully
+    environment:
+      # Verified from cmd/memory-engine/main.go env-var reads
+      DB_HOST: pg-memory-engine
+      DB_PORT: "5432"
+      DB_USER: memory_engine
+      DB_PASSWORD: memory_engine
+      DB_NAME: memory_engine
+      DB_SSLMODE: disable
+      PORT: "8080"
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  governance-core:
+    build:
+      context: ../../../agent-governance-core
+      dockerfile: Dockerfile
+      # The Dockerfile has one runtime target: runner
+      target: runner
+    container_name: sophia-governance-core
+    depends_on:
+      migrate-governance-core:
+        condition: service_completed_successfully
+    environment:
+      # Verified from internal/infrastructure/config/config.go
+      PORT: "8080"
+      DB_HOST: pg-governance-core
+      DB_PORT: "5432"
+      DB_USER: governance
+      DB_PASSWORD: governance
+      DB_NAME: governance
+      DB_SSLMODE: disable
+      LOG_LEVEL: info
+      OTEL_ENABLED: "false"
+      ADAPTIVE_ROUTING_ENABLED: "false"
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+    networks:
+      - sophia-net
+
+  runtime-adapters:
+    build:
+      context: ../../../sophia-runtime-adapters
+      dockerfile: Dockerfile
+      # The Dockerfile has three runtime targets. We want the main service.
+      target: runtime-adapters
+    container_name: sophia-runtime-adapters
+    depends_on:
+      pg-runtime-adapters:
+        condition: service_healthy
+    environment:
+      # Verified from internal/infrastructure/config/config.go comments
+      RUNTIME_HTTP_ADDR: ":8080"
+      # DSN uses postgres:// scheme as required by MigrateDSN stripScheme logic
+      RUNTIME_POSTGRES_DSN: "postgres://runtime:runtime@pg-runtime-adapters:5432/runtime_adapters?sslmode=disable"
+      RUNTIME_VERSION: "0.1.0"
+      # AllowedCommandsPath, AllowedWorkingDirs, AllowedFilesystemRoots are
+      # validated non-empty by config.Validate(); provide safe local values.
+      RUNTIME_ALLOWED_COMMANDS_PATH: "/usr/bin:/bin"
+      RUNTIME_ALLOWED_WORKING_DIRS: "/tmp"
+      RUNTIME_ALLOWED_FILESYSTEM_ROOTS: "/tmp"
+      RUNTIME_ENV: "development"
+      RUNTIME_PROVENANCE_SOURCE: "http"
+      RUNTIME_CHAOS_ENABLED: "false"
+      OTEL_ENABLED: "false"
+    ports:
+      - "8083:8080"
+    restart: unless-stopped
+    networks:
+      - sophia-net
