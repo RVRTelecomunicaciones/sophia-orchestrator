@@ -1,8 +1,23 @@
 # ADR 0003: sophia-memory-engine integration contract
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-05-14)
 - **Date:** 2026-05-03
 - **Deciders:** rfactperu
+
+## Amendment 2026-05-14 (M-E0 closure)
+
+The note in section 7 ("Failure semantics") and the implicit assumption
+elsewhere that "real content fetch comes via Search-by-topic-key in V2"
+is now **superseded**. The dedicated endpoint was promoted to V1 as part
+of ADR-0005 Sprint 0:
+
+- **memory-engine** ships `GET /api/v1/memories/by-topic-key?project_id=X&topic_key=Y` (P0.2). Returns the latest active record (status='active', ORDER BY created_at DESC LIMIT 1). Optional scope filters: tenant_id, repo_id, agent_id, session_id, environment.
+- **orchestator** `MemoryClient.Get` now preserves the `Content` field; new method `MemoryClient.GetByTopicKey` queries the new endpoint. The smoking-gun `synthesizeFallbackTasksList` is **deleted** — Iron Law #1 (BLOCKED-on-memory-failure) is now the actual behavior.
+
+V1 limitation regarding write-behind queue (the original note about
+"caller must retry via /resume") is **unchanged**.
+
+---
 
 ## Context
 
