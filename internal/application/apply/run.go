@@ -139,6 +139,15 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 		return s.failEnv(c, p, "tasks list has no groups"), ErrInvalidTasksList
 	}
 
+	// Step 1b: pull prior context (spec + design) so every implement-agent
+	// gets architectural background alongside its per-task description.
+	// Non-fatal if either phase is absent (ErrNotFound is silently dropped
+	// inside loadPriorContext); other errors propagate.
+	priorContext, err := s.loadPriorContext(ctx, c)
+	if err != nil {
+		return s.failEnv(c, p, fmt.Sprintf("load prior context: %v", err)), err
+	}
+
 	// Step 2: build the board (groups + tasks + dependency edges).
 	board, err := s.buildBoard(ctx, p, tasksList)
 	if err != nil {
@@ -164,7 +173,7 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 
 	// Steps 5-17: dispatch all team-leads in parallel + DAG-aware wait.
 	completion := NewDAGCoordinator(board.Groups())
-	groupResults, err := s.runAllGroups(ctx, c, p, board, completion)
+	groupResults, err := s.runAllGroups(ctx, c, p, board, completion, priorContext)
 	if err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("group coordination: %v", err)), err
 	}
@@ -175,8 +184,9 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 
 // runAllGroups dispatches one goroutine per group. Each waits on its
 // dependencies, then runs the team-lead flow. Returns once every group
-// has signaled completion.
-func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, dag *DAGCoordinator) (map[ids.GroupID]groupOutcome, error) {
+// has signaled completion. priorContext is forwarded to every team-lead
+// and eventually injected into the implement-agent prompts.
+func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, dag *DAGCoordinator, priorContext string) (map[ids.GroupID]groupOutcome, error) {
 	results := make(map[ids.GroupID]groupOutcome, len(b.Groups()))
 	var resultsMu sync.Mutex
 
@@ -218,7 +228,7 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 				resultsMu.Unlock()
 				return
 			}
-			outcome := s.runTeamLead(ctx, c, p, b, group)
+			outcome := s.runTeamLead(ctx, c, p, b, group, priorContext)
 			_ = s.d.SpawnGov.Release(ctx)
 
 			resultsMu.Lock()
@@ -390,6 +400,59 @@ func (s *RunService) loadTasksList(ctx context.Context, c *change.Change) (*task
 		return nil, fmt.Errorf("loadTasksList %s: %w: %v", topic, ErrInvalidTasksList, err)
 	}
 	return &tl, nil
+}
+
+// loadPriorContext pulls the spec and design artifacts from memory-engine
+// (saved by their respective phases via topic_key) and concatenates them
+// with section headers so the implement-agent gets architectural context
+// alongside the per-task description.
+//
+// Failure semantics differ from loadTasksList:
+//   - ErrNotFound on either phase is non-fatal — we proceed with whatever
+//     subset is present. The apply phase is required to have tasks
+//     approved (IL2), but spec/design may legitimately be absent for
+//     very small changes that go straight from proposal to tasks.
+//   - Any other error (transport, deserialization) is propagated so the
+//     caller can decide whether to BLOCK or proceed empty.
+//
+// Returns "" when no records are found. Closes the V1.5 follow-up at
+// teamlead.go:197 (PriorContext was hardcoded to "" until this change).
+func (s *RunService) loadPriorContext(ctx context.Context, c *change.Change) (string, error) {
+	scope := outbound.MemoryScope{
+		ProjectID:   c.Project(),
+		AgentID:     "sophia-orchestator",
+		SessionID:   c.ID().String(),
+		Environment: s.d.Config.Environment,
+	}
+	sections := make([]string, 0, 2)
+	for _, phaseKey := range []string{"spec", "design"} {
+		topic := fmt.Sprintf("sdd/%s/%s", c.Name(), phaseKey)
+		rec, err := s.d.Memory.GetByTopicKey(ctx, scope, topic)
+		if err != nil {
+			if errors.Is(err, outbound.ErrNotFound) {
+				continue
+			}
+			return "", fmt.Errorf("loadPriorContext %s: %w", topic, err)
+		}
+		if rec == nil || rec.Content == "" {
+			continue
+		}
+		// Header tags the section so the LLM can distinguish spec from
+		// design when both are present. Keeps the prompt structure
+		// stable across changes.
+		sections = append(sections, fmt.Sprintf("## %s (sdd/%s/%s)\n\n%s",
+			phaseKey, c.Name(), phaseKey, rec.Content))
+	}
+	if len(sections) == 0 {
+		return "", nil
+	}
+	// Two newlines between sections so markdown renders cleanly when the
+	// agent (or a debug tool) prints the full prompt.
+	out := sections[0]
+	for _, s := range sections[1:] {
+		out += "\n\n" + s
+	}
+	return out, nil
 }
 
 func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksList) (*apply.Board, error) {

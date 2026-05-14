@@ -133,6 +133,18 @@ type fakeDispatcher struct {
 	envelopeStatus envelope.Status
 	failOnTaskID   string // dispatch returns failure for this task description match
 	dispatchCalls  atomic.Int32
+	// lastPrompt captures the most recent DispatchRequest.Prompt so tests
+	// can assert what made it into the agent call (e.g. priorContext
+	// injection from loadPriorContext).
+	lastPrompt string
+}
+
+// LastPrompt returns the prompt string captured on the last Dispatch call.
+// Returns "" if Dispatch was never invoked.
+func (d *fakeDispatcher) LastPrompt() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastPrompt
 }
 
 func (d *fakeDispatcher) Provider() session.Provider { return session.ProviderOpenCode }
@@ -147,6 +159,7 @@ func (d *fakeDispatcher) Dispatch(_ context.Context, req outbound.DispatchReques
 		st = envelope.StatusDone
 	}
 	failTask := d.failOnTaskID
+	d.lastPrompt = req.Prompt
 	d.mu.Unlock()
 	if failTask != "" && strings.Contains(req.Prompt, failTask) {
 		st = envelope.StatusBlocked
@@ -303,6 +316,30 @@ func (m *fakeMemory) putTasksList(changeName string, tl any) {
 		TopicKey: fmt.Sprintf("sdd/%s/tasks", changeName),
 		Content:  string(body),
 	}
+}
+
+// putPhaseRecord plants an arbitrary-phase record (spec, design, proposal,
+// etc.) at sdd/{change}/{phase}. Used by loadPriorContext tests to seed
+// upstream artifacts the apply phase reads.
+func (m *fakeMemory) putPhaseRecord(changeName, phaseKey, content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordsByTopic[fmt.Sprintf("sdd/%s/%s", changeName, phaseKey)] = &outbound.MemoryRecord{
+		ID:       fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G5%s", strings.ToUpper(phaseKey)),
+		Type:     "sdd_" + phaseKey,
+		Status:   "active",
+		TopicKey: fmt.Sprintf("sdd/%s/%s", changeName, phaseKey),
+		Content:  content,
+	}
+}
+
+// putPhaseError plants a non-NotFound transport error for a topic so tests
+// can assert that loadPriorContext surfaces real failures (vs the
+// silently-dropped ErrNotFound case).
+func (m *fakeMemory) putPhaseError(changeName, phaseKey string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.errByTopic[fmt.Sprintf("sdd/%s/%s", changeName, phaseKey)] = err
 }
 
 func (m *fakeMemory) Ingest(_ context.Context, _ outbound.IngestMemoryInput) (*outbound.MemoryRecord, error) {
@@ -810,4 +847,95 @@ func TestDispatchImplement_EnvelopeInvalid_EmitsValidationFailed(t *testing.T) {
 	require.Contains(t, types, "apply.task.escalated")
 	require.GreaterOrEqual(t, int(disp.calls.Load()), 3)
 	require.Equal(t, envelope.StatusBlocked, env.Status)
+}
+
+// ---------------------------------------------------------------------------
+// loadPriorContext — V1.5 follow-up tests
+// ---------------------------------------------------------------------------
+
+// TestExecute_InjectsPriorContext_SpecAndDesign verifies that when both
+// the spec and design phases have persisted records in memory-engine,
+// the apply phase concatenates both into the implement-agent prompt
+// under the "# Prior Context" section.
+func TestExecute_InjectsPriorContext_SpecAndDesign(t *testing.T) {
+	svc, _, disp, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	mem.putPhaseRecord("feat-x", "spec", "SPEC BODY: must add type X to domain.")
+	mem.putPhaseRecord("feat-x", "design", "DESIGN BODY: type X lives under internal/domain/x.go.")
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	prompt := disp.LastPrompt()
+	require.NotEmpty(t, prompt, "dispatcher must have been called at least once")
+	require.Contains(t, prompt, "# Prior Context",
+		"prompt must include the Prior Context section when memory has records")
+	require.Contains(t, prompt, "## spec (sdd/feat-x/spec)")
+	require.Contains(t, prompt, "SPEC BODY: must add type X to domain.")
+	require.Contains(t, prompt, "## design (sdd/feat-x/design)")
+	require.Contains(t, prompt, "DESIGN BODY: type X lives under internal/domain/x.go.")
+}
+
+// TestExecute_InjectsPriorContext_SpecOnly verifies that when design is
+// absent (ErrNotFound) but spec is present, the apply phase still injects
+// the spec content. ErrNotFound is non-fatal per loadPriorContext semantics.
+func TestExecute_InjectsPriorContext_SpecOnly(t *testing.T) {
+	svc, _, disp, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	mem.putPhaseRecord("feat-x", "spec", "ONLY SPEC BODY.")
+	// design intentionally unset → ErrNotFound, dropped silently
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	prompt := disp.LastPrompt()
+	require.Contains(t, prompt, "ONLY SPEC BODY.")
+	require.NotContains(t, prompt, "## design (sdd/feat-x/design)",
+		"design section must NOT appear when no design record exists")
+}
+
+// TestExecute_NoPriorContext_WhenBothMissing verifies that when neither
+// spec nor design have records, the apply phase still succeeds and the
+// prompt omits the "# Prior Context" header entirely (PromptBuilder
+// guards on non-empty per prompt_builder.go).
+func TestExecute_NoPriorContext_WhenBothMissing(t *testing.T) {
+	svc, _, disp, _, _, _ := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	// Default seed plants only the tasks record — neither spec nor design.
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	prompt := disp.LastPrompt()
+	require.NotContains(t, prompt, "# Prior Context",
+		"Prior Context section must be omitted when no spec/design records exist")
+}
+
+// TestExecute_PropagatesPriorContextError verifies that a non-NotFound
+// memory failure on loadPriorContext propagates up through Execute and
+// the phase fails with that error (Iron Law #1: BLOCKED-on-memory-failure).
+func TestExecute_PropagatesPriorContextError(t *testing.T) {
+	svc, _, _, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	// Seed a transport error specifically for the spec lookup.
+	mem.putPhaseError("feat-x", "spec", errors.New("memory transport down"))
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.Error(t, err, "non-NotFound memory error on spec must abort apply")
+	require.Contains(t, err.Error(), "memory transport down")
 }
