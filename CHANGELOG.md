@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(empty — first changes after the v0.2.0-rc.1 cut land here)
+### Added
+
+- `scripts/local-mode/run-orchestrator-local.sh` and `run-runtime-local.sh` —
+  run orchestator and runtime-adapters on the macOS host so runtime-adapters
+  can spawn the user's local `opencode`/`claude` binaries (M-E0 #2).
+- `docs/runbooks/m-e0-local-execution.md` — step-by-step runbook for the
+  partial-compose local-mode topology.
 
 ---
 
