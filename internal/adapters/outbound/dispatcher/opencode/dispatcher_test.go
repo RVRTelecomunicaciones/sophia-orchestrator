@@ -92,24 +92,20 @@ func TestDispatch_HappyPath(t *testing.T) {
 	require.Equal(t, "v1", env["schema_version"])
 	require.Equal(t, "DONE", env["status"])
 
-	// Verify args injected --cwd
+	// Verify args injected --dir and prompt as positional last arg
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
 	args := payload["args"].([]any)
-	foundCwd := false
+	foundDir := false
 	for _, a := range args {
-		if a == "--cwd" {
-			foundCwd = true
+		if a == "--dir" {
+			foundDir = true
 			break
 		}
 	}
-	require.True(t, foundCwd)
-	// stdin is now []byte → JSON base64; decode to assert original content
-	stdinB64, ok := payload["stdin"].(string)
-	require.True(t, ok, "stdin must be base64 string")
-	decoded, derr := base64.StdEncoding.DecodeString(stdinB64)
-	require.NoError(t, derr)
-	require.Equal(t, "do the thing", string(decoded))
+	require.True(t, foundDir)
+	require.Equal(t, "do the thing", args[len(args)-1], "prompt must be the LAST positional arg")
+	require.NotContains(t, payload, "stdin", "stdin field must NOT be sent — opencode reads from positional argv")
 }
 
 func TestDispatch_NoEnvelopeReturnsNil(t *testing.T) {
@@ -145,7 +141,7 @@ func TestDispatch_WorktreePathDotOmitsCwdArg(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
 	args := payload["args"].([]any)
 	for _, a := range args {
-		require.NotEqual(t, "--cwd", a, "WorktreePath \".\" should not inject --cwd")
+		require.NotEqual(t, "--dir", a, "WorktreePath \".\" should not inject --cwd")
 	}
 }
 

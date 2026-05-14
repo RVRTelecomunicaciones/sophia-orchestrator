@@ -98,20 +98,25 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 // Captures stdout, extracts the LAST fenced ```json``` block as
 // EnvelopeRaw, and returns the structured result.
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
-	args := []string{"run", "--prompt-stdin", "--output-json"}
+	// Flags aligned with current opencode CLI (v0.x):
+	//   opencode run [options] <message>     ← message is POSITIONAL
+	// No --prompt-stdin (legacy), no --output-json (now --format json),
+	// no --cwd (now --dir). The fenced-JSON envelope is extracted from
+	// stdout in default format.
+	args := []string{"run"}
 	if req.WorktreePath != "" && req.WorktreePath != "." {
-		args = append(args, "--cwd", req.WorktreePath)
+		args = append(args, "--dir", req.WorktreePath)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
+	args = append(args, req.Prompt) // positional message — full SDD prompt
 
 	// Wire shape mirrors sophia-runtime-adapters shell adapter ExecPayload:
-	//   command (not "cmd"), args, stdin ([]byte → JSON base64), env, working_dir.
-	// Outer timeout_budget_ms is handled by the runtime client; do NOT send it here.
-	// Runtime decoder is DisallowUnknownFields strict.
+	//   command (not "cmd"), args. No stdin — opencode reads message from
+	//   positional argv. Outer timeout_budget_ms is on the ExecutionRequest.
+	//   Runtime decoder is DisallowUnknownFields strict.
 	payload, err := json.Marshal(map[string]any{
 		"command": d.cfg.Cmd,
 		"args":    args,
-		"stdin":   []byte(req.Prompt), // encoding/json marshals []byte as base64
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: marshal payload: %w", err)
