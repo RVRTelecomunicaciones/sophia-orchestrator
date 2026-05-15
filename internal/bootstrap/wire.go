@@ -91,9 +91,10 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("bootstrap: runtime: %w", err)
 	}
 	dispatcher := opencode.New(rtClient, opencode.Config{
-		Cmd:       cfg.Dispatcher.Cmd,
-		Suggested: cfg.Dispatcher.SuggestedConcurrent,
-		Model:     cfg.Dispatcher.Model,
+		Cmd:          cfg.Dispatcher.Cmd,
+		Suggested:    cfg.Dispatcher.SuggestedConcurrent,
+		Model:        cfg.Dispatcher.Model,
+		ModelByPhase: cfg.Dispatcher.ModelByPhase,
 	})
 
 	// Discipline services.

@@ -37,9 +37,16 @@ type Config struct {
 	ExtraArgs []string
 	// Suggested is the value returned by SuggestedMaxConcurrent.
 	Suggested int
-	// Model, if non-empty, is passed via opencode `-m <provider/model>`.
-	// Empty = opencode picks its default model from its config.
+	// Model is the global default `-m <provider/model>` flag value used
+	// when no per-phase override matches. Empty = opencode picks its
+	// default model from its config.
 	Model string
+	// ModelByPhase maps a lowercase phase string (e.g. "explore", "spec",
+	// "apply") to a model that overrides Model for that phase only. Empty
+	// or missing entry falls back to Model. Wired from
+	// config.DispatcherConfig.ModelByPhase, sourced from env vars
+	// `SOPHIA_DISPATCHER_MODEL_<PHASE>`.
+	ModelByPhase map[string]string
 }
 
 // DefaultConfig returns production defaults.
@@ -72,6 +79,20 @@ func New(runtime outbound.RuntimeClient, cfg Config) *Dispatcher {
 
 // Provider reports session.ProviderOpenCode.
 func (d *Dispatcher) Provider() session.Provider { return session.ProviderOpenCode }
+
+// modelFor returns the dispatcher model to invoke for the given phase.
+// Lookup order: ModelByPhase[phaseType] → cfg.Model (global default) →
+// "" (let opencode choose). An empty phaseType skips the per-phase
+// lookup; pre-existing callers that don't set DispatchRequest.PhaseType
+// transparently keep the global-default behavior.
+func (d *Dispatcher) modelFor(phaseType string) string {
+	if phaseType != "" {
+		if m, ok := d.cfg.ModelByPhase[phaseType]; ok && m != "" {
+			return m
+		}
+	}
+	return d.cfg.Model
+}
 
 // SuggestedMaxConcurrent returns the per-provider rate-limit hint.
 func (d *Dispatcher) SuggestedMaxConcurrent() int { return d.cfg.Suggested }
@@ -113,8 +134,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	// working_dir on the runtime payload below (8th wire-alignment gap,
 	// discovered during M-E0 Validation Gap #5).
 	args := []string{"run"}
-	if d.cfg.Model != "" {
-		args = append(args, "-m", d.cfg.Model)
+	if model := d.modelFor(req.PhaseType); model != "" {
+		args = append(args, "-m", model)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
 	args = append(args, req.Prompt) // positional message — full SDD prompt

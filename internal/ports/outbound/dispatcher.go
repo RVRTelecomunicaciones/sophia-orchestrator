@@ -45,6 +45,12 @@ type DispatchRequest struct {
 	//   "stdout-fenced-json" — last fenced ```json block in stdout (V1 default)
 	//   "memory-topic-key:KEY" — fall back to MemoryClient.Get with the topic_key
 	EnvelopeOut string
+	// PhaseType is the lowercase phase string (e.g. "explore", "spec",
+	// "apply") used by the dispatcher to look up a per-phase model
+	// override (Config.ModelByPhase). Empty falls back to the global
+	// Config.Model. Pre-existing callers that omit this still work
+	// unchanged — they get the global default.
+	PhaseType string
 }
 
 // DispatchResult is the output of AgentDispatcher.Dispatch.

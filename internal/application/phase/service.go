@@ -345,6 +345,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		WorktreePath: ".",
 		TimeoutMS:    s.d.Config.DispatchTimeoutMS,
 		EnvelopeOut:  "stdout-fenced-json",
+		PhaseType:    string(p.Type()),
 	})
 	_ = s.d.SpawnGov.Release(ctx)
 	if dispatchErr != nil {

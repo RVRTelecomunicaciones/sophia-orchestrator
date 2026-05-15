@@ -218,6 +218,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		WorktreePath: group.WorktreePath(),
 		TimeoutMS:    s.d.Config.DispatchTimeoutMS,
 		EnvelopeOut:  "stdout-fenced-json",
+		PhaseType:    string(p.Type()),
 	})
 	if err != nil {
 		// M-E0 #3: distinguish runtime-level dispatch failure from transport errors.
