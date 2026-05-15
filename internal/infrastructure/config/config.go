@@ -71,10 +71,18 @@ type ServiceConfig struct {
 type DispatcherConfig struct {
 	Cmd                 string
 	SuggestedConcurrent int
-	// Model is the opencode `-m <provider/model>` flag value. Empty = let
-	// opencode pick its default. Examples: "anthropic/claude-opus-4-7",
-	// "google/gemini-2.5-flash", "google/gemini-2.5-pro".
+	// Model is the global default opencode `-m <provider/model>` flag
+	// value used when no per-phase override is set. Empty = let opencode
+	// pick its default. Examples: "anthropic/claude-opus-4-7",
+	// "google/gemini-2.5-flash", "github-copilot/claude-sonnet-4.6".
 	Model string
+	// ModelByPhase maps a phase type (lowercase: "explore", "proposal",
+	// "spec", "design", "tasks", "apply", "verify", "archive") to a
+	// dispatcher model that overrides Model for THAT phase only. Loaded
+	// from env vars `SOPHIA_DISPATCHER_MODEL_<PHASE>` (uppercase) so an
+	// operator can wire e.g. Codex for apply + Claude Opus for spec
+	// without rebuilding. A missing entry falls back to Model.
+	ModelByPhase map[string]string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -151,6 +159,7 @@ func Load() (Config, error) {
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)
 	c.Dispatcher.Model = envStr("SOPHIA_DISPATCHER_MODEL", c.Dispatcher.Model)
+	c.Dispatcher.ModelByPhase = loadDispatcherModelByPhase()
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
 
@@ -236,4 +245,32 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// dispatcherPhaseEnvNames lists the lowercase phase keys whose per-phase
+// dispatcher model overrides are read from `SOPHIA_DISPATCHER_MODEL_<UPPER>`
+// env vars. The set mirrors phase.PhaseType (excluding init/aborted, which
+// never invoke the dispatcher).
+var dispatcherPhaseEnvNames = []string{
+	"explore", "proposal", "spec", "design",
+	"tasks", "apply", "verify", "archive",
+}
+
+// loadDispatcherModelByPhase reads `SOPHIA_DISPATCHER_MODEL_<PHASE>` for
+// each known phase and returns the populated overrides. An unset env var
+// means "fall back to the global Model"; only set keys appear in the map.
+// The returned map is nil when no overrides are configured (caller should
+// treat nil and empty equivalently).
+func loadDispatcherModelByPhase() map[string]string {
+	var out map[string]string
+	for _, p := range dispatcherPhaseEnvNames {
+		key := "SOPHIA_DISPATCHER_MODEL_" + strings.ToUpper(p)
+		if v, ok := os.LookupEnv(key); ok && v != "" {
+			if out == nil {
+				out = make(map[string]string, len(dispatcherPhaseEnvNames))
+			}
+			out[p] = v
+		}
+	}
+	return out
 }

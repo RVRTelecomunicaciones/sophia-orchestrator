@@ -236,3 +236,119 @@ func TestDispatch_ReceiptSuccess_StillReturnsResult(t *testing.T) {
 	require.Equal(t, "v1", env["schema_version"])
 	require.Equal(t, 500, res.DurationMS)
 }
+
+// TestDispatcher_PerPhaseModelOverride exercises the SOPHIA_DISPATCHER_MODEL_<PHASE>
+// override path: when ModelByPhase has an entry for the requested PhaseType,
+// the dispatcher must pass `-m <override>` instead of `-m <Config.Model>`.
+//
+// Pre-existing callers that omit DispatchRequest.PhaseType (or leave it
+// empty) must keep getting the global default — this is the backward-
+// compat guarantee that makes the change a non-breaking add.
+func TestDispatcher_PerPhaseModelOverride(t *testing.T) {
+	type capture struct {
+		args []string
+	}
+	tests := []struct {
+		name        string
+		cfg         opencode.Config
+		req         outbound.DispatchRequest
+		wantModel   string
+		wantHasFlag bool
+	}{
+		{
+			name: "phase override wins over global model",
+			cfg: opencode.Config{
+				Cmd:   "opencode",
+				Model: "github-copilot/claude-sonnet-4.6",
+				ModelByPhase: map[string]string{
+					"apply": "openai/gpt-5.3-codex",
+				},
+			},
+			req:         outbound.DispatchRequest{Prompt: "p", PhaseType: "apply"},
+			wantModel:   "openai/gpt-5.3-codex",
+			wantHasFlag: true,
+		},
+		{
+			name: "phase without override falls back to global model",
+			cfg: opencode.Config{
+				Cmd:   "opencode",
+				Model: "github-copilot/claude-sonnet-4.6",
+				ModelByPhase: map[string]string{
+					"apply": "openai/gpt-5.3-codex",
+				},
+			},
+			req:         outbound.DispatchRequest{Prompt: "p", PhaseType: "spec"},
+			wantModel:   "github-copilot/claude-sonnet-4.6",
+			wantHasFlag: true,
+		},
+		{
+			name: "empty PhaseType uses global model (backward compat)",
+			cfg: opencode.Config{
+				Cmd:   "opencode",
+				Model: "github-copilot/claude-sonnet-4.6",
+			},
+			req:         outbound.DispatchRequest{Prompt: "p"},
+			wantModel:   "github-copilot/claude-sonnet-4.6",
+			wantHasFlag: true,
+		},
+		{
+			name: "empty global model and no override emits no -m flag",
+			cfg: opencode.Config{
+				Cmd: "opencode",
+			},
+			req:         outbound.DispatchRequest{Prompt: "p", PhaseType: "explore"},
+			wantModel:   "",
+			wantHasFlag: false,
+		},
+		{
+			name: "empty override entry falls back to global model",
+			cfg: opencode.Config{
+				Cmd:          "opencode",
+				Model:        "github-copilot/claude-sonnet-4.6",
+				ModelByPhase: map[string]string{"apply": ""},
+			},
+			req:         outbound.DispatchRequest{Prompt: "p", PhaseType: "apply"},
+			wantModel:   "github-copilot/claude-sonnet-4.6",
+			wantHasFlag: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &fakeRuntime{returnRecp: &outbound.ExecutionReceipt{
+				Status: outbound.ReceiptSuccess,
+				Stdout: []byte("```json\n{\"schema_version\":\"v1\"}\n```"),
+			}}
+			d := opencode.New(rt, tt.cfg)
+
+			_, err := d.Dispatch(context.Background(), tt.req)
+			require.NoError(t, err)
+
+			// Decode the captured payload to find -m flag in args.
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(rt.captured.Payload, &payload))
+			argsAny, ok := payload["args"].([]any)
+			require.True(t, ok, "args must be a JSON array")
+
+			capt := capture{args: make([]string, 0, len(argsAny))}
+			for _, a := range argsAny {
+				capt.args = append(capt.args, a.(string))
+			}
+
+			// Find -m flag if present.
+			var observedModel string
+			var hasFlag bool
+			for i, a := range capt.args {
+				if a == "-m" && i+1 < len(capt.args) {
+					observedModel = capt.args[i+1]
+					hasFlag = true
+					break
+				}
+			}
+			require.Equal(t, tt.wantHasFlag, hasFlag,
+				"args=%v wantHasFlag=%v hasFlag=%v", capt.args, tt.wantHasFlag, hasFlag)
+			require.Equal(t, tt.wantModel, observedModel,
+				"args=%v wantModel=%q", capt.args, tt.wantModel)
+		})
+	}
+}
