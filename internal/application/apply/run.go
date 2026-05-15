@@ -34,6 +34,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/trace"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -166,7 +167,7 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("save board: %v", err)), err
 	}
-	s.publishEvent(p.ID(), inbound.EventApplyBoardCreated, inbound.ApplyBoardCreatedPayload{
+	s.publishEvent(ctx, p.ID(), inbound.EventApplyBoardCreated, inbound.ApplyBoardCreatedPayload{
 		BoardID: board.ID().String(),
 		Groups:  len(board.Groups()),
 	})
@@ -205,7 +206,7 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 				resultsMu.Lock()
 				results[group.ID()] = groupOutcome{failed: true, err: err}
 				resultsMu.Unlock()
-				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
+				s.publishEvent(ctx, p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
 					GroupID: group.ID().String(),
 					Reason:  err.Error(),
 				})
@@ -238,12 +239,12 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 
 			dag.Signal(group.ID(), outcome.failed, outcome.err)
 			if outcome.failed {
-				s.publishEvent(p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
+				s.publishEvent(ctx, p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
 					GroupID: group.ID().String(),
 					Reason:  fmtErr(outcome.err),
 				})
 			} else {
-				s.publishEvent(p.ID(), inbound.EventApplyGroupCompleted, inbound.ApplyGroupCompletedPayload{
+				s.publishEvent(ctx, p.ID(), inbound.EventApplyGroupCompleted, inbound.ApplyGroupCompletedPayload{
 					GroupID:   group.ID().String(),
 					TasksDone: outcome.tasksDone,
 				})
@@ -281,7 +282,7 @@ func (s *RunService) finalize(ctx context.Context, c *change.Change, p *phase.Ph
 		_ = board.Complete()
 	}
 	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
-		s.publishEvent(p.ID(), inbound.EventApplyBoardSaveFailed, inbound.ApplyBoardSaveFailedPayload{Err: err.Error()})
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyBoardSaveFailed, inbound.ApplyBoardSaveFailedPayload{Err: err.Error()})
 	}
 
 	// Metrics: record per-group + per-task aggregates.
@@ -590,7 +591,7 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 			TimeoutMS:  30_000,
 		})
 		if err != nil {
-			s.publishEvent(board.PhaseID(), inbound.EventApplyWorktreeError, inbound.ApplyWorktreeErrorPayload{
+			s.publishEvent(ctx, board.PhaseID(), inbound.EventApplyWorktreeError, inbound.ApplyWorktreeErrorPayload{
 				GroupID: g.ID().String(),
 				Err:     err.Error(),
 			})
@@ -613,11 +614,19 @@ func (d depDuration) ToDuration() time.Duration { return time.Duration(d) * time
 // internal/ports/inbound/event_payloads.go (e.g. ApplyTaskClaimedPayload)
 // so the producer gets compile-time validation of field names.
 // map[string]any is still accepted for tests and gradual migration.
-func (s *RunService) publishEvent(phaseID ids.PhaseID, eventType string, payload any) {
-	_ = s.d.Events.Publish(context.Background(), phaseID, inbound.Event{
+//
+// ctx must carry the request's Trace (via trace.NewContext) so the persisted
+// Event row keeps trace_id correlation with the originating HTTP request.
+func (s *RunService) publishEvent(ctx context.Context, phaseID ids.PhaseID, eventType string, payload any) {
+	var traceID string
+	if t, ok := trace.FromContext(ctx); ok {
+		traceID = t.TraceID
+	}
+	_ = s.d.Events.Publish(ctx, phaseID, inbound.Event{
 		Type:      eventType,
 		Timestamp: s.d.Clock.Now(),
 		Payload:   payload,
+		TraceID:   traceID,
 	})
 }
 

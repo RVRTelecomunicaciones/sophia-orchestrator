@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	httpinbound "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/eventstream"
+	phaseapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
@@ -54,11 +56,11 @@ func (s *fakeChanges) Abort(_ context.Context, _ ids.ChangeID, _ string) error {
 
 type fakePhases struct{}
 
-func (s *fakePhases) Run(_ context.Context, in inbound.RunPhaseInput) (*inbound.RunPhaseOutput, error) {
+func (s *fakePhases) Run(_ context.Context, _ inbound.RunPhaseInput) (*inbound.RunPhaseOutput, error) {
 	pid, _ := ids.ParsePhaseID("01ARZ3NDEKTSV4RRFFQ69G5P01")
 	return &inbound.RunPhaseOutput{
 		PhaseID: pid, Status: phase.PhaseStatusRunning,
-		EventsURL: "/api/v1/changes/" + in.ChangeID.String() + "/phases/" + pid.String() + "/events",
+		EventsURL: "/api/v1/phases/" + pid.String() + "/events",
 		StartedAt: time.Now().Format(time.RFC3339),
 	}, nil
 }
@@ -297,6 +299,31 @@ func TestRunPhase_Returns202(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.NotEmpty(t, got["phase_id"])
 	require.NotEmpty(t, got["events_url"])
+}
+
+// TestEventsURL_WireContract guards against drift between
+// phase.DefaultServiceConfig().EventsURLTemplate and the SSE route
+// registered in router.go. Reproduces the 2026-05-14 bug where the
+// template produced "/api/v1/changes/{cid}/phases/{pid}/events" while
+// the router only knew "/api/v1/phases/{pid}/events" — every client
+// that followed the events_url field received 404.
+func TestEventsURL_WireContract(t *testing.T) {
+	deps := defaultDeps()
+	deps.Phases = &fakePhasesTerminal{}
+	srv := newSrv(t, deps)
+
+	pid := "01ARZ3NDEKTSV4RRFFQ69G5P01"
+	eventsURL := fmt.Sprintf(phaseapp.DefaultServiceConfig().EventsURLTemplate, pid)
+
+	req, _ := http.NewRequest("GET", srv.URL+eventsURL, nil)
+	req.Header.Set("X-Sophia-API-Key", "valid")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.NotEqual(t, http.StatusNotFound, resp.StatusCode,
+		"events_url %q must hit a registered SSE route; check EventsURLTemplate vs router.go", eventsURL)
 }
 
 func TestRunPhase_RejectsInvalidPhaseType(t *testing.T) {
