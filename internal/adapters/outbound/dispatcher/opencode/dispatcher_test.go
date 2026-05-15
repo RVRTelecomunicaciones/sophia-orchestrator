@@ -330,25 +330,25 @@ func TestDispatcher_PerPhaseModelOverride(t *testing.T) {
 			argsAny, ok := payload["args"].([]any)
 			require.True(t, ok, "args must be a JSON array")
 
-			cap := capture{args: make([]string, 0, len(argsAny))}
+			capt := capture{args: make([]string, 0, len(argsAny))}
 			for _, a := range argsAny {
-				cap.args = append(cap.args, a.(string))
+				capt.args = append(capt.args, a.(string))
 			}
 
 			// Find -m flag if present.
 			var observedModel string
 			var hasFlag bool
-			for i, a := range cap.args {
-				if a == "-m" && i+1 < len(cap.args) {
-					observedModel = cap.args[i+1]
+			for i, a := range capt.args {
+				if a == "-m" && i+1 < len(capt.args) {
+					observedModel = capt.args[i+1]
 					hasFlag = true
 					break
 				}
 			}
 			require.Equal(t, tt.wantHasFlag, hasFlag,
-				"args=%v wantHasFlag=%v hasFlag=%v", cap.args, tt.wantHasFlag, hasFlag)
+				"args=%v wantHasFlag=%v hasFlag=%v", capt.args, tt.wantHasFlag, hasFlag)
 			require.Equal(t, tt.wantModel, observedModel,
-				"args=%v wantModel=%q", cap.args, tt.wantModel)
+				"args=%v wantModel=%q", capt.args, tt.wantModel)
 		})
 	}
 }

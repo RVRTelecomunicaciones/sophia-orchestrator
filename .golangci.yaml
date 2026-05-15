@@ -1,10 +1,9 @@
+version: "2"
 run:
-  timeout: 5m
   go: "1.26"
   tests: true
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - bodyclose
     - errcheck
@@ -20,131 +19,112 @@ linters:
     - unparam
     - unused
     - wrapcheck
-
-linters-settings:
-  forbidigo:
-    forbid:
-      - p: '^time\.Now$'
-        msg: "use shared.Clock in domain/application"
-      - p: '^ulid\.Make$'
-        msg: "use shared.IDGenerator in domain/application"
-  errorlint:
-    errorf: true
-    asserts: true
-    comparison: true
-  wrapcheck:
-    ignoreSigs:
-      - .Errorf(
-      - errors.New(
-      - errors.Join(
-      - errors.Unwrap(
-      # pgx interface methods that internally wrap pgx errors — adding
-      # another "<op>: %w" layer is noise.
-      - .Err()
-      - .Scan(
-      - .Exec(
-      - context.Context).Err(
-      # Internal port + domain returns from our own packages (which already
-      # carry context in the message) — wrapping again is noise.
-      - github.com/RVRTelecomunicaciones/sophia-orchestrator/
-      # Re-throws from the bootstrap layer + middleware are pass-throughs;
-      # the wrapping happens deeper in the call site.
-      - app.Run(
-      - trace.Parse(
-      - trace.New(
-      - trace.FromRequestID(
-      - envelope.Parse(
-      - stdouttrace.New(
-      - apply.NewTask(
-      - .Execute(
-  gosec:
-    excludes:
-      - G104  # errcheck overlap
-      - G115  # integer overflow conversion (false positives in Go 1.22+)
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - wrapcheck
-        - gosec
-        - forbidigo
-    # Test signatures are dictated by `testing.T` / `http.HandlerFunc` /
-    # similar stdlib interfaces — every test function has `t *testing.T`
-    # whether or not it's used (e.g. coverage-only tests). Renaming to `_`
-    # is more confusing than the warning is helpful, so skip revive
-    # unused-parameter for tests entirely.
-    - path: _test\.go
-      linters: [revive]
-      text: "unused-parameter"
-    # Test helpers like mkChange / mustBoardID often take a single
-    # canonical input and don't need parameterization until a second
-    # caller exists. Flagging them as "param always receives X" is
-    # premature optimisation.
-    - path: _test\.go
-      linters: [unparam]
-    - path: internal/infrastructure
-      linters:
-        - forbidigo  # infrastructure may use time.Now/ulid.Make
-    - path: internal/bootstrap
-      linters:
-        - forbidigo
-    - path: internal/adapters
-      linters:
-        - forbidigo  # adapters may use time.Now/ulid.Make at the boundary
-    # `phase.PhaseType` and `phase.PhaseStatus` are intentional — the
-    # "stutter" lint here is a stylistic preference; the domain types
-    # have semantic value (a PhaseType IS a phase type), and renaming
-    # to bare `Type` / `Status` collides with stdlib conventions
-    # (reflect.Type, fmt.Stringer, etc.). Rename would force ~30
-    # call-site updates across the codebase for a stylistic win.
-    - path: internal/domain/phase
-      linters: [revive]
-      text: "exported: type name will be used as phase\\."
-    # The package name `http_base` predates the var-naming rule (the
-    # `_` separator is legal Go but disliked by revive). Renaming the
-    # package would force every importer to update — high churn, low
-    # value. Locking in via exclusion until a deliberate v2 rename.
-    - path: internal/adapters/outbound/http_base
-      linters: [revive]
-      text: "var-naming: don't use an underscore in package name"
-    # router_test.go reads resp.Body before checking err — pre-existing
-    # pattern in ~9 sites. The errors would already have failed earlier
-    # (httptest server is local), so the govet warning is more pedantic
-    # than catching a real bug. Cleaning would be churn-heavy cosmetic.
-    - path: internal/adapters/inbound/http/router_test\.go
-      linters: [govet]
-      text: "httpresponse"
-    # Several files carry reserved-but-not-yet-wired API helpers
-    # (metric recorders, error writers, observability glue). The
-    # `unused` linter flags them; cleaning means either deleting
-    # working code (regression risk) or wiring synthetic callers
-    # (premature). Path-scoped exclude until a feature picks them up.
-    - path: internal/application/phase/metrics\.go
-      linters: [unused]
-    - path: internal/adapters/inbound/http/errors\.go
-      linters: [unused]
-    - path: internal/adapters/inbound/http/handlers/util\.go
-      linters: [unused]
-    - path: internal/adapters/outbound/http_base/client\.go
-      linters: [unused]
-    # appendAudit currently always passes nil for sid — the parameter
-    # exists for symmetry with audit_log row schema (session_id
-    # nullable) and may be filled when session correlation lands.
-    - path: internal/application/phase/service\.go
-      linters: [unparam]
-      text: "appendAudit"
-    # runAllGroups returns (results, error) for symmetry with future
-    # error paths (e.g. ctx cancellation during fan-out, persistence
-    # failures). Today every code path completes via the goroutines
-    # without propagating an outer error, so unparam flags the second
-    # result as always-nil. Keep the signature stable to avoid
-    # ripple-back through Execute when those paths get wired.
-    - path: internal/application/apply/run\.go
-      linters: [unparam]
-      text: "runAllGroups"
-    # ops/local/stubs is a local-dev mock binary, not production
-    # orchestrator code. Forbidigo's time.Now / ulid.Make bans don't
-    # apply — these stubs intentionally use stdlib directly.
-    - path: ops/local/stubs
-      linters: [forbidigo]
+  settings:
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    forbidigo:
+      forbid:
+        - pattern: ^time\.Now$
+          msg: use shared.Clock in domain/application
+        - pattern: ^ulid\.Make$
+          msg: use shared.IDGenerator in domain/application
+    gosec:
+      excludes:
+        - G104
+        - G115
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Join(
+        - errors.Unwrap(
+        - .Err()
+        - .Scan(
+        - .Exec(
+        - context.Context).Err(
+        - github.com/RVRTelecomunicaciones/sophia-orchestrator/
+        - app.Run(
+        - trace.Parse(
+        - trace.New(
+        - trace.FromRequestID(
+        - envelope.Parse(
+        - stdouttrace.New(
+        - apply.NewTask(
+        - .Execute(
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - forbidigo
+          - gosec
+          - wrapcheck
+        path: _test\.go
+      - linters:
+          - revive
+        path: _test\.go
+        text: unused-parameter
+      - linters:
+          - unparam
+        path: _test\.go
+      - linters:
+          - forbidigo
+        path: internal/infrastructure
+      - linters:
+          - forbidigo
+        path: internal/bootstrap
+      - linters:
+          - forbidigo
+        path: internal/adapters
+      - linters:
+          - revive
+        path: internal/domain/phase
+        text: 'exported: type name will be used as phase\.'
+      - linters:
+          - revive
+        path: internal/adapters/outbound/http_base
+        text: 'var-naming: don''t use an underscore in package name'
+      - linters:
+          - govet
+        path: internal/adapters/inbound/http/router_test\.go
+        text: httpresponse
+      - linters:
+          - unused
+        path: internal/application/phase/metrics\.go
+      - linters:
+          - unused
+        path: internal/adapters/inbound/http/errors\.go
+      - linters:
+          - unused
+        path: internal/adapters/inbound/http/handlers/util\.go
+      - linters:
+          - unused
+        path: internal/adapters/outbound/http_base/client\.go
+      - linters:
+          - unparam
+        path: internal/application/phase/service\.go
+        text: appendAudit
+      - linters:
+          - unparam
+        path: internal/application/apply/run\.go
+        text: runAllGroups
+      - linters:
+          - forbidigo
+        path: ops/local/stubs
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
