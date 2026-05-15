@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/trace"
 	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
@@ -57,8 +58,10 @@ func SyncScheduler(work func()) { work() }
 
 // ServiceConfig parameterizes the Phase service.
 type ServiceConfig struct {
-	// EventsURLTemplate produces the SSE URL for a phase, with %s placeholders
-	// for change_id and phase_id (in order).
+	// EventsURLTemplate produces the SSE URL for a phase, with one %s
+	// placeholder for the phase_id. The path must match the route registered
+	// in internal/adapters/inbound/http/router.go for the SSE handler;
+	// router_test.go contains a wire-contract test that prevents drift.
 	EventsURLTemplate string
 
 	// DispatchTimeoutMS is the per-phase dispatch timeout. Default 600s (10min).
@@ -68,7 +71,7 @@ type ServiceConfig struct {
 // DefaultServiceConfig returns production defaults.
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
-		EventsURLTemplate: "/api/v1/changes/%s/phases/%s/events",
+		EventsURLTemplate: "/api/v1/phases/%s/events",
 		DispatchTimeoutMS: 600_000,
 	}
 }
@@ -201,7 +204,7 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 
 	// Audit + event: phase.started (sophia-wire-v1 §5.3).
 	s.appendAudit(ctx, &in.ChangeID, &pid, nil, "phase.started", nil)
-	s.publishEvent(p.ID(), contract.EventPhaseStarted, inbound.PhaseStartedPayload{
+	s.publishEvent(ctx, p.ID(), contract.EventPhaseStarted, inbound.PhaseStartedPayload{
 		PhaseID:   p.ID().String(),
 		PhaseType: string(in.PhaseType),
 		ChangeID:  in.ChangeID.String(),
@@ -212,14 +215,16 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 	output := &inbound.RunPhaseOutput{
 		PhaseID:   pid,
 		Status:    p.Status(),
-		EventsURL: fmt.Sprintf(s.d.Config.EventsURLTemplate, in.ChangeID, pid),
+		EventsURL: fmt.Sprintf(s.d.Config.EventsURLTemplate, pid),
 		StartedAt: s.d.Clock.Now().Format(time.RFC3339),
 	}
+	bgCtx := traceBackground(ctx)
 	s.d.Scheduler(func() {
-		// Detach from request ctx so cancellation doesn't kill the work.
-		// The async work uses a fresh background context (timeouts come
-		// from DispatchTimeoutMS).
-		s.runAsync(context.Background(), c, p, in)
+		// Detach from request ctx so cancellation doesn't kill the work,
+		// but propagate the request's Trace so log lines and persisted
+		// events keep trace_id correlation. Timeouts come from
+		// DispatchTimeoutMS.
+		s.runAsync(bgCtx, c, p, in)
 	})
 	return output, nil
 }
@@ -236,7 +241,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("governance error: %v", err))
 		return
 	}
-	s.publishEvent(p.ID(), inbound.EventGovernanceDecision, inbound.GovernanceDecisionPayload{
+	s.publishEvent(ctx, p.ID(), inbound.EventGovernanceDecision, inbound.GovernanceDecisionPayload{
 		Decision:  string(decision.Decision),
 		Reason:    decision.Reason,
 		AgentRole: decision.AgentRole,
@@ -258,7 +263,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 			GateURL: s.approvalURL(decision),
 			Reason:  decision.Reason,
 		}
-		s.publishEvent(p.ID(), contract.EventApprovalRequired, approvalPayload)
+		s.publishEvent(ctx, p.ID(), contract.EventApprovalRequired, approvalPayload)
 		return
 	}
 
@@ -323,7 +328,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("save session: %v", err))
 		return
 	}
-	s.publishEvent(p.ID(), contract.EventAgentDispatched, inbound.AgentDispatchedPayload{
+	s.publishEvent(ctx, p.ID(), contract.EventAgentDispatched, inbound.AgentDispatchedPayload{
 		PhaseID:   p.ID().String(),
 		SessionID: sid.String(),
 		Role:      string(roleFor(p.Type())),
@@ -365,7 +370,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 	_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
 	_ = s.d.SessionRepo.Save(ctx, sess)
-	s.publishEvent(p.ID(), inbound.EventAgentEnvelopeReceived, inbound.AgentEnvelopeReceivedPayload{
+	s.publishEvent(ctx, p.ID(), inbound.EventAgentEnvelopeReceived, inbound.AgentEnvelopeReceivedPayload{
 		Status:     string(env.Status),
 		Confidence: env.Confidence,
 	})
@@ -404,7 +409,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	}
-	s.publishEvent(p.ID(), eventType, payload)
+	s.publishEvent(ctx, p.ID(), eventType, payload)
 }
 
 // runApplyPhase delegates apply-phase coordination to the injected
@@ -440,7 +445,7 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 	cidLocal := c.ID()
 	pidLocal := p.ID()
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
-	s.publishEvent(p.ID(), eventTypeForStatus(p.Status()), inbound.PhaseCompletedFromApplyPayload{
+	s.publishEvent(ctx, p.ID(), eventTypeForStatus(p.Status()), inbound.PhaseCompletedFromApplyPayload{
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	})
@@ -475,11 +480,12 @@ func (s *Service) Resume(ctx context.Context, id ids.PhaseID) (*inbound.RunPhase
 	output := &inbound.RunPhaseOutput{
 		PhaseID:   p.ID(),
 		Status:    p.Status(),
-		EventsURL: fmt.Sprintf(s.d.Config.EventsURLTemplate, c.ID(), p.ID()),
+		EventsURL: fmt.Sprintf(s.d.Config.EventsURLTemplate, p.ID()),
 		StartedAt: s.d.Clock.Now().Format(time.RFC3339),
 	}
+	bgCtx := traceBackground(ctx)
 	s.d.Scheduler(func() {
-		s.runAsync(context.Background(), c, p, inbound.RunPhaseInput{
+		s.runAsync(bgCtx, c, p, inbound.RunPhaseInput{
 			ChangeID:    c.ID(),
 			PhaseType:   p.Type(),
 			RetryBudget: p.RetryBudget(),
@@ -513,7 +519,7 @@ func (s *Service) Approve(ctx context.Context, id ids.PhaseID, approver, reason 
 		"approver": approver,
 		"reason":   reason,
 	})
-	s.publishEvent(id, contract.EventApprovalResolved, inbound.ApprovalResolvedPayload{
+	s.publishEvent(ctx, id, contract.EventApprovalResolved, inbound.ApprovalResolvedPayload{
 		PhaseID:   id.String(),
 		Decision:  contract.DecisionApproved,
 		Approver:  approver,
@@ -571,7 +577,7 @@ func (s *Service) Reject(ctx context.Context, id ids.PhaseID, approver, reason s
 	})
 	// Symmetric to Approve: single `approval.resolved` event with
 	// decision="rejected".
-	s.publishEvent(id, contract.EventApprovalResolved, inbound.ApprovalResolvedPayload{
+	s.publishEvent(ctx, id, contract.EventApprovalResolved, inbound.ApprovalResolvedPayload{
 		PhaseID:   id.String(),
 		Decision:  contract.DecisionRejected,
 		Approver:  approver,
@@ -614,7 +620,7 @@ func (s *Service) failPhase(ctx context.Context, p *phase.Phase, reason string) 
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, contract.EventPhaseFailed, map[string]any{"reason": reason})
 	// sophia-wire-v1 §5.3: phase.failed payload carries phase_id +
 	// phase_type + ended_at + error.
-	s.publishEvent(p.ID(), contract.EventPhaseFailed, inbound.PhaseFailedPayload{
+	s.publishEvent(ctx, p.ID(), contract.EventPhaseFailed, inbound.PhaseFailedPayload{
 		PhaseID:   p.ID().String(),
 		PhaseType: string(p.Type()),
 		EndedAt:   s.d.Clock.Now().UTC(),
@@ -734,12 +740,33 @@ func (s *Service) appendAudit(ctx context.Context, cid *ids.ChangeID, pid *ids.P
 // internal/ports/inbound/event_payloads.go (e.g. PhaseStartedPayload)
 // so the producer gets compile-time validation of field names.
 // map[string]any is still accepted for tests and gradual migration.
-func (s *Service) publishEvent(pid ids.PhaseID, eventType string, payload any) {
-	_ = s.d.Events.Publish(context.Background(), pid, inbound.Event{
+//
+// ctx must carry the request's Trace (via trace.NewContext) so the persisted
+// Event row keeps trace_id correlation with the originating HTTP request.
+// The async goroutine path propagates the parent Trace via traceBackground.
+func (s *Service) publishEvent(ctx context.Context, pid ids.PhaseID, eventType string, payload any) {
+	var traceID string
+	if t, ok := trace.FromContext(ctx); ok {
+		traceID = t.TraceID
+	}
+	_ = s.d.Events.Publish(ctx, pid, inbound.Event{
 		Type:      eventType,
 		Timestamp: s.d.Clock.Now(),
 		Payload:   payload,
+		TraceID:   traceID,
 	})
+}
+
+// traceBackground returns a fresh background context that carries the
+// Trace from src (if any). Used when detaching long-running work from
+// the request context: cancellation no longer propagates, but the
+// trace_id stays correlated for logs and event persistence.
+func traceBackground(src context.Context) context.Context {
+	bg := context.Background()
+	if t, ok := trace.FromContext(src); ok {
+		return trace.NewContext(bg, t)
+	}
+	return bg
 }
 
 func (s *Service) approvalURL(d *outbound.GovernanceDecision) string {

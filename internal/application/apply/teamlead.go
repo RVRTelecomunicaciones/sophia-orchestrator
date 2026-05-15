@@ -38,7 +38,7 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 	if err != nil {
 		return groupOutcome{failed: true, err: err}
 	}
-	s.publishEvent(p.ID(), inbound.EventApplyTeamLeadSpawned, inbound.ApplyTeamLeadSpawnedPayload{
+	s.publishEvent(ctx, p.ID(), inbound.EventApplyTeamLeadSpawned, inbound.ApplyTeamLeadSpawnedPayload{
 		SessionID: teamLeadSess.ID().String(),
 		GroupID:   group.ID().String(),
 	})
@@ -126,7 +126,7 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 	// (the other lead owns it).
 	implSession, err := s.makeSession(ctx, c, p, group, session.RoleImplement, task.Description())
 	if err != nil {
-		s.publishEvent(p.ID(), inbound.EventApplyImplementSpawnFailed, inbound.ApplyImplementSpawnFailedPayload{
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyImplementSpawnFailed, inbound.ApplyImplementSpawnFailedPayload{
 			TaskID: task.ID().String(),
 			Err:    err.Error(),
 		})
@@ -134,13 +134,13 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 	}
 	claimed, err := s.d.BoardRepo.ClaimTask(ctx, task.ID(), implSession.ID())
 	if err != nil || !claimed {
-		s.publishEvent(p.ID(), inbound.EventApplyTaskClaimSkipped, inbound.ApplyTaskClaimSkippedPayload{
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyTaskClaimSkipped, inbound.ApplyTaskClaimSkippedPayload{
 			TaskID: task.ID().String(),
 			Err:    fmtErr(err),
 		})
 		return false
 	}
-	s.publishEvent(p.ID(), inbound.EventApplyTaskClaimed, inbound.ApplyTaskClaimedPayload{
+	s.publishEvent(ctx, p.ID(), inbound.EventApplyTaskClaimed, inbound.ApplyTaskClaimedPayload{
 		TaskID:    task.ID().String(),
 		SessionID: implSession.ID().String(),
 	})
@@ -151,7 +151,7 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		}
 		// SpawnGovernor gating per implement attempt.
 		if err := s.d.SpawnGov.Acquire(ctx); err != nil {
-			s.publishEvent(p.ID(), inbound.EventApplyImplementSpawnGovernorError, inbound.ApplyImplementSpawnGovernorErrorPayload{
+			s.publishEvent(ctx, p.ID(), inbound.EventApplyImplementSpawnGovernorError, inbound.ApplyImplementSpawnGovernorErrorPayload{
 				TaskID: task.ID().String(),
 				Err:    err.Error(),
 			})
@@ -168,14 +168,14 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		}
 		if recordErr != nil {
 			// Escalation: 3rd consecutive failure.
-			s.publishEvent(p.ID(), inbound.EventApplyTaskEscalated, inbound.ApplyTaskEscalatedPayload{
+			s.publishEvent(ctx, p.ID(), inbound.EventApplyTaskEscalated, inbound.ApplyTaskEscalatedPayload{
 				TaskID:   task.ID().String(),
 				Attempts: task.Attempts(),
 				Reason:   recordErr.Error(),
 			})
 			return false
 		}
-		s.publishEvent(p.ID(), inbound.EventApplyTaskRetry, inbound.ApplyTaskRetryPayload{
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyTaskRetry, inbound.ApplyTaskRetryPayload{
 			TaskID:   task.ID().String(),
 			Attempts: task.Attempts(),
 		})
@@ -224,14 +224,14 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		// ErrDispatchFailed means the agent CLI never ran (e.g. binary not found,
 		// shell.exec timeout). This is NOT an envelope validation failure.
 		if errors.Is(err, outbound.ErrDispatchFailed) {
-			s.publishEvent(p.ID(), inbound.EventRuntimeDispatchFailed, inbound.RuntimeDispatchFailedPayload{
+			s.publishEvent(ctx, p.ID(), inbound.EventRuntimeDispatchFailed, inbound.RuntimeDispatchFailedPayload{
 				TaskID: task.ID().String(),
 				Err:    err.Error(),
 			})
 			return false
 		}
 		// Transport-level failure (HTTP error, context cancellation, etc.).
-		s.publishEvent(p.ID(), inbound.EventApplyDispatchError, inbound.ApplyDispatchErrorPayload{
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyDispatchError, inbound.ApplyDispatchErrorPayload{
 			TaskID: task.ID().String(),
 			Err:    err.Error(),
 		})
@@ -242,7 +242,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	// ErrDispatchFailed instead of nil-result on non-success receipts).
 	// Preserved for forward-compatibility with other AgentDispatcher impls.
 	if res.EnvelopeRaw == nil {
-		s.publishEvent(p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
 			TaskID: task.ID().String(),
 			Err:    "agent produced no fenced JSON envelope",
 		})
@@ -253,7 +253,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	if err != nil {
 		// TRUE meaning of validation_failed: agent ran (receipt.Status="success")
 		// but its output is invalid JSON or fails the envelope schema.
-		s.publishEvent(p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
 			TaskID: task.ID().String(),
 			Err:    err.Error(),
 		})
