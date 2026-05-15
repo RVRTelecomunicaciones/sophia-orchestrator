@@ -1,0 +1,47 @@
+name: Wire Contract
+
+# Wire-contract gate: validates that every URL the orchestrator's outbound
+# clients build matches the path declared in docs/architecture/wire-contracts.md.
+# Catches drift bugs like the 2026-05-14 events_url mismatch BEFORE merge.
+#
+# Tests live under test/wirecontract/ and are gated by the `wirecontract`
+# build tag, so they run ONLY in this workflow (kept out of the default
+# unit-test job to keep that job fast and focused).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Allow manual re-runs from the Actions tab when triaging cross-repo drift.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wire-contract:
+    name: Wire-contract matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+
+      - name: Run wire-contract tests
+        run: |
+          go test -tags=wirecontract \
+            ./test/wirecontract/... \
+            -v \
+            -count=1 \
+            -timeout=2m
+
+      - name: Drift triage hint
+        if: failure()
+        run: |
+          echo "::error::Wire-contract drift detected."
+          echo "::error::Check docs/architecture/wire-contracts.md for the matrix row."
+          echo "::error::Most likely cause: a producer URL or template was changed without updating its consumer counterpart."
