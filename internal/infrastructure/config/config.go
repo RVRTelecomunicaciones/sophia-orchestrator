@@ -102,6 +102,40 @@ type DispatcherConfig struct {
 	// "google/gemini-2.5-flash" — without recompiling. A missing entry
 	// falls back to Provider.
 	ProviderByPhase map[string]string
+	// Ollama is the optional sub-config for the local-LLM dispatcher
+	// adapter. It is independent from the opencode-shaped Cmd/Model
+	// above because ollama uses a different binary, a positional model
+	// argument, and its own per-phase model map. The adapter is
+	// REGISTERED into the V2.0 factory at boot ONLY when Ollama.Cmd is
+	// non-empty — keeping ollama as a strict opt-in for deployments
+	// that ship the binary on the runtime-adapters image.
+	Ollama OllamaConfig
+}
+
+// OllamaConfig configures the optional `ollama` provider in the V2.0
+// multi-LLM factory. Loaded from SOPHIA_OLLAMA_* env vars at boot.
+//
+// Selection axis (Provider/ProviderByPhase) and model axis are kept
+// independent from opencode's: ollama has a separate Model field
+// because the strings are NOT interchangeable (e.g. ollama wants
+// "deepseek-r1:7b", opencode wants "anthropic/claude-opus-4-7"), and
+// because the same operator may want to route different phases to
+// different providers AND different models simultaneously.
+type OllamaConfig struct {
+	// Cmd is the binary name; empty disables registration entirely.
+	Cmd string
+	// SuggestedConcurrent is the SuggestedMaxConcurrent hint surfaced
+	// to the SpawnGovernor. Defaults to 2 when unset (single-GPU
+	// pipelining limit; see ollama.SuggestedMaxConcurrentDefault).
+	SuggestedConcurrent int
+	// Model is the global default ollama model. Empty REQUIRES at
+	// least one ModelByPhase entry, otherwise the dispatcher fails
+	// fast at first call (ollama has no implicit default).
+	Model string
+	// ModelByPhase maps a phase type (lowercase) to the ollama model
+	// name to use for THAT phase only. Loaded from
+	// `SOPHIA_OLLAMA_MODEL_<PHASE>`.
+	ModelByPhase map[string]string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -181,6 +215,11 @@ func Load() (Config, error) {
 	c.Dispatcher.ModelByPhase = loadDispatcherModelByPhase()
 	c.Dispatcher.Provider = envStr("SOPHIA_DISPATCHER_PROVIDER", c.Dispatcher.Provider)
 	c.Dispatcher.ProviderByPhase = loadDispatcherProviderByPhase()
+
+	c.Dispatcher.Ollama.Cmd = envStr("SOPHIA_OLLAMA_CMD", c.Dispatcher.Ollama.Cmd)
+	c.Dispatcher.Ollama.SuggestedConcurrent = envInt("SOPHIA_OLLAMA_CONCURRENT", c.Dispatcher.Ollama.SuggestedConcurrent)
+	c.Dispatcher.Ollama.Model = envStr("SOPHIA_OLLAMA_MODEL", c.Dispatcher.Ollama.Model)
+	c.Dispatcher.Ollama.ModelByPhase = loadOllamaModelByPhase()
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
 
@@ -293,6 +332,17 @@ func loadDispatcherModelByPhase() map[string]string {
 // verify uses "opencode"/gemini-flash) without rebuilding.
 func loadDispatcherProviderByPhase() map[string]string {
 	return loadPhaseEnvMap("SOPHIA_DISPATCHER_PROVIDER_")
+}
+
+// loadOllamaModelByPhase reads `SOPHIA_OLLAMA_MODEL_<PHASE>` overrides
+// for the ollama adapter. Kept on a SEPARATE axis from the
+// opencode-shaped SOPHIA_DISPATCHER_MODEL_<PHASE> because the model
+// strings are not portable across providers (e.g. opencode wants
+// "anthropic/claude-opus-4-7", ollama wants "deepseek-r1:7b") and
+// because an operator may want apply-on-opencode-with-claude
+// alongside verify-on-ollama-with-qwen simultaneously.
+func loadOllamaModelByPhase() map[string]string {
+	return loadPhaseEnvMap("SOPHIA_OLLAMA_MODEL_")
 }
 
 // loadPhaseEnvMap is the shared helper for the per-phase env-var maps.
