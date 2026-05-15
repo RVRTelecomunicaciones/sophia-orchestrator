@@ -67,7 +67,11 @@ type ServiceConfig struct {
 	APIKey  string
 }
 
-// DispatcherConfig configures the OpenCode dispatcher.
+// DispatcherConfig configures the OpenCode dispatcher AND the multi-LLM
+// factory (V2.0). Provider/ProviderByPhase select WHICH adapter runs
+// (factory.Get); Model/ModelByPhase select WHICH MODEL the chosen adapter
+// invokes (passed via the adapter's CLI flags). Both axes are independent
+// so an operator can route e.g. apply→aider while spec→opencode + opus.
 type DispatcherConfig struct {
 	Cmd                 string
 	SuggestedConcurrent int
@@ -83,6 +87,21 @@ type DispatcherConfig struct {
 	// operator can wire e.g. Codex for apply + Claude Opus for spec
 	// without rebuilding. A missing entry falls back to Model.
 	ModelByPhase map[string]string
+	// Provider is the V2.0 multi-LLM factory selector — names a
+	// registered AgentDispatcher adapter ("opencode" is the V2.0 default
+	// and only built-in registration; future versions may register
+	// "aider", "ollama", etc.). Empty defaults to "opencode" for
+	// backward compatibility with V1 deployments. Loaded from
+	// SOPHIA_DISPATCHER_PROVIDER.
+	Provider string
+	// ProviderByPhase maps a phase type to a registered provider name
+	// that overrides Provider for THAT phase only. Loaded from env vars
+	// `SOPHIA_DISPATCHER_PROVIDER_<PHASE>`. Combined with ModelByPhase,
+	// an operator can wire heterogeneous routing — e.g. apply runs on
+	// "aider" + "claude-opus-4-7" while verify runs on "opencode" +
+	// "google/gemini-2.5-flash" — without recompiling. A missing entry
+	// falls back to Provider.
+	ProviderByPhase map[string]string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -160,6 +179,8 @@ func Load() (Config, error) {
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)
 	c.Dispatcher.Model = envStr("SOPHIA_DISPATCHER_MODEL", c.Dispatcher.Model)
 	c.Dispatcher.ModelByPhase = loadDispatcherModelByPhase()
+	c.Dispatcher.Provider = envStr("SOPHIA_DISPATCHER_PROVIDER", c.Dispatcher.Provider)
+	c.Dispatcher.ProviderByPhase = loadDispatcherProviderByPhase()
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
 
@@ -262,9 +283,26 @@ var dispatcherPhaseEnvNames = []string{
 // The returned map is nil when no overrides are configured (caller should
 // treat nil and empty equivalently).
 func loadDispatcherModelByPhase() map[string]string {
+	return loadPhaseEnvMap("SOPHIA_DISPATCHER_MODEL_")
+}
+
+// loadDispatcherProviderByPhase mirrors loadDispatcherModelByPhase for the
+// V2.0 multi-LLM factory: reads `SOPHIA_DISPATCHER_PROVIDER_<PHASE>` for
+// each known phase. Combined with the model overrides, an operator can
+// route heterogeneous phases (e.g. apply via "aider"/claude-opus while
+// verify uses "opencode"/gemini-flash) without rebuilding.
+func loadDispatcherProviderByPhase() map[string]string {
+	return loadPhaseEnvMap("SOPHIA_DISPATCHER_PROVIDER_")
+}
+
+// loadPhaseEnvMap is the shared helper for the per-phase env-var maps.
+// prefix is the literal env-var prefix WITHOUT trailing phase name —
+// the function appends `<UPPER_PHASE>` for each entry in
+// dispatcherPhaseEnvNames. Returns nil if no overrides are set.
+func loadPhaseEnvMap(prefix string) map[string]string {
 	var out map[string]string
 	for _, p := range dispatcherPhaseEnvNames {
-		key := "SOPHIA_DISPATCHER_MODEL_" + strings.ToUpper(p)
+		key := prefix + strings.ToUpper(p)
 		if v, ok := os.LookupEnv(key); ok && v != "" {
 			if out == nil {
 				out = make(map[string]string, len(dispatcherPhaseEnvNames))

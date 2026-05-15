@@ -17,6 +17,7 @@ import (
 
 	httpinbound "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/factory"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/opencode"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/governance"
 	httpbase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
@@ -90,12 +91,26 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("bootstrap: runtime: %w", err)
 	}
-	dispatcher := opencode.New(rtClient, opencode.Config{
+	opencodeAdapter := opencode.New(rtClient, opencode.Config{
 		Cmd:          cfg.Dispatcher.Cmd,
 		Suggested:    cfg.Dispatcher.SuggestedConcurrent,
 		Model:        cfg.Dispatcher.Model,
 		ModelByPhase: cfg.Dispatcher.ModelByPhase,
 	})
+
+	// V2.0 multi-LLM factory. Currently registers a single provider
+	// ("opencode"); future versions add adapters (e.g. "aider", "ollama")
+	// here without touching service.go / teamlead.go. The default
+	// provider name comes from cfg.Dispatcher.Provider; empty falls back
+	// to "opencode" for V1 backward compat.
+	defaultProvider := cfg.Dispatcher.Provider
+	if defaultProvider == "" {
+		defaultProvider = "opencode"
+	}
+	dispatcherFactory := factory.New(defaultProvider, opencodeAdapter)
+	// Wrap factory in an AgentDispatcher facade so service.go +
+	// teamlead.go keep talking to a single dispatcher instance.
+	dispatcher := factory.NewWrappingDispatcher(dispatcherFactory, cfg.Dispatcher.ProviderByPhase)
 
 	// Discipline services.
 	clock := shared.SystemClock{}

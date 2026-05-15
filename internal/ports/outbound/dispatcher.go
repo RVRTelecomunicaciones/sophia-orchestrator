@@ -61,3 +61,33 @@ type DispatchResult struct {
 	EnvelopeRaw []byte // JSON; empty if extraction failed
 	DurationMS  int
 }
+
+// ErrUnknownDispatcherProvider is returned by DispatcherFactory.Get when the
+// provider name is not registered. The caller should fall back to the
+// configured default provider rather than failing the phase outright.
+var ErrUnknownDispatcherProvider = errors.New("dispatcher: unknown provider")
+
+// DispatcherFactory resolves a provider name (e.g. "opencode", "aider",
+// "claude-code") to an AgentDispatcher implementation. V2.0 ships with
+// "opencode" as the only registered provider; future versions add more
+// adapters without forcing changes to phase.Service or apply.RunService —
+// they continue talking to a single AgentDispatcher (a wrapping facade that
+// internally consults the factory per request).
+//
+// Implementations MUST be safe for concurrent use. Get is called on the
+// hot path of every Dispatch.
+type DispatcherFactory interface {
+	// Get returns the AgentDispatcher registered under the given provider
+	// name. Returns ErrUnknownDispatcherProvider if no adapter matches.
+	Get(provider string) (AgentDispatcher, error)
+
+	// Default returns the dispatcher used when no per-phase provider
+	// override applies (config.DispatcherConfig.Provider). Always
+	// non-nil in a properly-wired factory.
+	Default() AgentDispatcher
+
+	// Providers returns the list of registered provider names. Order
+	// is not significant; callers use it for diagnostics + healthcheck
+	// fan-out.
+	Providers() []string
+}
