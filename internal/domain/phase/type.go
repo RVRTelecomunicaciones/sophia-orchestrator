@@ -20,7 +20,7 @@ const (
 	PhaseArchive  PhaseType = "archive"
 )
 
-// All returns every valid PhaseType in canonical order.
+// AllPhaseTypes returns every valid PhaseType in canonical order.
 func AllPhaseTypes() []PhaseType {
 	return []PhaseType{
 		PhaseInit, PhaseExplore, PhaseProposal, PhaseSpec,

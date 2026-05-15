@@ -185,7 +185,7 @@ func validateHex(s string, expectedLen int, field string) error {
 // isHex reports whether s consists entirely of [0-9a-fA-F].
 func isHex(s string) bool {
 	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}

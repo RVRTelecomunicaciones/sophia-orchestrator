@@ -92,10 +92,22 @@ func (i SessionID) String() string  { return i.raw }
 func (i WorktreeID) String() string { return i.raw }
 
 // IsZero reports whether the ID is the zero value.
-func (i ChangeID) IsZero() bool   { return i.raw == "" }
-func (i PhaseID) IsZero() bool    { return i.raw == "" }
-func (i BoardID) IsZero() bool    { return i.raw == "" }
-func (i GroupID) IsZero() bool    { return i.raw == "" }
-func (i TaskID) IsZero() bool     { return i.raw == "" }
-func (i SessionID) IsZero() bool  { return i.raw == "" }
+func (i ChangeID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i PhaseID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i BoardID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i GroupID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i TaskID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i SessionID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
 func (i WorktreeID) IsZero() bool { return i.raw == "" }
