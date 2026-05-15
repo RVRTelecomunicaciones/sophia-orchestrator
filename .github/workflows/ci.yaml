@@ -13,6 +13,9 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write   # required by golangci-lint-action@v8+ for inline annotations
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -20,20 +23,17 @@ jobs:
           go-version: "1.26.2"
           cache: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # action @v8 is the first stable line that supports golangci-lint v2.
+        # version is PINNED — v2.12.x embeds its own JSON schema (PR #6533),
+        # so the action must run the exact same binary that generated the
+        # config (v2.12.2 today). Renovate/Dependabot bumps both.
+        # Note: install-mode goinstall is intentionally NOT set. Since
+        # golangci-lint v2.1+ (PR #5695) the prebuilt binary correctly
+        # honors `run.go` for module evaluation regardless of which Go
+        # version the binary itself was built with.
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
-          # install-mode: goinstall builds golangci-lint with the repo's
-          # pinned Go (1.26.2 via actions/setup-go above). The default
-          # `binary` mode downloads a release built with an older Go
-          # (currently go1.24) which then refuses to lint our go1.26-
-          # targeted module:
-          #   "the Go language version (go1.24) used to build golangci-lint
-          #    is lower than the targeted Go version (1.26)"
-          # Runtime-adapters uses goinstall for the same reason. ~30s
-          # extra per CI run versus the binary download — well worth it
-          # to stop forcing admin merges on every orch PR.
-          install-mode: goinstall
+          version: v2.12.2
           args: --timeout=5m
 
   unit:
