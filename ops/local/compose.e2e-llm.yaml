@@ -47,3 +47,17 @@ services:
       # por default ($HOME/.local/share/opencode/auth.json donde
       # $HOME=/home/nonroot porque el container corre como uid 65532).
       - "${HOME}/.local/share/opencode/auth.json:/home/nonroot/.local/share/opencode/auth.json:ro"
+
+  orchestator:
+    environment:
+      # SOPHIA_DISPATCHER_MODEL es REQUERIDO para opencode subprocess
+      # — sin -m flag, opencode no tiene default y sale silencioso con
+      # stdout vacío (exit 0), lo cual el orch interpreta como
+      # "envelope validation: invalid json: unexpected end of JSON input"
+      # y la phase queda blocked.
+      #
+      # github-copilot/claude-sonnet-4.6 funciona via OAuth de GitHub
+      # Copilot que el operador autenticó con `opencode auth login
+      # github-copilot`. NO usar `anthropic/*` directo — Anthropic
+      # bloquea OAuth third-party (ver llm-providers.md pitfall #1).
+      SOPHIA_DISPATCHER_MODEL: "github-copilot/claude-sonnet-4.6"

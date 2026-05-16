@@ -153,9 +153,15 @@ api() {
 run_cycle() {
   log "creating change name=${CHANGE_NAME} project=${CHANGE_PROJECT}..."
   local create_resp
+  # artifact_store_mode is omitted on purpose so the orch picks its
+  # default (memory-engine, the value seeded by the stack). Valid enum
+  # values per internal/domain/change/status.go are
+  # memory-engine | openspec | hybrid | none — NOT "engram" (engram is
+  # the operator-side memory tool, unrelated to the orch's artifact
+  # store enum).
   create_resp="$(api POST /api/v1/changes "$(jq -nc \
     --arg n "${CHANGE_NAME}" --arg p "${CHANGE_PROJECT}" \
-    '{name:$n, project:$p, artifact_store_mode:"engram"}')")" \
+    '{name:$n, project:$p}')")" \
     || die "POST /api/v1/changes failed" 3
 
   local change_id
@@ -178,8 +184,13 @@ run_cycle() {
     phase_resp="$(api GET "/api/v1/phases/${phase_id}")" || die "GET phase failed" 3
     status="$(echo "${phase_resp}" | jq -r '.status')"
     log "  t=${elapsed}s status=${status}"
+    # The orch returns lowercase status strings (matches the
+    # phase.PhaseStatus enum on the wire). `blocked` and `needs_context`
+    # ARE terminal — calling /events on them returns
+    # `phase_terminal_no_events`. Earlier versions of this case missed
+    # those two and polled until timeout against terminal phases.
     case "${status}" in
-      DONE|DONE_WITH_CONCERNS|DONE_WITH_REJECTIONS|FAILED|ABORTED|TIMED_OUT) break ;;
+      done|done_with_concerns|done_with_rejections|blocked|needs_context|failed|aborted|timed_out) break ;;
     esac
     sleep "${PHASE_POLL_INTERVAL_S}"
     elapsed=$((elapsed + PHASE_POLL_INTERVAL_S))
@@ -195,7 +206,7 @@ run_cycle() {
   ( cd "${COMPOSE_DIR}" && docker compose "${COMPOSE_FILES[@]}" logs --tail=80 orchestator ) | grep -E "phase_id=${phase_id}|change_id=${change_id}|level=ERROR|level=WARN" || true
 
   case "${status}" in
-    DONE|DONE_WITH_CONCERNS|DONE_WITH_REJECTIONS)
+    done|done_with_concerns|done_with_rejections)
       log "cycle PASSED with status=${status}"
       return 0
       ;;
