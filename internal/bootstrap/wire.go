@@ -247,6 +247,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Apply:              applySvc,
 		Events:             events,
 		EventStore:         eventStore,
+		PhaseRepo:          phaseRepo,
 		Auth:               auth,
 		Logger:             logger,
 		StartedAt:          time.Now(),

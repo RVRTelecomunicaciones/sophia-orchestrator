@@ -4,6 +4,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,19 +14,29 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
 // ChangesHandler exposes /api/v1/changes endpoints.
 type ChangesHandler struct {
 	svc       inbound.ChangeService
+	phaseRepo outbound.PhaseRepository // optional — used to populate current_phase_id on Get
 	writeErr  func(http.ResponseWriter, error)
 	writeJSON func(http.ResponseWriter, int, any)
 	logger    *slog.Logger
 }
 
 // NewChangesHandler constructs a ChangesHandler.
-func NewChangesHandler(svc inbound.ChangeService, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any)) *ChangesHandler {
-	return &ChangesHandler{svc: svc, writeErr: writeErr, writeJSON: writeJSON, logger: slog.Default()}
+//
+// phaseRepo is OPTIONAL: when supplied, GET /api/v1/changes/{id} populates
+// the `current_phase_id` field on the response with the ID of the running
+// phase (if any). When nil, the field is omitted from the JSON, preserving
+// backward-compat with V1 responses that only had `current_phase` (the
+// phase TYPE, not the instance ID). sophia-cli's Attach + Status commands
+// rely on `current_phase_id` to subscribe to SSE — without it they fail
+// with "snapshot has no current_phase_id".
+func NewChangesHandler(svc inbound.ChangeService, phaseRepo outbound.PhaseRepository, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any)) *ChangesHandler {
+	return &ChangesHandler{svc: svc, phaseRepo: phaseRepo, writeErr: writeErr, writeJSON: writeJSON, logger: slog.Default()}
 }
 
 type createChangeReq struct {
@@ -36,11 +47,20 @@ type createChangeReq struct {
 }
 
 type changeDTO struct {
-	ChangeID          string `json:"change_id"`
-	Name              string `json:"name"`
-	Project           string `json:"project"`
-	Status            string `json:"status"`
-	CurrentPhase      string `json:"current_phase"`
+	ChangeID string `json:"change_id"`
+	Name     string `json:"name"`
+	Project  string `json:"project"`
+	Status   string `json:"status"`
+	// CurrentPhase is the phase TYPE pointer maintained on the change
+	// aggregate (e.g. "init", "explore", "spec"). Stable since V1.
+	CurrentPhase string `json:"current_phase"`
+	// CurrentPhaseID is the ULID of the currently-running phase
+	// instance, or empty when no phase is running. Populated only when
+	// the handler was constructed with a PhaseRepository (omitempty
+	// keeps V1 responses unchanged). Consumers (notably sophia-cli's
+	// Attach + Status commands) use this to subscribe to SSE on the
+	// active phase without having to first list phases by change.
+	CurrentPhaseID    string `json:"current_phase_id,omitempty"`
 	ArtifactStoreMode string `json:"artifact_store_mode"`
 	BaseRef           string `json:"base_ref,omitempty"`
 }
@@ -55,6 +75,22 @@ func toChangeDTO(c *change.Change) changeDTO {
 		ArtifactStoreMode: string(c.ArtifactStore()),
 		BaseRef:           c.BaseRef(),
 	}
+}
+
+// resolveCurrentPhaseID looks up the running phase for a change via the
+// optional PhaseRepository and returns its ID, or "" when no running
+// phase exists (or the repo wasn't wired). Errors are swallowed: this
+// field is best-effort and must NOT fail a GET that would otherwise
+// succeed. The CLI degrades gracefully when the field is absent.
+func (h *ChangesHandler) resolveCurrentPhaseID(ctx context.Context, changeID ids.ChangeID) string {
+	if h.phaseRepo == nil {
+		return ""
+	}
+	p, err := h.phaseRepo.FindRunningByChange(ctx, changeID)
+	if err != nil || p == nil {
+		return ""
+	}
+	return p.ID().String()
 }
 
 // Create handles POST /api/v1/changes.
@@ -96,7 +132,9 @@ func (h *ChangesHandler) Get(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, toChangeDTO(c))
+	dto := toChangeDTO(c)
+	dto.CurrentPhaseID = h.resolveCurrentPhaseID(r.Context(), id)
+	h.writeJSON(w, http.StatusOK, dto)
 }
 
 // MaxListLimit caps the `limit` query parameter for paginated GETs.

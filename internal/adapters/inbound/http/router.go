@@ -25,6 +25,13 @@ type Deps struct {
 	Apply     inbound.ApplyService
 	Events     inbound.EventStream
 	EventStore outbound.EventStore // durable history for Last-Event-ID resume (audit rojo #3)
+	// PhaseRepo is OPTIONAL — when supplied, the changes handler reads
+	// it directly to populate `current_phase_id` on the change response
+	// (a best-effort field consumed by sophia-cli Attach + Status).
+	// Domain/application code keeps using the PhaseService; this is the
+	// one read-only shortcut where pulling the running phase ID at the
+	// edge is materially cheaper than threading a new inbound method.
+	PhaseRepo  outbound.PhaseRepository
 	Auth       middleware.Authenticator
 	Logger    *slog.Logger
 	StartedAt time.Time
@@ -88,7 +95,7 @@ func NewRouter(d Deps) chi.Router {
 		writeChangeErr := func(w http.ResponseWriter, err error) { writeErrorResource(w, err, "change") }
 		writePhaseErr := func(w http.ResponseWriter, err error) { writeErrorResource(w, err, "phase") }
 
-		ch := handlers.NewChangesHandler(d.Changes, writeChangeErr, writeJSON)
+		ch := handlers.NewChangesHandler(d.Changes, d.PhaseRepo, writeChangeErr, writeJSON)
 		ph := handlers.NewPhasesHandler(d.Phases, writePhaseErr, writeJSON)
 		ap := handlers.NewApplyHandler(d.Apply, writePhaseErr, writeJSON)
 		sh := handlers.NewSSEHandler(d.Events, d.EventStore, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen)
