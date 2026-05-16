@@ -110,14 +110,17 @@ func New(runtime outbound.RuntimeClient, cfg Config) *Dispatcher {
 	return &Dispatcher{cfg: cfg, runtime: runtime}
 }
 
-// Provider reports session.ProviderOpenCode.
+// Provider reports session.ProviderAider.
 //
-// V2.0 reuses the OpenCode session.Provider value for all dispatcher
-// adapters because session.Provider is a closed enum that wasn't
-// extended for V2 (ADR-0007 §Consequences). Per-call adapter
-// provenance lands in V2.1; for now, audit logs identify the actual
-// adapter from the dispatcher hint plus the receipt's command line.
-func (d *Dispatcher) Provider() session.Provider { return session.ProviderOpenCode }
+// V2.0 originally reused ProviderOpenCode here because the session
+// enum hadn't been extended yet. As of V2.1 (2026-05-16, PR #28)
+// session.Provider knows about aider natively, so this adapter
+// reports its real identity. The apply executor's AdapterID branch
+// (the `if AdapterID == "aider"` synthesize trigger from PR #22)
+// also still works because AdapterID is its own field independent
+// of Provider — the two carry the same signal redundantly until V2.2
+// decides which one stays.
+func (d *Dispatcher) Provider() session.Provider { return session.ProviderAider }
 
 // SuggestedMaxConcurrent returns the per-provider rate-limit hint.
 func (d *Dispatcher) SuggestedMaxConcurrent() int { return d.cfg.Suggested }

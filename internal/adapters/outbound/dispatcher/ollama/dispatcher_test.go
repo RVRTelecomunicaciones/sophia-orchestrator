@@ -54,13 +54,15 @@ func TestNew_PanicsOnNilRuntime(t *testing.T) {
 	})
 }
 
-func TestProvider_ReusesOpenCodeEnum(t *testing.T) {
-	// V2.0 reuses session.ProviderOpenCode for all dispatcher adapters
-	// because session.Provider is a closed enum that wasn't extended for
-	// V2 (see ADR-0007 §Consequences). Per-call adapter provenance lands
-	// in V2.1; for now audit logs use the dispatcher hint + receipt.
+func TestProvider_ReportsOllama(t *testing.T) {
+	// V2.0 reused ProviderOpenCode here as a workaround because the
+	// session.Provider enum was V1-closed. As of V2.1 (PR #28) it
+	// natively knows about ollama — the adapter reports its real
+	// identity so audit logs can distinguish ollama sessions from
+	// opencode/aider ones without relying on the receipt's command
+	// line as a fallback.
 	d := ollama.New(&fakeRuntime{}, ollama.DefaultConfig())
-	require.Equal(t, session.ProviderOpenCode, d.Provider())
+	require.Equal(t, session.ProviderOllama, d.Provider())
 }
 
 func TestSuggestedMaxConcurrent_DefaultIsTwo(t *testing.T) {
