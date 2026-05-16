@@ -52,12 +52,15 @@ func TestNew_PanicsOnNilRuntime(t *testing.T) {
 	})
 }
 
-func TestProvider_ReusesOpenCodeEnum(t *testing.T) {
-	// V1 session.Provider is a closed enum; V2 adapters reuse
-	// ProviderOpenCode. Audit logs disambiguate via the receipt's
-	// command line. ADR-0007 §Consequences.
+func TestProvider_ReportsAider(t *testing.T) {
+	// V2.0 reused ProviderOpenCode here as a workaround because the
+	// session.Provider enum was V1-closed. As of V2.1 (PR #28) it
+	// natively knows about aider — the adapter reports its real
+	// identity. The AdapterID field on DispatchResult still also
+	// carries "aider" for the apply executor's synthesize trigger;
+	// the two carry the same signal redundantly until V2.2 picks one.
 	d := aider.New(&fakeRuntime{}, aider.DefaultConfig())
-	require.Equal(t, session.ProviderOpenCode, d.Provider())
+	require.Equal(t, session.ProviderAider, d.Provider())
 }
 
 func TestSuggestedMaxConcurrent_DefaultIsOne(t *testing.T) {

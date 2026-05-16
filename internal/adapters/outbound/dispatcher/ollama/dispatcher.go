@@ -89,15 +89,15 @@ func New(runtime outbound.RuntimeClient, cfg Config) *Dispatcher {
 	return &Dispatcher{cfg: cfg, runtime: runtime}
 }
 
-// Provider reports session.ProviderOpenCode.
+// Provider reports session.ProviderOllama.
 //
-// V2.0 reuses the OpenCode session.Provider value for all dispatcher
-// adapters because session.Provider is a closed enum that wasn't
-// extended for V2. Per-call adapter provenance lands in V2.1 (see
-// ADR-0007 §Consequences); for now, audit logs use the dispatcher
-// hint plus the runtime receipt's command line to identify which
-// adapter actually ran a given call.
-func (d *Dispatcher) Provider() session.Provider { return session.ProviderOpenCode }
+// V2.0 originally reused ProviderOpenCode here because the session
+// enum hadn't been extended yet. As of V2.1 (2026-05-16, PR #28)
+// session.Provider knows about ollama natively, so this adapter
+// reports its real identity — audit logs now distinguish ollama
+// sessions from opencode/aider ones without needing the receipt's
+// command line as a workaround.
+func (d *Dispatcher) Provider() session.Provider { return session.ProviderOllama }
 
 // SuggestedMaxConcurrent returns the per-provider rate-limit hint.
 func (d *Dispatcher) SuggestedMaxConcurrent() int { return d.cfg.Suggested }
