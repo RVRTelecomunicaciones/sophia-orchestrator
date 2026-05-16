@@ -65,6 +65,13 @@ type DBConfig struct {
 type ServiceConfig struct {
 	BaseURL string
 	APIKey  string
+	// TenantID is the tenant the service's API key is bound to. Used
+	// only by Memory ingest path today (orch stamps it on
+	// MemoryScope.TenantID for persistArtifactsToMemory). Single-
+	// tenant deployments leave it empty. Multi-tenant deployments MUST
+	// set it via SOPHIA_<SERVICE>_TENANT_ID so memory-engine's auth
+	// scope check passes.
+	TenantID string
 }
 
 // DispatcherConfig configures the OpenCode dispatcher AND the multi-LLM
@@ -237,6 +244,7 @@ func Load() (Config, error) {
 	c.Governance.APIKey = envStr("SOPHIA_GOVERNANCE_API_KEY", "")
 	c.Memory.BaseURL = envStr("SOPHIA_MEMORY_URL", "")
 	c.Memory.APIKey = envStr("SOPHIA_MEMORY_API_KEY", "")
+	c.Memory.TenantID = envStr("SOPHIA_MEMORY_TENANT_ID", "")
 	c.Runtime.BaseURL = envStr("SOPHIA_RUNTIME_URL", "")
 	c.Runtime.APIKey = envStr("SOPHIA_RUNTIME_API_KEY", "")
 

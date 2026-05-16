@@ -124,6 +124,19 @@ type RuntimeDispatchFailedPayload struct {
 	Err    string `json:"err"`
 }
 
+// MemoryArtifactPersistFailedPayload is the payload of
+// memory.artifact_persist_failed. PhaseID identifies the phase whose
+// envelope declared the artifact; TopicKey is the failing
+// envelope.ArtifactsSaved entry; Type is the artifact type the LLM
+// declared (e.g. "explore", "spec"); Err is the underlying memory-
+// engine error (HTTP code + body or transport failure).
+type MemoryArtifactPersistFailedPayload struct {
+	PhaseID  string `json:"phase_id"`
+	TopicKey string `json:"topic_key"`
+	Type     string `json:"type"`
+	Err      string `json:"err"`
+}
+
 // --- phase pipeline + governance + agent lifecycle -------------------
 
 // PhaseStartedPayload is the payload of phase.started.

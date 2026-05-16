@@ -66,6 +66,16 @@ type ServiceConfig struct {
 
 	// DispatchTimeoutMS is the per-phase dispatch timeout. Default 600s (10min).
 	DispatchTimeoutMS int
+
+	// MemoryTenantID is the tenant_id stamped on artifacts persisted to
+	// memory-engine via persistArtifactsToMemory. Empty means "no
+	// tenant" and is fine for single-tenant deployments where the
+	// memory-engine API key is also tenantless. In multi-tenant
+	// deployments the operator MUST set this so the auth scope on the
+	// API key matches what the orch sends — otherwise memory-engine
+	// returns HTTP 403 forbidden (cross-tenant write attempt).
+	// Wired from SOPHIA_MEMORY_TENANT_ID at boot.
+	MemoryTenantID string
 }
 
 // DefaultServiceConfig returns production defaults.
@@ -388,6 +398,17 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	s.recordPhaseTerminal(p, env)
 	s.recordPhaseEnded(p)
 
+	// Step 13b: persist envelope.ArtifactsSaved entries to memory-engine
+	// so downstream phases can read them via MemoryClient.GetByTopicKey
+	// or BuildContext. The LLM declares the artifacts; the orch carries
+	// out the actual write — opencode/ollama/aider don't run an MCP
+	// memory tool today, so this bridge closes the orch ↔ memory loop.
+	//
+	// Fail-soft: a memory-engine failure emits memory.artifact_persist_
+	// failed but does NOT fail the phase — the envelope is already
+	// persisted on the orch side (Iron Law #1).
+	s.persistArtifactsToMemory(ctx, c, p, env)
+
 	// Step 14: advance Change.CurrentPhase if DONE.
 	if p.Status() == phase.PhaseStatusDone {
 		s.advanceChange(ctx, c, p.Type())
@@ -651,8 +672,20 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) strin
 	bundle, err := s.d.Memory.BuildContext(ctx, outbound.ContextRequest{
 		Scope: outbound.MemoryScope{
 			ProjectID: c.Project(),
-			AgentID:   "sophia-orchestator",
-			SessionID: c.ID().String(),
+			// Tenant binding mirrors persistArtifactsToMemory — without
+			// it the auth scope check filters out everything the API
+			// key actually owns.
+			TenantID: s.d.Config.MemoryTenantID,
+			// AgentID + SessionID are intentionally omitted from the
+			// BuildContext scope: heuristics and decisions are
+			// project-wide, not session-bound. memory-engine's
+			// retrieval filter narrows on whatever scope fields are
+			// present, so passing session_id excludes any record not
+			// tagged with that exact session — which is true for ALL
+			// heuristics and decisions (they're created out-of-band
+			// of any single change). Pass only the project (+ tenant)
+			// so the BuildContext returns the project-wide knowledge
+			// the LLM should reason from.
 		},
 		MaxTokens: 4000,
 	})

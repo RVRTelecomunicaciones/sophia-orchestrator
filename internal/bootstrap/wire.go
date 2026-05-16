@@ -198,8 +198,16 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Events:        events,
 		Clock:         clock,
 		IDGen:         idGen,
-		Scheduler:     phase.AsyncScheduler,
-		Config:        phase.DefaultServiceConfig(),
+		Scheduler: phase.AsyncScheduler,
+		Config: func() phase.ServiceConfig {
+			c := phase.DefaultServiceConfig()
+			// Tenant binding for memory-engine ingest. Empty in
+			// single-tenant deployments; required to match the API
+			// key's bound tenant in multi-tenant ones (otherwise
+			// memory returns 403 on persistArtifactsToMemory).
+			c.MemoryTenantID = cfg.Memory.TenantID
+			return c
+		}(),
 		ApplyExecutor: applyExecutor,
 		Metrics:       metrics,
 	})

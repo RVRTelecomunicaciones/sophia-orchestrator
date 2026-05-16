@@ -104,6 +104,15 @@ const (
 	// — the agent CLI was not actually executed (binary missing, shell
 	// timeout, etc.). See dispatcher M-E0 #3 hardening.
 	EventRuntimeDispatchFailed = "runtime.dispatch_failed"
+
+	// EventMemoryArtifactPersistFailed is published when the orch tried to
+	// persist an envelope.ArtifactsSaved entry to memory-engine and the
+	// Ingest call failed. The phase itself is NOT failed — the envelope is
+	// already saved on the orch side (Iron Law #1) and downstream phases
+	// can still recover via prior-phase reads. This event is the operator-
+	// facing signal that memory-engine ingestion degraded for an artifact
+	// the LLM declared.
+	EventMemoryArtifactPersistFailed = "memory.artifact_persist_failed"
 )
 
 // knownEventTypes is the union of every constant declared above. Used by
@@ -135,6 +144,7 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyDispatchError:               {},
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},
+	EventMemoryArtifactPersistFailed:      {},
 }
 
 // IsKnownEventType reports whether the given type string is one of the
