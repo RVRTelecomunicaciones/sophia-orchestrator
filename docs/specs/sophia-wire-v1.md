@@ -201,11 +201,11 @@ project string, error error)`. v1 is single-tenant in practice.
     "name": "implement /healthz endpoint",
     "project": "ms-x",
     "base_ref": "main",
-    "artifact_store_mode": "engram"
+    "artifact_store_mode": "memory-engine"
   }
   ```
   Required: `name`, `project`. Optional: `base_ref` (default `"main"`),
-  `artifact_store_mode` (default `"engram"`).
+  `artifact_store_mode` (default `"memory-engine"`).
 - **Response 201:** `ChangeResponse` (Section 6.1) with `status` set
   to `"running"` (or `"pending"` if the orchestrator queues briefly
   before picking up).
@@ -493,7 +493,7 @@ resumes (step 6).
   "name": "implement /healthz endpoint",
   "project": "ms-x",
   "base_ref": "main",
-  "artifact_store_mode": "engram",
+  "artifact_store_mode": "memory-engine",
   "status": "running",
   "current_phase_id": "01HY...",
   "phases": [PhaseDTO, ...],
