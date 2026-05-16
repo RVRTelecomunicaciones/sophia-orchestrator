@@ -248,8 +248,13 @@ Expected: ~5-10 second wall-clock, output is exactly `SMOKE-TEST-OK`
 fix auth before touching Sophia config.
 
 For full cycle validation (Sophia → governance → runtime → opencode →
-LLM → envelope → orch persists), see the validation script in
-`docs/operations/cycle-validation.md` (TODO).
+LLM → envelope → orch persists), see
+[`docs/operations/cycle-validation.md`](cycle-validation.md) and run
+`./scripts/e2e-sdd-cycle.sh` from the repo root. The script brings up
+the full local stack with the `runtime-adapters-llm-opencode` image
+target, drives a real `explore` phase against your authenticated
+opencode credentials, and prints the final envelope + orchestator
+logs.
 
 ## Future work tracked in the multi-LLM factory roadmap
 
