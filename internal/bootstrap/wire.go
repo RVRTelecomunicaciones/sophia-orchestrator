@@ -17,6 +17,7 @@ import (
 
 	httpinbound "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/aider"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/factory"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/ollama"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/opencode"
@@ -117,6 +118,15 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			ModelByPhase: cfg.Dispatcher.Ollama.ModelByPhase,
 		})
 		dispatcherFactory.Register("ollama", ollamaAdapter)
+	}
+	if cfg.Dispatcher.Aider.Cmd != "" {
+		aiderAdapter := aider.New(rtClient, aider.Config{
+			Cmd:          cfg.Dispatcher.Aider.Cmd,
+			Suggested:    cfg.Dispatcher.Aider.SuggestedConcurrent,
+			Model:        cfg.Dispatcher.Aider.Model,
+			ModelByPhase: cfg.Dispatcher.Aider.ModelByPhase,
+		})
+		dispatcherFactory.Register("aider", aiderAdapter)
 	}
 	// Wrap factory in an AgentDispatcher facade so service.go +
 	// teamlead.go keep talking to a single dispatcher instance.

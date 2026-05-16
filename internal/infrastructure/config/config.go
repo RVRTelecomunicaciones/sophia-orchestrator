@@ -110,6 +110,12 @@ type DispatcherConfig struct {
 	// non-empty — keeping ollama as a strict opt-in for deployments
 	// that ship the binary on the runtime-adapters image.
 	Ollama OllamaConfig
+	// Aider is the optional sub-config for the aider coding-agent
+	// dispatcher. Same opt-in shape as Ollama — registered only when
+	// Aider.Cmd is non-empty. Aider EDITS FILES in-place rather than
+	// returning a JSON envelope, so it should only be selected for
+	// the APPLY phase via SOPHIA_DISPATCHER_PROVIDER_APPLY=aider.
+	Aider AiderConfig
 }
 
 // OllamaConfig configures the optional `ollama` provider in the V2.0
@@ -135,6 +141,31 @@ type OllamaConfig struct {
 	// ModelByPhase maps a phase type (lowercase) to the ollama model
 	// name to use for THAT phase only. Loaded from
 	// `SOPHIA_OLLAMA_MODEL_<PHASE>`.
+	ModelByPhase map[string]string
+}
+
+// AiderConfig configures the optional `aider` provider in the V2.0
+// multi-LLM factory. Loaded from SOPHIA_AIDER_* env vars at boot.
+//
+// Aider differs from opencode/ollama in two operationally-important
+// ways: (a) it APPLIES EDITS in the worktree directly (no envelope),
+// so it should only be routed to the apply phase; (b) credentials
+// come from provider env vars (ANTHROPIC_API_KEY, etc.) baked into
+// the runtime-adapters image, not from a config field here.
+type AiderConfig struct {
+	// Cmd is the binary name; empty disables registration entirely.
+	Cmd string
+	// SuggestedConcurrent is the SuggestedMaxConcurrent hint surfaced
+	// to the SpawnGovernor. Defaults to 1 when unset (concurrent
+	// in-place edits race; see aider.SuggestedMaxConcurrentDefault).
+	SuggestedConcurrent int
+	// Model is the global default aider model passed via `--model`.
+	// Empty omits the flag, letting aider pick its own default from
+	// `~/.aider.conf.yml` or provider env vars.
+	Model string
+	// ModelByPhase maps a phase type (lowercase) to the aider model
+	// name to use for THAT phase only. Loaded from
+	// `SOPHIA_AIDER_MODEL_<PHASE>`.
 	ModelByPhase map[string]string
 }
 
@@ -220,6 +251,11 @@ func Load() (Config, error) {
 	c.Dispatcher.Ollama.SuggestedConcurrent = envInt("SOPHIA_OLLAMA_CONCURRENT", c.Dispatcher.Ollama.SuggestedConcurrent)
 	c.Dispatcher.Ollama.Model = envStr("SOPHIA_OLLAMA_MODEL", c.Dispatcher.Ollama.Model)
 	c.Dispatcher.Ollama.ModelByPhase = loadOllamaModelByPhase()
+
+	c.Dispatcher.Aider.Cmd = envStr("SOPHIA_AIDER_CMD", c.Dispatcher.Aider.Cmd)
+	c.Dispatcher.Aider.SuggestedConcurrent = envInt("SOPHIA_AIDER_CONCURRENT", c.Dispatcher.Aider.SuggestedConcurrent)
+	c.Dispatcher.Aider.Model = envStr("SOPHIA_AIDER_MODEL", c.Dispatcher.Aider.Model)
+	c.Dispatcher.Aider.ModelByPhase = loadAiderModelByPhase()
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
 
@@ -343,6 +379,16 @@ func loadDispatcherProviderByPhase() map[string]string {
 // alongside verify-on-ollama-with-qwen simultaneously.
 func loadOllamaModelByPhase() map[string]string {
 	return loadPhaseEnvMap("SOPHIA_OLLAMA_MODEL_")
+}
+
+// loadAiderModelByPhase reads `SOPHIA_AIDER_MODEL_<PHASE>` overrides
+// for the aider adapter. Separate from ollama and opencode for the
+// same reason: aider's model names follow its own alias table (e.g.
+// "claude-opus-4-7" — no "anthropic/" prefix, no "github-copilot/"
+// prefix), and the apply phase may use a different aider model than
+// the operator's default declared in `~/.aider.conf.yml`.
+func loadAiderModelByPhase() map[string]string {
+	return loadPhaseEnvMap("SOPHIA_AIDER_MODEL_")
 }
 
 // loadPhaseEnvMap is the shared helper for the per-phase env-var maps.
