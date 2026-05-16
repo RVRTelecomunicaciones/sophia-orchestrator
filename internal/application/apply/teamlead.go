@@ -239,9 +239,24 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		return false
 	}
 
+	// Aider (and any future in-place adapter) sets AdapterID == "aider"
+	// and returns EnvelopeRaw=nil because it edits the worktree directly
+	// instead of producing a JSON plan. Reconstruct a synthetic envelope
+	// from `git status --porcelain` so the rest of this method stays
+	// uniform across adapters. If reconstruction itself fails (e.g. the
+	// runtime can't reach the worktree), fall through to the validation-
+	// failed path below.
+	if res.EnvelopeRaw == nil && res.AdapterID == "aider" {
+		synth, synthErr := synthesizeEnvelopeFromGit(ctx, s.d.Runtime, group.WorktreePath())
+		if synthErr == nil {
+			res.EnvelopeRaw = synth
+		}
+	}
+
 	// Defensive guard: should not happen after hardening (Dispatch returns
 	// ErrDispatchFailed instead of nil-result on non-success receipts).
-	// Preserved for forward-compatibility with other AgentDispatcher impls.
+	// Preserved for forward-compatibility with other AgentDispatcher impls
+	// AND as the fall-through when aider's git-status reconstruction fails.
 	if res.EnvelopeRaw == nil {
 		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
 			TaskID: task.ID().String(),

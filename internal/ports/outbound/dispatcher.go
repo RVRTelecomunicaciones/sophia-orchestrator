@@ -60,6 +60,20 @@ type DispatchResult struct {
 	Stderr      []byte
 	EnvelopeRaw []byte // JSON; empty if extraction failed
 	DurationMS  int
+	// AdapterID is the V2 factory provider name of the adapter that
+	// produced this result ("opencode", "ollama", "aider", ...). Empty
+	// for adapters that do not opt-in to identifying themselves
+	// (backward-compat with V1 callers that didn't read this field).
+	//
+	// The apply executor reads this to decide whether an EnvelopeRaw==nil
+	// result is fatal (most adapters: yes) or expected (aider: yes —
+	// reconstruct synthetically from the worktree's git state).
+	//
+	// V2.1 will replace this string with a richer per-call provenance
+	// record once session.Provider's closed enum is split (ADR-0007
+	// §Consequences); until then this is the single carrier the apply
+	// executor uses to disambiguate adapters at the call site.
+	AdapterID string
 }
 
 // ErrUnknownDispatcherProvider is returned by DispatcherFactory.Get when the

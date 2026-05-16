@@ -197,14 +197,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	// EnvelopeRaw is intentionally nil. Aider's stdout is a narrative
 	// transcript of what it changed, not a structured envelope. The
 	// apply phase reconstructs a synthetic envelope from `git status
-	// --porcelain` post-dispatch (or uses the memory-topic-key
-	// fallback declared on the DispatchRequest).
+	// --porcelain` post-dispatch (it dispatches that reconstruction
+	// based on AdapterID == "aider"; opencode/ollama do not set this
+	// field so the existing nil-envelope fatal path keeps applying).
 	return &outbound.DispatchResult{
 		ExitCode:    receipt.ExitCode,
 		Stdout:      receipt.Stdout,
 		Stderr:      receipt.Stderr,
 		EnvelopeRaw: nil,
 		DurationMS:  receipt.DurationMS,
+		AdapterID:   "aider",
 	}, nil
 }
 
