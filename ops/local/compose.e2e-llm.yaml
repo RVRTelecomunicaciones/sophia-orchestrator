@@ -61,3 +61,10 @@ services:
       # github-copilot`. NO usar `anthropic/*` directo — Anthropic
       # bloquea OAuth third-party (ver llm-providers.md pitfall #1).
       SOPHIA_DISPATCHER_MODEL: "github-copilot/claude-sonnet-4.6"
+      # Tenant binding for memory-engine ingest path. The dev API key
+      # seeded by sophia-memory-engine/migrations/postgres/003_create_
+      # api_keys.up.sql is bound to (project_id="sophia-dev",
+      # tenant_id="sophia-dev"). The orch must stamp the same tenant
+      # on MemoryScope when persisting artifacts or memory-engine
+      # returns HTTP 403 forbidden (cross-tenant write).
+      SOPHIA_MEMORY_TENANT_ID: "sophia-dev"
