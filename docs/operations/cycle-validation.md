@@ -145,6 +145,7 @@ buckets:
 | Symptom in the JSON | Cause | Fix |
 |---|---|---|
 | `error: agent produced no fenced JSON envelope` | The LLM didn't emit a valid envelope; opencode auth probably worked but the model rejected the prompt or hit a usage cap | check `opencode auth list` — try a different model via `SOPHIA_DISPATCHER_MODEL=github-copilot/claude-haiku-4.5` |
+| Phase ends in `blocked` with `phase.failed: envelope validation: invalid json: unexpected end of JSON input` and the `execution_receipts` row shows `stdout_len=0, exit_code=0` | opencode ran but emitted no stdout — almost always because no model was configured. Without `-m <model>`, opencode has no implicit default and exits silently. Validated end-to-end on 2026-05-16 — this was the failure mode of the script's first run | set `SOPHIA_DISPATCHER_MODEL=github-copilot/claude-sonnet-4.6` (or another OAuth-backed model) on the orch service in `compose.e2e-llm.yaml`. The overlay shipped in this repo already does this — if you removed it, restore it |
 | `error: ErrDispatchFailed: status="failure" stderr="exec: opencode: no such file..."` | The runtime image is the distroless target, not the LLM target | confirm `compose.e2e-llm.yaml` overlay is being applied — without it `runtime-adapters` falls back to the no-opencode default |
 | `error: governance: routing_failed` | governance-core couldn't decide a route — usually because the project doesn't have a routing policy seeded | either seed the policy or use `artifact_store_mode: "engram"` (the default in the script) which bypasses router-required-policies |
 
