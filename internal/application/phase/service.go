@@ -672,8 +672,20 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) strin
 	bundle, err := s.d.Memory.BuildContext(ctx, outbound.ContextRequest{
 		Scope: outbound.MemoryScope{
 			ProjectID: c.Project(),
-			AgentID:   "sophia-orchestator",
-			SessionID: c.ID().String(),
+			// Tenant binding mirrors persistArtifactsToMemory — without
+			// it the auth scope check filters out everything the API
+			// key actually owns.
+			TenantID: s.d.Config.MemoryTenantID,
+			// AgentID + SessionID are intentionally omitted from the
+			// BuildContext scope: heuristics and decisions are
+			// project-wide, not session-bound. memory-engine's
+			// retrieval filter narrows on whatever scope fields are
+			// present, so passing session_id excludes any record not
+			// tagged with that exact session — which is true for ALL
+			// heuristics and decisions (they're created out-of-band
+			// of any single change). Pass only the project (+ tenant)
+			// so the BuildContext returns the project-wide knowledge
+			// the LLM should reason from.
 		},
 		MaxTokens: 4000,
 	})
