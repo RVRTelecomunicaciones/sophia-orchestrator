@@ -129,6 +129,8 @@ func TestDispatch_HappyPath_NoEnvelopeAlwaysNil(t *testing.T) {
 	require.Equal(t, stdout, res.Stdout)
 	require.Nil(t, res.EnvelopeRaw,
 		"aider must NEVER populate EnvelopeRaw — caller reconstructs from worktree state")
+	require.Equal(t, "aider", res.AdapterID,
+		"aider MUST identify itself via AdapterID so the apply executor knows to synthesize an envelope from git status — without this, EnvelopeRaw=nil is fatal")
 
 	// Wire shape — aider-specific:
 	//   args = ["--yes-always", "--no-auto-commits",
