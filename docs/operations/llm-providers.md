@@ -1,6 +1,6 @@
 # LLM Provider Operations Guide
 
-**Status**: living doc · last updated 2026-05-15 (V2.0 multi-LLM factory)
+**Status**: living doc · last updated 2026-05-15 (V2.0 multi-LLM factory + ollama + aider)
 
 This is the operator-facing reference for wiring LLM providers into
 Sophia. Combine it with the runtime-adapters operator doc
@@ -13,19 +13,37 @@ Sophia has TWO independent per-phase routing knobs:
 
 | Axis | Env var | What it selects |
 |------|---------|-----------------|
-| **Provider** (V2.0) | `SOPHIA_DISPATCHER_PROVIDER[_<PHASE>]` | Which adapter (`opencode`, future `aider`, `ollama`) executes the call |
-| **Model** (V1.5)  | `SOPHIA_DISPATCHER_MODEL[_<PHASE>]`    | Which LLM model the chosen adapter invokes (e.g. `github-copilot/claude-opus-4.7`) |
+| **Provider** (V2.0) | `SOPHIA_DISPATCHER_PROVIDER[_<PHASE>]` | Which adapter (`opencode`, `ollama`, `aider`) executes the call |
+| **Model** (V1.5)  | Provider-specific (see below)            | Which LLM model the chosen adapter invokes |
 
 Both axes default to the global value if no per-phase override matches.
 
+The model env var is **provider-scoped** because model strings are not
+portable across adapters (opencode wants `anthropic/claude-opus-4-7`,
+ollama wants `deepseek-r1:7b`, aider wants `claude-opus-4-7`). The
+matrix:
+
+| Provider | Global model env | Per-phase model env |
+|----------|------------------|---------------------|
+| `opencode` (default) | `SOPHIA_DISPATCHER_MODEL` | `SOPHIA_DISPATCHER_MODEL_<PHASE>` |
+| `ollama`             | `SOPHIA_OLLAMA_MODEL`     | `SOPHIA_OLLAMA_MODEL_<PHASE>`     |
+| `aider`              | `SOPHIA_AIDER_MODEL`      | `SOPHIA_AIDER_MODEL_<PHASE>`      |
+
 ## V2.0 baseline — providers shipped
 
-| Provider name | Adapter status | CLI | Auth |
-|---------------|----------------|-----|------|
-| `opencode`    | ✅ shipped (default) | `opencode run -m <model>` | OAuth via `~/.local/share/opencode/auth.json` (bind-mount) |
+| Provider name | Adapter status | Activation | CLI invocation | Auth |
+|---------------|----------------|------------|----------------|------|
+| `opencode`    | ✅ default (always registered) | always on | `opencode run -m <model> -- <prompt>` | OAuth via `~/.local/share/opencode/auth.json` (bind-mount) |
+| `ollama`      | ✅ opt-in | set `SOPHIA_OLLAMA_CMD=ollama` | `ollama run <model> <prompt>` | none (local daemon) |
+| `aider`       | ✅ opt-in (apply-only) | set `SOPHIA_AIDER_CMD=aider` | `aider --yes-always --no-auto-commits --model <model> --message <prompt>` | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env on runtime image |
 
-V2.1+ roadmap: `aider`, `ollama`, `claude-code` (when Anthropic
-unblocks third-party OAuth).
+**Why aider is apply-only**: aider edits files in-place rather than
+returning a JSON envelope. Routing it to spec/design/verify breaks the
+orchestrator's envelope contract — use it only on apply. The factory
+does not enforce this; it's an operator contract.
+
+V2.1+ roadmap: `claude-code` (when Anthropic unblocks third-party
+OAuth), per-call session provenance, cost tracking.
 
 ## Recommended per-phase matrix (with `opencode` as the only V2.0 provider)
 
@@ -56,20 +74,69 @@ tier) cover everything above.
 
 ## When to set `SOPHIA_DISPATCHER_PROVIDER_*`
 
-You only set the provider override when the V2.1+ adapters land. Today
-("opencode" is the only registered provider) the variable has no
-effect beyond echoing in healthcheck logs.
+You set the per-phase provider override when you want a phase to run
+through a non-default adapter. The default is always `opencode`. The
+target adapter MUST be activated first (otherwise the factory falls
+back to opencode and logs a warning).
 
-When V2.1 lands with e.g. an `aider` adapter, you would do:
+### Example 1 — Local verify on ollama, rest on opencode (cost-zero verify loop)
 
 ```bash
-SOPHIA_DISPATCHER_PROVIDER=opencode               # default
-SOPHIA_DISPATCHER_PROVIDER_APPLY=aider            # apply runs aider
-SOPHIA_DISPATCHER_MODEL_APPLY=anthropic/claude-opus-4-7  # aider's model namespace
+SOPHIA_OLLAMA_CMD=ollama                          # activate ollama
+SOPHIA_OLLAMA_MODEL_VERIFY=qwen3:14b              # local model for verify
+SOPHIA_DISPATCHER_PROVIDER_VERIFY=ollama          # route verify → ollama
+# All other phases stay on opencode + the SOPHIA_DISPATCHER_MODEL_* matrix.
 ```
 
-The provider/model namespaces are independent — each adapter parses
-its own model string format.
+Use case: heavy verify loops that don't need a frontier model;
+privacy-sensitive verify on a self-hosted GPU.
+
+### Example 2 — Aider for apply, opencode for everything else
+
+```bash
+SOPHIA_AIDER_CMD=aider                            # activate aider
+SOPHIA_AIDER_MODEL_APPLY=claude-opus-4-7          # aider's model namespace
+SOPHIA_DISPATCHER_PROVIDER_APPLY=aider            # route apply → aider
+# Runtime image MUST expose ANTHROPIC_API_KEY in aider's env.
+```
+
+Use case: prefer aider's repo-map + diff-aware editing over opencode's
+permission-sandboxed file ops for the apply phase. The apply executor
+must reconstruct a synthetic envelope from `git status --porcelain`
+post-dispatch (or use the `memory-topic-key:KEY` fallback path) since
+aider returns `EnvelopeRaw = nil`.
+
+### Example 3 — Three providers active simultaneously
+
+```bash
+SOPHIA_OLLAMA_CMD=ollama
+SOPHIA_AIDER_CMD=aider
+
+# Per-phase routing
+SOPHIA_DISPATCHER_PROVIDER_VERIFY=ollama          # local cheap verify
+SOPHIA_DISPATCHER_PROVIDER_APPLY=aider            # diff-aware apply
+# explore/proposal/spec/design/tasks/archive default to opencode
+
+# Per-provider models
+SOPHIA_OLLAMA_MODEL_VERIFY=qwen3:14b
+SOPHIA_AIDER_MODEL_APPLY=claude-opus-4-7
+SOPHIA_DISPATCHER_MODEL_SPEC=github-copilot/claude-opus-4.7
+SOPHIA_DISPATCHER_MODEL_DESIGN=github-copilot/claude-opus-4.7
+# (rest fall back to SOPHIA_DISPATCHER_MODEL)
+```
+
+The provider and model axes are independent and **provider-scoped** —
+each adapter parses its own model-string format.
+
+## Per-provider tuning knobs
+
+Each opt-in provider has a small set of env vars beyond the activation
+flag:
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `SOPHIA_OLLAMA_CONCURRENT` | `2` | SpawnGovernor hint. Single-GPU hosts queue concurrent ollama runs internally; the hint just keeps the orchestrator from stacking work the daemon will serialize anyway. |
+| `SOPHIA_AIDER_CONCURRENT`  | `1` | Concurrent in-place edits against the same worktree race. Size up only when worktrees are isolated per spawn (which the orchestrator already does — sizing to 2-4 is usually safe). |
 
 ## Auth setup by environment
 
@@ -186,9 +253,18 @@ LLM → envelope → orch persists), see the validation script in
 
 ## Future work tracked in the multi-LLM factory roadmap
 
-- V2.1: `aider` adapter (fork-friendly, supports git-aware prompts)
-- V2.1: `ollama` adapter (local-first LLMs, zero cost, privacy)
-- V2.2: `claude-code` adapter IF Anthropic unblocks third-party OAuth
-- V2.2: per-call session provenance (record actual adapter, not default)
+- V2.1: `claude-code` adapter IF Anthropic unblocks third-party OAuth
+- V2.1: apply-phase synthetic envelope from `git status --porcelain`
+  (needed to make `aider` end-to-end useful — currently the apply
+  executor sees `EnvelopeRaw = nil` and falls back to the
+  memory-topic-key path declared on the DispatchRequest)
+- V2.2: per-call session provenance (record actual adapter, not
+  `session.ProviderOpenCode` reused as a V1 enum placeholder)
 - V2.3: cost tracking + budget caps per provider
 - V2.3: auto-failover (provider down → switch to backup mid-cycle)
+
+## Done in this version
+
+- ✅ V2.0 factory (PR #18)
+- ✅ `ollama` adapter as opt-in (PR #19)
+- ✅ `aider` adapter as opt-in apply-only (PR #20)
