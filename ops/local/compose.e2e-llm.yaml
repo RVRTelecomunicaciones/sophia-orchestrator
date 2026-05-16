@@ -1,0 +1,49 @@
+# Overlay para correr cycles SDD reales (con LLM dispatch) sobre el
+# stack completo de compose.full-stack.yaml.
+#
+# El compose.full-stack.yaml por defecto usa el target `runtime-adapters`
+# (distroless/static, ~30 MB, SIN opencode) — suficiente para tests
+# unitarios + capability tests, pero NO para dispatch real al LLM.
+# Este overlay reemplaza ese target por `runtime-adapters-llm-opencode`
+# y monta el auth.json del operador como secret read-only.
+#
+# Uso:
+#   docker compose \
+#     -f compose.full-stack.yaml \
+#     -f compose.e2e-llm.yaml \
+#     up -d --build
+#
+# Pre-requisitos del HOST:
+#   - opencode CLI autenticado en al menos un proveedor (ver
+#     `opencode auth list`). El path estándar es:
+#       ~/.local/share/opencode/auth.json
+#     Si no existe, esta overlay falla con "no such file or directory"
+#     al levantar runtime-adapters.
+#   - Las imagenes runtime-adapters-llm-opencode se construyen on-the-fly
+#     desde el repo sibling sophia-runtime-adapters. El primer up tarda
+#     ~3 min adicionales (descarga opencode 1.14.48 dentro del build).
+#
+# Para probar OLLAMA o AIDER en lugar de opencode, hay overlays
+# análogos en ROADMAP — por ahora este overlay solo cubre opencode
+# (que es el provider default y el que está validado E2E).
+
+services:
+  runtime-adapters:
+    build:
+      # Reemplaza target distroless por LLM-capable.
+      # opencode 1.14.48 + git + tini + nonroot user.
+      target: runtime-adapters-llm-opencode
+    environment:
+      # Ampliar el path de comandos para incluir /usr/local/bin donde
+      # vive opencode (el target llm-opencode lo instala ahí).
+      RUNTIME_ALLOWED_COMMANDS_PATH: "/usr/local/bin:/usr/bin:/bin"
+      # opencode trata de renderizar TUI por default — bloquea el
+      # subprocess sin TTY. Mandatory en cualquier ENTRYPOINT
+      # headless. Ver llm-providers.md pitfall #4.
+      OPENCODE_DISABLE_TUI: "1"
+    volumes:
+      # Bind-mount las credenciales OAuth del operador como secret
+      # read-only. El path en el container es el que opencode busca
+      # por default ($HOME/.local/share/opencode/auth.json donde
+      # $HOME=/home/nonroot porque el container corre como uid 65532).
+      - "${HOME}/.local/share/opencode/auth.json:/home/nonroot/.local/share/opencode/auth.json:ro"
