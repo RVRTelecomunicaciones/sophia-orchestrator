@@ -35,7 +35,12 @@ func TestRole_IsValid(t *testing.T) {
 }
 
 func TestProvider_V1_OnlyOpenCode(t *testing.T) {
+	// IsValidV1 is kept for backward-compat (deprecated as of V2.1).
+	// Test asserts the LEGACY gate still says "opencode only" so anyone
+	// reading persisted V1 session rows can still verify them.
 	require.True(t, session.ProviderOpenCode.IsValidV1())
+	require.False(t, session.ProviderOllama.IsValidV1())
+	require.False(t, session.ProviderAider.IsValidV1())
 	require.False(t, session.ProviderClaudeCode.IsValidV1())
 	require.False(t, session.ProviderCursor.IsValidV1())
 	require.False(t, session.ProviderGemini.IsValidV1())
@@ -43,7 +48,12 @@ func TestProvider_V1_OnlyOpenCode(t *testing.T) {
 }
 
 func TestProvider_IsValid_AllKnown(t *testing.T) {
+	// V2.1 accepts the 3 shipped adapters (opencode + ollama + aider)
+	// AND the forward-declared stubs (claude-code, cursor, gemini) so
+	// the gate doesn't have to be touched every time an adapter ships.
 	require.True(t, session.ProviderOpenCode.IsValid())
+	require.True(t, session.ProviderOllama.IsValid(), "ollama shipped 2026-05-16 (PR #19)")
+	require.True(t, session.ProviderAider.IsValid(), "aider shipped 2026-05-16 (PR #20)")
 	require.True(t, session.ProviderClaudeCode.IsValid())
 	require.True(t, session.ProviderCursor.IsValid())
 	require.True(t, session.ProviderGemini.IsValid())
@@ -60,10 +70,47 @@ func TestNew_Valid(t *testing.T) {
 	require.Equal(t, session.ProviderOpenCode, s.Provider())
 }
 
-func TestNew_RejectsClaudeCodeInV1(t *testing.T) {
+// TestNew_AcceptsOllamaAndAider locks in the V2.1 change: session.New
+// previously rejected anything but opencode (via IsValidV1). After
+// PR-V2.1 it MUST accept ollama and aider because the dispatcher
+// factory has been wiring them since PRs #19 and #20 (2026-05-16).
+// A regression here means the orch can't persist sessions for
+// non-opencode adapters → audit logs lose provenance.
+func TestNew_AcceptsOllamaAndAider(t *testing.T) {
+	now := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	for _, p := range []session.Provider{session.ProviderOllama, session.ProviderAider} {
+		t.Run(string(p), func(t *testing.T) {
+			sid, cid, pid := mkIDs(t)
+			s, err := session.New(sid, cid, pid, session.RoleSDDExplore, p, "deadbeef", "x run", now)
+			require.NoError(t, err)
+			require.Equal(t, p, s.Provider())
+		})
+	}
+}
+
+// TestNew_AcceptsForwardStubs documents that the validation gate also
+// accepts adapters that haven't shipped an outbound implementation yet
+// (claude-code, cursor, gemini). The decision: the domain enum is the
+// surface for forward-declaring providers; the factory at the adapter
+// layer enforces "actually wired" at runtime. New() doesn't double-
+// gate that — it would just block legitimate forward-planning work.
+func TestNew_AcceptsForwardStubs(t *testing.T) {
+	now := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	for _, p := range []session.Provider{
+		session.ProviderClaudeCode, session.ProviderCursor, session.ProviderGemini,
+	} {
+		t.Run(string(p), func(t *testing.T) {
+			sid, cid, pid := mkIDs(t)
+			_, err := session.New(sid, cid, pid, session.RoleSDDExplore, p, "h", "c", now)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestNew_RejectsUnknownProvider(t *testing.T) {
 	sid, cid, pid := mkIDs(t)
 	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
-	_, err := session.New(sid, cid, pid, session.RoleSDDSpec, session.ProviderClaudeCode, "h", "c", now)
+	_, err := session.New(sid, cid, pid, session.RoleSDDSpec, session.Provider("totally-not-real"), "h", "c", now)
 	require.ErrorIs(t, err, session.ErrInvalidProvider)
 }
 

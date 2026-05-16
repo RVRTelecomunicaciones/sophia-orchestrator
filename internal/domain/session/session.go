@@ -41,8 +41,8 @@ func New(
 	if !role.IsValid() {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidRole, role)
 	}
-	if !provider.IsValidV1() {
-		return nil, fmt.Errorf("%w: %q (V1 supports opencode only)", ErrInvalidProvider, provider)
+	if !provider.IsValid() {
+		return nil, fmt.Errorf("%w: %q (valid: opencode|ollama|aider|claude-code|cursor|gemini)", ErrInvalidProvider, provider)
 	}
 	if promptSHA256 == "" {
 		return nil, ErrEmptyPromptHash
