@@ -16,6 +16,11 @@ type PromptInput struct {
 	Project         string
 	PriorContext    string // pulled from sophia-memory-engine
 	TaskDescription string
+	// TestsRequired gates the apply-phase TDD hard-stop. When false the
+	// "DO NOT proceed without TDD" clause is omitted from the prompt so
+	// changes that explicitly disable strict TDD are not blocked by it.
+	// Spec #46: only injected when scope.tests_required == true.
+	TestsRequired bool
 }
 
 // PromptBuilder produces phase-specific agent prompts with Iron Laws,
@@ -51,7 +56,7 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 	}
 	sb.WriteString("\n")
 
-	if gates := hardGatesFor(in.Phase); len(gates) > 0 {
+	if gates := hardGatesFor(in); len(gates) > 0 {
 		sb.WriteString("# HARD-GATE Markers\n")
 		for _, gate := range gates {
 			sb.WriteString("<HARD-GATE>")
@@ -74,6 +79,7 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 	sb.WriteString("# Required Output\n")
 	sb.WriteString("Return JSON envelope as the LAST fenced ```json block in stdout:\n\n")
 	sb.WriteString("```json\n")
+	dataSchema := dataSchemaFor(in.Phase)
 	fmt.Fprintf(&sb, `{
   "schema_version": "v1",
   "phase": %q,
@@ -85,8 +91,8 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
   "artifacts_saved": [{"topic_key": "sdd/%s/%s", "type": %q}],
   "next_recommended": [],
   "risks": [{"description": "...", "level": "low|medium|high"}],
-  "data": {}
-}`, in.Phase, in.ChangeName, in.Project, in.ChangeName, in.Phase, in.Phase)
+  "data": %s
+}`, in.Phase, in.ChangeName, in.Project, in.ChangeName, in.Phase, in.Phase, dataSchema)
 	sb.WriteString("\n```\n\n")
 	fmt.Fprintf(&sb, "Confidence threshold for this phase: %.2f. ", in.Phase.ConfidenceThreshold())
 	sb.WriteString("Status MUST be one of the four enum values.\n")
@@ -97,8 +103,11 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 // hardGatesFor returns the per-phase HARD-GATE markers injected into the
 // agent prompt. These are short imperative statements the agent must NOT
 // rationalize past.
-func hardGatesFor(p phase.PhaseType) []string {
-	switch p {
+//
+// Spec #46: the apply-phase TDD clause is only injected when in.TestsRequired
+// is true so changes that explicitly disable strict TDD are not blocked by it.
+func hardGatesFor(in PromptInput) []string {
+	switch in.Phase {
 	case phase.PhaseInit:
 		return nil
 	case phase.PhaseExplore:
@@ -124,11 +133,15 @@ func hardGatesFor(p phase.PhaseType) []string {
 			"Tasks must be bite-sized (2-5 minute steps each).",
 		}
 	case phase.PhaseApply:
-		return []string{
+		gates := []string{
 			"DO NOT modify files outside your assigned files_pattern.",
-			"DO NOT proceed without TDD (write failing test first).",
 			"DO NOT attempt fix #4 — escalate after 3 failures.",
 		}
+		// Spec #46: TDD hard-gate only when tests_required == true.
+		if in.TestsRequired {
+			gates = append([]string{"DO NOT proceed without TDD (write failing test first)."}, gates...)
+		}
+		return gates
 	case phase.PhaseVerify:
 		return []string{
 			"DO NOT claim DONE without running tests and citing exact output.",
@@ -140,4 +153,16 @@ func hardGatesFor(p phase.PhaseType) []string {
 	default:
 		return nil
 	}
+}
+
+// dataSchemaFor returns the phase-specific "data" value to embed in the
+// required-output JSON schema block.
+//
+// Spec #45: for PhaseTasks, emit the exact grouped schema so the apply
+// phase can deserialize without adapters.
+func dataSchemaFor(p phase.PhaseType) string {
+	if p == phase.PhaseTasks {
+		return `{"groups":[{"name":"domain","depends_on":["optional-group"],"tasks":[{"description":"...","files_pattern":["internal/domain/*.go"]}]}]}`
+	}
+	return `{}`
 }

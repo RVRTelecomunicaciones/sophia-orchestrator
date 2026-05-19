@@ -51,13 +51,15 @@ func TestPromptBuilder_OmitsHardGatesForInit(t *testing.T) {
 
 func TestPromptBuilder_IncludesHardGatesForApply(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
+	// TestsRequired defaults to false; TDD gate is omitted per Spec #46.
 	out, err := pb.Build(discipline.PromptInput{
 		Phase: phase.PhaseApply, ChangeName: "x", Project: "y", TaskDescription: "apply",
 	})
 	require.NoError(t, err)
 	require.Contains(t, out, "<HARD-GATE>")
 	require.Contains(t, out, "files_pattern")
-	require.Contains(t, out, "TDD")
+	require.NotContains(t, out, "DO NOT proceed without TDD",
+		"TDD gate must be absent when TestsRequired is false (Spec #46)")
 	require.Contains(t, out, "fix #4")
 }
 
@@ -123,6 +125,98 @@ func TestPromptBuilder_AllFiveIronLawsListed(t *testing.T) {
 	for _, id := range []string{"IL1_", "IL2_", "IL3_", "IL4_", "IL5_"} {
 		require.Contains(t, out, id, "must mention iron law %s", id)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Spec #45: Tasks output schema alignment
+// ---------------------------------------------------------------------------
+
+// TestPromptBuilder_TasksPhase_EmitsGroupedSchema verifies that when building
+// a prompt for PhaseTasks the required-output block contains the exact
+// data.groups[].tasks[].{description,files_pattern} schema so apply can
+// deserialize without adapters.
+func TestPromptBuilder_TasksPhase_EmitsGroupedSchema(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase:           phase.PhaseTasks,
+		ChangeName:      "feat-x",
+		Project:         "proj",
+		TaskDescription: "produce tasks",
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, `"groups"`, "tasks schema must include groups array")
+	require.Contains(t, out, `"tasks"`, "tasks schema must include tasks array")
+	require.Contains(t, out, `"description"`, "task item must have description field")
+	require.Contains(t, out, `"files_pattern"`, "task item must have files_pattern field")
+	require.Contains(t, out, `"depends_on"`, "group must have depends_on field")
+}
+
+// TestPromptBuilder_NonTasksPhase_EmitsEmptyDataObject verifies that phases
+// other than PhaseTasks still use the generic {} data placeholder.
+func TestPromptBuilder_NonTasksPhase_EmitsEmptyDataObject(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase:           phase.PhaseSpec,
+		ChangeName:      "feat-x",
+		Project:         "proj",
+		TaskDescription: "spec",
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, `"data": {}`, "non-tasks phases must use empty data object")
+}
+
+// ---------------------------------------------------------------------------
+// Spec #46: Conditional TDD hard-gate
+// ---------------------------------------------------------------------------
+
+// TestPromptBuilder_ApplyPhase_TDDGateAbsent_WhenTestsNotRequired verifies
+// that when TestsRequired is false the TDD hard-gate clause is omitted.
+func TestPromptBuilder_ApplyPhase_TDDGateAbsent_WhenTestsNotRequired(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase:           phase.PhaseApply,
+		ChangeName:      "x",
+		Project:         "y",
+		TaskDescription: "apply",
+		TestsRequired:   false,
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "DO NOT proceed without TDD",
+		"TDD hard-gate must be absent when TestsRequired is false")
+	// Other apply gates must still be present.
+	require.Contains(t, out, "files_pattern")
+	require.Contains(t, out, "fix #4")
+}
+
+// TestPromptBuilder_ApplyPhase_TDDGatePresent_WhenTestsRequired verifies
+// that when TestsRequired is true the TDD hard-gate clause is included.
+func TestPromptBuilder_ApplyPhase_TDDGatePresent_WhenTestsRequired(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase:           phase.PhaseApply,
+		ChangeName:      "x",
+		Project:         "y",
+		TaskDescription: "apply",
+		TestsRequired:   true,
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "DO NOT proceed without TDD",
+		"TDD hard-gate must be present when TestsRequired is true")
+}
+
+// Regression: existing test that checked for "TDD" in the apply prompt must
+// now use TestsRequired=true to trigger the gate.
+func TestPromptBuilder_IncludesHardGatesForApply_WithTDDEnabled(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseApply, ChangeName: "x", Project: "y", TaskDescription: "apply",
+		TestsRequired: true,
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "<HARD-GATE>")
+	require.Contains(t, out, "files_pattern")
+	require.Contains(t, out, "TDD")
+	require.Contains(t, out, "fix #4")
 }
 
 // sanity: ensure `strings` is referenced explicitly (lint hygiene)
