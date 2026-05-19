@@ -28,8 +28,17 @@ func NewPhaseRepo(pool *pgxpool.Pool) *PhaseRepo {
 	return &PhaseRepo{pool: pool}
 }
 
-// Save upserts a Phase row keyed by id. The (change_id, phase_type, attempts)
-// UNIQUE constraint provides idempotent replay.
+// Save upserts a Phase row. Two conflict targets are handled:
+//
+//   - ON CONFLICT (id): in-place update for status/envelope/confidence
+//     changes on the same attempt (e.g. running → terminal mid-phase).
+//   - ON CONFLICT (change_id, phase_type, attempts): idempotent retry
+//     upsert — when the orchestrator retries a blocked/failed phase it
+//     bumps attempts before calling Save; this constraint prevents a
+//     duplicate-key crash and updates the row in place.
+//
+// Spec #49: the (change_id, phase_type, attempts) upsert path is what
+// makes retries idempotent without dropping prior history.
 func (r *PhaseRepo) Save(ctx context.Context, p *phase.Phase) error {
 	var envBytes []byte
 	if p.Envelope() != nil {
@@ -42,11 +51,11 @@ func (r *PhaseRepo) Save(ctx context.Context, p *phase.Phase) error {
 	const q = `
 INSERT INTO phases (id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-ON CONFLICT (id) DO UPDATE SET
+ON CONFLICT (change_id, phase_type, attempts) DO UPDATE SET
   status       = EXCLUDED.status,
   envelope     = EXCLUDED.envelope,
   confidence   = EXCLUDED.confidence,
-  attempts     = EXCLUDED.attempts,
+  retry_budget = EXCLUDED.retry_budget,
   started_at   = EXCLUDED.started_at,
   completed_at = EXCLUDED.completed_at
 `

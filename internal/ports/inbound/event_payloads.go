@@ -217,9 +217,18 @@ type PhaseCompletedFromApplyPayload struct {
 }
 
 // PhaseFailedPayload is the payload of phase.failed.
+//
+// Spec #48: FailureReason carries the agent-reported rule id (e.g.
+// "schema_mismatch") or "unknown" when the envelope contains no rule id.
+// FailureDetail carries the agent-reported message or the envelope
+// executive_summary as a fallback. Existing consumers that only read
+// phase_id / phase_type / ended_at / error are unaffected — the two new
+// fields are additive.
 type PhaseFailedPayload struct {
-	PhaseID   string    `json:"phase_id"`
-	PhaseType string    `json:"phase_type"`
-	EndedAt   time.Time `json:"ended_at"`
-	Error     string    `json:"error"`
+	PhaseID       string    `json:"phase_id"`
+	PhaseType     string    `json:"phase_type"`
+	EndedAt       time.Time `json:"ended_at"`
+	Error         string    `json:"error"`
+	FailureReason string    `json:"failure_reason,omitempty"`
+	FailureDetail string    `json:"failure_detail,omitempty"`
 }

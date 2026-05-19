@@ -29,8 +29,8 @@ import (
 // --- fakes ---
 
 type fakeChanges struct {
-	created *change.Change
-	getErr  error
+	created  *change.Change
+	getErr   error
 	created2 *change.Change
 }
 
@@ -286,7 +286,9 @@ func TestCreateChange_BadBody(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-func TestRunPhase_Returns202(t *testing.T) {
+// TestRunPhase_Returns200 verifies that POST /run returns 200 OK per Spec #49
+// (idempotent retry contract). Previously 202 Accepted.
+func TestRunPhase_Returns200(t *testing.T) {
 	srv := newSrv(t, defaultDeps())
 	req, _ := http.NewRequest("POST",
 		srv.URL+"/api/v1/changes/01ARZ3NDEKTSV4RRFFQ69G5C01/phases/spec/run",
@@ -294,7 +296,7 @@ func TestRunPhase_Returns202(t *testing.T) {
 	req.Header.Set("X-Sophia-API-Key", "valid")
 	resp, _ := http.DefaultClient.Do(req)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusAccepted, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var got map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
 	require.NotEmpty(t, got["phase_id"])

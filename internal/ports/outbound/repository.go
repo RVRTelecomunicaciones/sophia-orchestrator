@@ -33,9 +33,11 @@ type ChangeRepository interface {
 	List(ctx context.Context, project, status string, limit, offset int) ([]*change.Change, error)
 }
 
-// PhaseRepository persists Phase aggregates. The (change_id, phase_type,
-// attempts) UNIQUE constraint provides idempotency: re-saving the same
-// triple replays the same row without inserting a duplicate.
+// PhaseRepository persists Phase aggregates. Save uses
+// ON CONFLICT (change_id, phase_type, attempts) DO UPDATE so retrying a
+// blocked or failed phase — where the orchestrator increments attempts
+// before calling Save — replaces the prior row in place rather than
+// inserting a duplicate and crashing with a UNIQUE violation (Spec #49).
 type PhaseRepository interface {
 	Save(ctx context.Context, p *phase.Phase) error
 	FindByID(ctx context.Context, id ids.PhaseID) (*phase.Phase, error)
