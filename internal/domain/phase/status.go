@@ -34,3 +34,15 @@ func (s PhaseStatus) IsTerminal() bool {
 		s == PhaseStatusDoneWithConcerns ||
 		s == PhaseStatusBlocked
 }
+
+// AdvanceAllowed reports whether finishing a phase in this status should
+// trigger Change.CurrentPhase advancement to the next phase. Both DONE
+// and DONE_WITH_CONCERNS qualify — concerns are informational signals the
+// LLM raised about its own output, not policy blockers. The operator
+// reviews concerns post-hoc by reading the persisted envelope; cycle
+// progression continues. BLOCKED never advances (genuine failure or
+// guardrail). Pre-2026-05-19 only DONE advanced, which dead-ended any
+// cycle whose phase produced even a minor concern.
+func (s PhaseStatus) AdvanceAllowed() bool {
+	return s == PhaseStatusDone || s == PhaseStatusDoneWithConcerns
+}

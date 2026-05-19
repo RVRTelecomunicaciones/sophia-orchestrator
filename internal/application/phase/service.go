@@ -409,8 +409,10 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	// persisted on the orch side (Iron Law #1).
 	s.persistArtifactsToMemory(ctx, c, p, env)
 
-	// Step 14: advance Change.CurrentPhase if DONE.
-	if p.Status() == phase.PhaseStatusDone {
+	// Step 14: advance Change.CurrentPhase when finishing in a status
+	// that allows progression. DONE and DONE_WITH_CONCERNS both qualify
+	// (see PhaseStatus.AdvanceAllowed doc). BLOCKED never advances.
+	if p.Status().AdvanceAllowed() {
 		s.advanceChange(ctx, c, p.Type())
 	}
 
@@ -460,7 +462,9 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 	s.recordPhaseTerminal(p, env)
 	s.recordPhaseEnded(p)
 
-	if p.Status() == phase.PhaseStatusDone {
+	// Apply-phase advance: same rule as the single-agent flow above —
+	// DONE and DONE_WITH_CONCERNS both progress the change.
+	if p.Status().AdvanceAllowed() {
 		s.advanceChange(ctx, c, p.Type())
 	}
 
