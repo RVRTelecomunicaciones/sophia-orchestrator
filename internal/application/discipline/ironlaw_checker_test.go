@@ -67,6 +67,70 @@ func TestIronLawChecker_IL2_Violated_TasksWrongStatus(t *testing.T) {
 	require.Equal(t, ironlaw.IronLaw2, v[0].Law.ID)
 }
 
+// TestIronLawChecker_IL2_PassThrough_TasksDone verifies that tasks phase with
+// status "done" and sufficient confidence does NOT trigger IL2. Spec #47.
+func TestIronLawChecker_IL2_PassThrough_TasksDone(t *testing.T) {
+	c := discipline.NewIronLawChecker()
+	v := c.Check(discipline.Context{
+		Action: discipline.ActionRunApply,
+		PriorPhases: map[phase.PhaseType]discipline.PhasePredicate{
+			phase.PhaseTasks: {Status: phase.PhaseStatusDone, Confidence: 0.85},
+		},
+		HasGovernanceDecision: true,
+	})
+	// IL2 must NOT fire when tasks phase is "done" with confidence ≥ threshold.
+	for _, viol := range v {
+		require.NotEqual(t, ironlaw.IronLaw2, viol.Law.ID,
+			"IL2 must not block apply when tasks phase is done")
+	}
+}
+
+// TestIronLawChecker_IL2_Violated_TasksRunning verifies that tasks phase still
+// "running" (non-terminal) blocks apply with IL2. Spec #47.
+func TestIronLawChecker_IL2_Violated_TasksRunning(t *testing.T) {
+	c := discipline.NewIronLawChecker()
+	v := c.Check(discipline.Context{
+		Action: discipline.ActionRunApply,
+		PriorPhases: map[phase.PhaseType]discipline.PhasePredicate{
+			phase.PhaseTasks: {Status: phase.PhaseStatusRunning, Confidence: 0.0},
+		},
+	})
+	require.Len(t, v, 1)
+	require.Equal(t, ironlaw.IronLaw2, v[0].Law.ID)
+}
+
+// TestIronLawChecker_IL2_Violated_TasksBlocked verifies that tasks phase in
+// "blocked" status still blocks apply with IL2. Spec #47.
+func TestIronLawChecker_IL2_Violated_TasksBlocked(t *testing.T) {
+	c := discipline.NewIronLawChecker()
+	v := c.Check(discipline.Context{
+		Action: discipline.ActionRunApply,
+		PriorPhases: map[phase.PhaseType]discipline.PhasePredicate{
+			phase.PhaseTasks: {Status: phase.PhaseStatusBlocked, Confidence: 0.0},
+		},
+	})
+	require.Len(t, v, 1)
+	require.Equal(t, ironlaw.IronLaw2, v[0].Law.ID)
+}
+
+// TestIronLawChecker_IL2_ViolationMessage_ReferencesDone verifies that the IL2
+// violation description and law description reference "DONE", not "approved". Spec #47.
+func TestIronLawChecker_IL2_ViolationMessage_ReferencesDone(t *testing.T) {
+	c := discipline.NewIronLawChecker()
+	v := c.Check(discipline.Context{
+		Action:      discipline.ActionRunApply,
+		PriorPhases: map[phase.PhaseType]discipline.PhasePredicate{},
+	})
+	require.Len(t, v, 1)
+	require.Equal(t, ironlaw.IronLaw2, v[0].Law.ID)
+	require.Contains(t, v[0].Description, "DONE",
+		"violation description must reference DONE")
+	require.NotContains(t, v[0].Law.Description, "approved",
+		"law description must not reference approved")
+	require.Contains(t, v[0].Law.Description, "DONE",
+		"law description must reference DONE")
+}
+
 func TestIronLawChecker_IL3_Violated_VerifyMissing(t *testing.T) {
 	c := discipline.NewIronLawChecker()
 	v := c.Check(discipline.Context{
