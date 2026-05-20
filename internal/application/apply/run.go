@@ -404,7 +404,7 @@ func unwrapArtifactData(raw string) ([]byte, error) {
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &top); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unwrapArtifactData: %w", err)
 	}
 
 	dataField, hasData := top["data"]
