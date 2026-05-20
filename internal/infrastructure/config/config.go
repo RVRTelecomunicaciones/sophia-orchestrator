@@ -54,10 +54,10 @@ type HTTPConfig struct {
 
 // DBConfig configures Postgres.
 type DBConfig struct {
-	URL              string
-	MaxConns         int32
-	MinConns         int32
-	MigrationsPath   string
+	URL                 string
+	MaxConns            int32
+	MinConns            int32
+	MigrationsPath      string
 	RunMigrationsOnBoot bool
 }
 
@@ -123,6 +123,11 @@ type DispatcherConfig struct {
 	// returning a JSON envelope, so it should only be selected for
 	// the APPLY phase via SOPHIA_DISPATCHER_PROVIDER_APPLY=aider.
 	Aider AiderConfig
+	// MCP is the opt-in sub-config for the sophia-agent-mcp host-bridge
+	// dispatcher. Registered ONLY when MCP.BridgeURL is non-empty,
+	// keeping it as a strict opt-in. Select with
+	// SOPHIA_DISPATCHER_PROVIDER=mcp or a per-phase override.
+	MCP MCPConfig
 }
 
 // OllamaConfig configures the optional `ollama` provider in the V2.0
@@ -174,6 +179,41 @@ type AiderConfig struct {
 	// name to use for THAT phase only. Loaded from
 	// `SOPHIA_AIDER_MODEL_<PHASE>`.
 	ModelByPhase map[string]string
+}
+
+// MCPConfig configures the sophia-agent-mcp host-bridge dispatcher.
+// Loaded from SOPHIA_MCP_* env vars at boot.
+//
+// The adapter is REGISTERED into the V2.1 factory ONLY when BridgeURL is
+// non-empty — keeping the MCP provider as a strict opt-in. Fail-fast
+// validation fires at boot when Provider=="mcp" but BridgeURL is empty.
+type MCPConfig struct {
+	// BridgeURL is the HTTP base URL of the sophia-agent-mcp server,
+	// e.g. "http://127.0.0.1:7775". Required when provider=mcp.
+	// Loaded from SOPHIA_MCP_BRIDGE_URL.
+	BridgeURL string
+	// Token is the bearer token sent to the bridge. Required when
+	// provider=mcp. Loaded from SOPHIA_MCP_BRIDGE_TOKEN.
+	Token string
+	// Transport selects the MCP transport. "streamable-http" in V1.
+	// Default "streamable-http". Loaded from SOPHIA_MCP_TRANSPORT.
+	Transport string
+	// TimeoutMS is the per-request timeout in milliseconds.
+	// Default 300000 (5 minutes). Loaded from SOPHIA_MCP_TIMEOUT_MS.
+	TimeoutMS int
+	// ProviderAllowlist is a comma-separated list of providers the
+	// bridge may delegate to, forwarded as metadata. Empty = all.
+	// Loaded from SOPHIA_MCP_PROVIDER_ALLOWLIST.
+	ProviderAllowlist []string
+	// DefaultModel is the global default model forwarded to agent.run.
+	// Loaded from SOPHIA_MCP_MODEL.
+	DefaultModel string
+	// ModelByPhase maps a phase type (lowercase) to a model override.
+	// Loaded from SOPHIA_MCP_MODEL_<PHASE>.
+	ModelByPhase map[string]string
+	// Origin is the HTTP Origin header value sent to the bridge.
+	// Default "http://localhost". Loaded from SOPHIA_MCP_ORIGIN.
+	Origin string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -264,6 +304,21 @@ func Load() (Config, error) {
 	c.Dispatcher.Aider.SuggestedConcurrent = envInt("SOPHIA_AIDER_CONCURRENT", c.Dispatcher.Aider.SuggestedConcurrent)
 	c.Dispatcher.Aider.Model = envStr("SOPHIA_AIDER_MODEL", c.Dispatcher.Aider.Model)
 	c.Dispatcher.Aider.ModelByPhase = loadAiderModelByPhase()
+
+	c.Dispatcher.MCP.BridgeURL = envStr("SOPHIA_MCP_BRIDGE_URL", c.Dispatcher.MCP.BridgeURL)
+	c.Dispatcher.MCP.Token = envStr("SOPHIA_MCP_BRIDGE_TOKEN", c.Dispatcher.MCP.Token)
+	c.Dispatcher.MCP.Transport = envStr("SOPHIA_MCP_TRANSPORT", "streamable-http")
+	c.Dispatcher.MCP.TimeoutMS = envInt("SOPHIA_MCP_TIMEOUT_MS", 300_000)
+	c.Dispatcher.MCP.Origin = envStr("SOPHIA_MCP_ORIGIN", "http://localhost")
+	c.Dispatcher.MCP.DefaultModel = envStr("SOPHIA_MCP_MODEL", c.Dispatcher.MCP.DefaultModel)
+	c.Dispatcher.MCP.ModelByPhase = loadMCPModelByPhase()
+	if allowlist := envStr("SOPHIA_MCP_PROVIDER_ALLOWLIST", ""); allowlist != "" {
+		for _, p := range strings.Split(allowlist, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				c.Dispatcher.MCP.ProviderAllowlist = append(c.Dispatcher.MCP.ProviderAllowlist, p)
+			}
+		}
+	}
 
 	c.Spawn.Max = envInt("SOPHIA_SPAWN_MAX", c.Spawn.Max)
 
@@ -397,6 +452,14 @@ func loadOllamaModelByPhase() map[string]string {
 // the operator's default declared in `~/.aider.conf.yml`.
 func loadAiderModelByPhase() map[string]string {
 	return loadPhaseEnvMap("SOPHIA_AIDER_MODEL_")
+}
+
+// loadMCPModelByPhase reads `SOPHIA_MCP_MODEL_<PHASE>` overrides for
+// the sophia-agent-mcp bridge dispatcher. The per-phase model is
+// forwarded to agent.run as metadata so the bridge can select the
+// appropriate provider model without re-configuration.
+func loadMCPModelByPhase() map[string]string {
+	return loadPhaseEnvMap("SOPHIA_MCP_MODEL_")
 }
 
 // loadPhaseEnvMap is the shared helper for the per-phase env-var maps.

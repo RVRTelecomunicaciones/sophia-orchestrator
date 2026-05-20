@@ -45,11 +45,12 @@ type Provider string
 // declared in internal/adapters/outbound/dispatcher/*/dispatcher.go.
 const (
 	ProviderOpenCode   Provider = "opencode"
-	ProviderOllama     Provider = "ollama"     // shipped 2026-05-16 (PR #19)
-	ProviderAider      Provider = "aider"      // shipped 2026-05-16 (PR #20)
+	ProviderOllama     Provider = "ollama" // shipped 2026-05-16 (PR #19)
+	ProviderAider      Provider = "aider"  // shipped 2026-05-16 (PR #20)
 	ProviderClaudeCode Provider = "claude-code"
 	ProviderCursor     Provider = "cursor"
 	ProviderGemini     Provider = "gemini"
+	ProviderMCP        Provider = "mcp" // shipped V2.1 (mcp-host-bridge): routes via sophia-agent-mcp host bridge
 )
 
 // IsValidV1 reports whether p is a provider supported in V1.
@@ -69,7 +70,8 @@ func (p Provider) IsValidV1() bool {
 func (p Provider) IsValid() bool {
 	switch p {
 	case ProviderOpenCode, ProviderOllama, ProviderAider,
-		ProviderClaudeCode, ProviderCursor, ProviderGemini:
+		ProviderClaudeCode, ProviderCursor, ProviderGemini,
+		ProviderMCP:
 		return true
 	}
 	return false

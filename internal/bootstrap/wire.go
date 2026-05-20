@@ -19,6 +19,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/aider"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/factory"
+	mcpdispatcher "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/mcp"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/ollama"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/opencode"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/governance"
@@ -127,6 +128,25 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			ModelByPhase: cfg.Dispatcher.Aider.ModelByPhase,
 		})
 		dispatcherFactory.Register("aider", aiderAdapter)
+	}
+	// MCP host-bridge dispatcher — opt-in: registered ONLY when BridgeURL
+	// is configured. Fail-fast when provider=mcp but BridgeURL is empty.
+	if cfg.Dispatcher.Provider == "mcp" && cfg.Dispatcher.MCP.BridgeURL == "" {
+		pool.Close()
+		return nil, fmt.Errorf("bootstrap: SOPHIA_DISPATCHER_PROVIDER=mcp requires SOPHIA_MCP_BRIDGE_URL to be set")
+	}
+	if cfg.Dispatcher.MCP.BridgeURL != "" {
+		mcpAdapter := mcpdispatcher.New(nil, mcpdispatcher.Config{
+			BridgeURL:         cfg.Dispatcher.MCP.BridgeURL,
+			Token:             cfg.Dispatcher.MCP.Token,
+			Origin:            cfg.Dispatcher.MCP.Origin,
+			Transport:         cfg.Dispatcher.MCP.Transport,
+			TimeoutMS:         cfg.Dispatcher.MCP.TimeoutMS,
+			ProviderAllowlist: cfg.Dispatcher.MCP.ProviderAllowlist,
+			DefaultModel:      cfg.Dispatcher.MCP.DefaultModel,
+			ModelByPhase:      cfg.Dispatcher.MCP.ModelByPhase,
+		})
+		dispatcherFactory.Register("mcp", mcpAdapter)
 	}
 	// Wrap factory in an AgentDispatcher facade so service.go +
 	// teamlead.go keep talking to a single dispatcher instance.
