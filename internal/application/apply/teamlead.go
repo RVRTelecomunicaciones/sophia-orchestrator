@@ -167,11 +167,23 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 			return true
 		}
 		if recordErr != nil {
-			// Escalation: 3rd consecutive failure.
+			// Escalation: 3rd consecutive failure. Spec #51 — surface the
+			// final envelope summary + LLM-declared blocking reasons so
+			// SSE consumers see WHY without needing DB access. Both
+			// fields stay empty when the task never persisted an
+			// envelope (e.g. all 3 attempts were dispatch errors).
+			finalSummary := ""
+			var blockers []string
+			if env := task.Envelope(); env != nil {
+				finalSummary = env.ExecutiveSummary
+				blockers = extractBlockingReasons(env)
+			}
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyTaskEscalated, inbound.ApplyTaskEscalatedPayload{
-				TaskID:   task.ID().String(),
-				Attempts: task.Attempts(),
-				Reason:   recordErr.Error(),
+				TaskID:               task.ID().String(),
+				Attempts:             task.Attempts(),
+				Reason:               recordErr.Error(),
+				FinalEnvelopeSummary: finalSummary,
+				BlockingRequirements: blockers,
 			})
 			return false
 		}
