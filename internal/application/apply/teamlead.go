@@ -210,11 +210,12 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) bool {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
-		Phase:           phase.PhaseApply,
-		ChangeName:      c.Name(),
-		Project:         c.Project(),
-		PriorContext:    enrichedContext,
-		TaskDescription: fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
+		Phase:             phase.PhaseApply,
+		ChangeName:        c.Name(),
+		Project:           c.Project(),
+		PriorContext:      enrichedContext,
+		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
+		PriorPhasesStatus: s.priorPhasesStatus,
 	})
 	if err != nil {
 		return false

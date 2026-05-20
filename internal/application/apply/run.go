@@ -96,8 +96,16 @@ func DefaultRunConfig() RunConfig {
 // RunService implements the 18-step apply phase coordination from spec § 5.
 // Public Execute() satisfies the phase.ApplyExecutor interface so phase.
 // Service can delegate to RunService when Phase.Type == apply.
+//
+// priorPhasesStatus is set per Execute() invocation from
+// inbound.RunPhaseInput.PriorPhasesStatus and read by dispatchImplement
+// when building each implement-agent prompt. The field is reset on every
+// call so concurrent changes (one RunService instance across requests)
+// observe a consistent snapshot for the duration of their Execute.
+// Spec #51.
 type RunService struct {
-	d RunDeps
+	d                 RunDeps
+	priorPhasesStatus map[phase.PhaseType]string
 }
 
 // NewRun constructs a RunService. All non-config Deps are required.
@@ -130,7 +138,12 @@ func NewRun(d RunDeps) *RunService {
 // from the goroutine that handles RunPhase, after the Phase row is in
 // status=running. On return, the phase has either completed (with envelope)
 // or been marked blocked. The phase.Service caller persists the phase.
-func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, _ inbound.RunPhaseInput) (*envelope.Envelope, error) {
+func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error) {
+	// Spec #51: capture the orchestrator-verified prior-phase status
+	// snapshot for the duration of this apply run. Read by
+	// dispatchImplement when building each implement-agent prompt.
+	s.priorPhasesStatus = in.PriorPhasesStatus
+
 	// Step 1: pre-flight — load tasks list from memory-engine.
 	tasksList, err := s.loadTasksList(ctx, c)
 	if err != nil {
