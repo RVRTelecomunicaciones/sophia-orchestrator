@@ -21,6 +21,16 @@ type PromptInput struct {
 	// changes that explicitly disable strict TDD are not blocked by it.
 	// Spec #46: only injected when scope.tests_required == true.
 	TestsRequired bool
+	// PriorPhasesStatus is the orchestrator-verified terminal status of
+	// each prior phase in the change (e.g. {proposal: "done", spec:
+	// "done_with_concerns"}). Rendered as "# Phase Status Snapshot" so
+	// the LLM sees factual evidence that prior-phase gates have been
+	// satisfied instead of looking for that evidence locally and
+	// blocking when it cannot find it. Spec #51: pre-fix the LLM
+	// (gpt-5.4 in smoke v3) interpreted IL2_NO_APPLY_WITHOUT_TASKS_DONE
+	// as "I must verify tasks are done" and returned BLOCKED with
+	// confidence=0.98 because no local DONE evidence was provided.
+	PriorPhasesStatus map[phase.PhaseType]string
 }
 
 // PromptBuilder produces phase-specific agent prompts with Iron Laws,
@@ -50,11 +60,16 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 	sb.WriteString(in.Project)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("# IRON LAWS (NON-NEGOTIABLE)\n")
+	sb.WriteString("# IRON LAWS (enforced server-side by the orchestrator)\n")
+	sb.WriteString("These invariants are validated BEFORE this prompt fires. Your job is to produce a valid envelope for THIS phase — do NOT re-verify prior phases or look for their evidence locally.\n")
 	for _, law := range ironlaw.All() {
 		fmt.Fprintf(&sb, "- [%s] %s\n", law.ID, law.Description)
 	}
 	sb.WriteString("\n")
+
+	if snapshot := renderPhaseStatusSnapshot(in.PriorPhasesStatus); snapshot != "" {
+		sb.WriteString(snapshot)
+	}
 
 	if gates := hardGatesFor(in); len(gates) > 0 {
 		sb.WriteString("# HARD-GATE Markers\n")
@@ -153,6 +168,31 @@ func hardGatesFor(in PromptInput) []string {
 	default:
 		return nil
 	}
+}
+
+// renderPhaseStatusSnapshot returns the "# Phase Status Snapshot" block
+// listing each prior phase and its orchestrator-verified terminal status.
+// Order is canonical SDD lifecycle order (init → explore → proposal → spec
+// → design → tasks → apply → verify → archive) so the rendered text stays
+// deterministic across runs — important for prompt_sha256 dedup in
+// agent_sessions. Returns "" when statuses is nil or empty.
+//
+// Spec #51: the snapshot is the factual evidence the LLM needs to honor
+// IL2_NO_APPLY_WITHOUT_TASKS_DONE et al. without having to search for
+// that evidence locally and bail when none is found.
+func renderPhaseStatusSnapshot(statuses map[phase.PhaseType]string) string {
+	if len(statuses) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("# Phase Status Snapshot (verified by orchestrator before this prompt fired)\n")
+	for _, pt := range phase.AllPhaseTypes() {
+		if st, ok := statuses[pt]; ok && st != "" {
+			fmt.Fprintf(&sb, "- %s: %s\n", pt, st)
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // dataSchemaFor returns the phase-specific "data" value to embed in the

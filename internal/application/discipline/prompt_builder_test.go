@@ -219,5 +219,90 @@ func TestPromptBuilder_IncludesHardGatesForApply_WithTDDEnabled(t *testing.T) {
 	require.Contains(t, out, "fix #4")
 }
 
+// ---------------------------------------------------------------------------
+// Spec #51: PriorPhasesStatus snapshot + Iron Laws reframe
+// ---------------------------------------------------------------------------
+
+// TestPromptBuilder_IronLawsHeaderReframed verifies that the Iron Laws block
+// is framed as orchestrator-enforced rather than something the agent must
+// re-verify itself. Pre-fix the header said "(NON-NEGOTIABLE)" which led
+// LLMs (verified with gpt-5.4 in smoke v3) to interpret IL2_NO_APPLY_
+// WITHOUT_TASKS_DONE as "I must find evidence tasks are done" and block
+// with confidence=0.98 when no such evidence appeared in the prompt.
+func TestPromptBuilder_IronLawsHeaderReframed(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseApply, ChangeName: "x", Project: "y", TaskDescription: "apply",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "(NON-NEGOTIABLE)",
+		"Iron Laws header must not use NON-NEGOTIABLE — agents read that as a rule they must verify themselves")
+	require.Contains(t, out, "enforced server-side",
+		"Iron Laws header must clarify the orchestrator enforces them, not the agent")
+}
+
+// TestPromptBuilder_RendersPhaseStatusSnapshot verifies that when
+// PriorPhasesStatus is non-empty the prompt contains a "# Phase Status
+// Snapshot" section listing each prior phase and its terminal status.
+// This is the factual evidence the LLM needs so it does not have to
+// search for it locally.
+func TestPromptBuilder_RendersPhaseStatusSnapshot(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase:           phase.PhaseApply,
+		ChangeName:      "feat-x",
+		Project:         "proj",
+		TaskDescription: "apply",
+		PriorPhasesStatus: map[phase.PhaseType]string{
+			phase.PhaseProposal: "done",
+			phase.PhaseSpec:     "done",
+			phase.PhaseTasks:    "done",
+		},
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "# Phase Status Snapshot",
+		"snapshot section must be rendered when PriorPhasesStatus is non-empty")
+	require.Contains(t, out, "proposal: done")
+	require.Contains(t, out, "spec: done")
+	require.Contains(t, out, "tasks: done")
+	require.Contains(t, out, "(verified by orchestrator")
+}
+
+// TestPromptBuilder_OmitsPhaseStatusSnapshot_WhenEmpty verifies the
+// snapshot section is omitted when PriorPhasesStatus is nil or empty so
+// init/explore prompts (no prior phases) stay clean.
+func TestPromptBuilder_OmitsPhaseStatusSnapshot_WhenEmpty(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseExplore, ChangeName: "x", Project: "y", TaskDescription: "explore",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "# Phase Status Snapshot")
+}
+
+// TestPromptBuilder_PhaseStatusSnapshot_StableOrder verifies the snapshot
+// renders phases in canonical SDD order (init → explore → proposal → spec
+// → design → tasks → apply → verify → archive) instead of Go map
+// iteration order, so the prompt text stays deterministic across runs
+// (important for prompt_sha256 dedup in agent_sessions).
+func TestPromptBuilder_PhaseStatusSnapshot_StableOrder(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseApply, ChangeName: "x", Project: "y", TaskDescription: "apply",
+		PriorPhasesStatus: map[phase.PhaseType]string{
+			phase.PhaseTasks:    "done",
+			phase.PhaseProposal: "done_with_concerns",
+			phase.PhaseSpec:     "done",
+		},
+	})
+	require.NoError(t, err)
+	idxProposal := strings.Index(out, "proposal:")
+	idxSpec := strings.Index(out, "spec:")
+	idxTasks := strings.Index(out, "tasks:")
+	require.Less(t, idxProposal, idxSpec, "proposal must come before spec")
+	require.Less(t, idxSpec, idxTasks, "spec must come before tasks")
+	require.Contains(t, out, "proposal: done_with_concerns")
+}
+
 // sanity: ensure `strings` is referenced explicitly (lint hygiene)
 var _ = strings.Contains
