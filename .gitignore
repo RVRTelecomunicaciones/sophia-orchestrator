@@ -34,3 +34,6 @@ vendor/
 
 # Test artifacts
 testdata/tmp/
+
+# Docker bind-mount artifacts from local e2e runs
+.claude/

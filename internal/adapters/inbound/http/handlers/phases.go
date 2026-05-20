@@ -86,12 +86,14 @@ func (h *PhasesHandler) Run(w http.ResponseWriter, r *http.Request) {
 	}
 	// Showcase ADR-0005 P2.2a: trace_id + span_id are injected automatically
 	// by the TraceHandler wrapper when r.Context() carries a W3C Trace.
-	h.logger.LogAttrs(r.Context(), slog.LevelInfo, "phase run accepted",
+	h.logger.LogAttrs(r.Context(), slog.LevelInfo, "phase run started",
 		slog.String("change_id", cid.String()),
 		slog.String("phase_type", string(pt)),
 		slog.String("phase_id", out.PhaseID.String()),
 	)
-	h.writeJSON(w, http.StatusAccepted, runPhaseResp{
+	// Spec #49: run/retry MUST return 200 OK so the retry path is
+	// idempotent and smoke-testable without special-casing 202 vs 200.
+	h.writeJSON(w, http.StatusOK, runPhaseResp{
 		PhaseID: out.PhaseID.String(), Status: string(out.Status),
 		EventsURL: out.EventsURL, StartedAt: out.StartedAt,
 	})

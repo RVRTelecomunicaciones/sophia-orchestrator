@@ -14,6 +14,15 @@ type RunPhaseInput struct {
 	TaskDescription  string
 	ContextOverrides map[string]any
 	RetryBudget      int
+	// PriorPhasesStatus is the orchestrator-verified status of each
+	// prior phase in the change (e.g. {"proposal": "done", "spec":
+	// "done"}). Populated internally by phase.Service before
+	// dispatching the phase — HTTP/CLI callers leave it empty and the
+	// orchestrator fills it from PhaseRepo. Passed downstream into
+	// discipline.PromptInput.PriorPhasesStatus so the LLM sees factual
+	// evidence of prior-phase completion instead of searching for it
+	// locally and blocking when none is found (Spec #51).
+	PriorPhasesStatus map[phase.PhaseType]string
 }
 
 // RunPhaseOutput is returned 202-style: the phase has been kicked off in a

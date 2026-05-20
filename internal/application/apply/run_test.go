@@ -147,8 +147,8 @@ func (d *fakeDispatcher) LastPrompt() string {
 	return d.lastPrompt
 }
 
-func (d *fakeDispatcher) Provider() session.Provider { return session.ProviderOpenCode }
-func (d *fakeDispatcher) SuggestedMaxConcurrent() int { return 4 }
+func (d *fakeDispatcher) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *fakeDispatcher) SuggestedMaxConcurrent() int         { return 4 }
 func (d *fakeDispatcher) HealthCheck(_ context.Context) error { return nil }
 
 func (d *fakeDispatcher) Dispatch(_ context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
@@ -287,9 +287,9 @@ func (e *fakeEvents) types() []string {
 // looks up there. errByTopic, when set for a topic, overrides the record
 // with the configured error (used to assert ErrNotFound branches).
 type fakeMemory struct {
-	mu             sync.Mutex
-	recordsByTopic map[string]*outbound.MemoryRecord
-	errByTopic     map[string]error
+	mu              sync.Mutex
+	recordsByTopic  map[string]*outbound.MemoryRecord
+	errByTopic      map[string]error
 	getByTopicCalls atomic.Int32
 }
 
@@ -636,6 +636,132 @@ func TestExecute_BlocksWhenTasksListMalformed(t *testing.T) {
 	require.Equal(t, envelope.StatusBlocked, env.Status)
 }
 
+// ---------------------------------------------------------------------------
+// Spec #44: Envelope unwrap on read — unit tests for unwrapArtifactData
+// ---------------------------------------------------------------------------
+
+// putTasksListWrapped plants a full-envelope tasks record in fake memory
+// (simulating what persist_artifacts.go stores).
+func putTasksListWrapped(mem *fakeMemory, changeName string, tasksData any) {
+	inner, err := json.Marshal(tasksData)
+	if err != nil {
+		panic(err)
+	}
+	envelope := map[string]any{
+		"schema_version":    "v1",
+		"phase":             "tasks",
+		"change_name":       changeName,
+		"project":           "demo",
+		"status":            "done",
+		"confidence":        0.9,
+		"executive_summary": "tasks phase done",
+		"data":              json.RawMessage(inner),
+	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		panic(err)
+	}
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	mem.recordsByTopic[fmt.Sprintf("sdd/%s/tasks", changeName)] = &outbound.MemoryRecord{
+		ID:       "01ARZ3NDEKTSV4RRFFQ69G5MEM",
+		Type:     "sdd_tasks",
+		Status:   "active",
+		TopicKey: fmt.Sprintf("sdd/%s/tasks", changeName),
+		Content:  string(body),
+	}
+}
+
+// TestExecute_WrappedEnvelope_UnwrapsAndLoadsGroups verifies Spec #44:
+// when the stored artifact is a full envelope {schema_version, data:{groups:[...]}},
+// loadTasksList must extract the data block and successfully parse the groups.
+func TestExecute_WrappedEnvelope_UnwrapsAndLoadsGroups(t *testing.T) {
+	svc, board, _, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	// Override the default bare-payload seed with a full envelope.
+	mem.mu.Lock()
+	delete(mem.recordsByTopic, "sdd/feat-x/tasks")
+	mem.mu.Unlock()
+
+	putTasksListWrapped(mem, "feat-x", map[string]any{
+		"groups": []map[string]any{
+			{
+				"name": "wrapped-group",
+				"tasks": []map[string]any{
+					{"description": "wrapped task", "files_pattern": []string{"internal/**/*.go"}},
+				},
+			},
+		},
+	})
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"wrapped envelope must be unwrapped and groups parsed correctly")
+
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	require.Len(t, board.groups, 1, "one group from wrapped envelope")
+}
+
+// TestExecute_LegacyBarePayload_StillLoads verifies Spec #44 backward-compat:
+// a bare {groups:[...]} payload (no envelope keys) must pass through unchanged
+// and be parsed correctly without error.
+func TestExecute_LegacyBarePayload_StillLoads(t *testing.T) {
+	// The default newRunService seed uses putTasksList which stores bare JSON.
+	// This test explicitly asserts the happy path still works end-to-end.
+	svc, board, _, _, _, _ := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"legacy bare-payload must still be readable after envelope-unwrap logic is added")
+
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	require.Len(t, board.groups, 1, "one group from legacy bare payload")
+}
+
+// TestExecute_MalformedEnvelopeJSON_BlocksWithInvalidTasksList verifies Spec #44:
+// when rec.Content is not valid JSON at all, loadTasksList returns ErrInvalidTasksList
+// (the unwrap helper surfaces the JSON parse error before Unmarshal is called).
+func TestExecute_MalformedEnvelopeJSON_BlocksWithInvalidTasksList(t *testing.T) {
+	svc, _, _, _, _, mem := newRunService(t)
+	mem.mu.Lock()
+	mem.recordsByTopic["sdd/feat-x/tasks"] = &outbound.MemoryRecord{
+		ID:       "01ARZ3NDEKTSV4RRFFQ69G5MEM",
+		Type:     "sdd_tasks",
+		Status:   "active",
+		TopicKey: "sdd/feat-x/tasks",
+		Content:  `{"schema_version":"v1","data": NOT_VALID_JSON}`,
+	}
+	mem.mu.Unlock()
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, apply.ErrInvalidTasksList)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusBlocked, env.Status)
+}
+
 // TestExecute_BlocksWhenTasksListPropagatesGenericError verifies non-404
 // errors from the memory backend are wrapped, not swallowed.
 func TestExecute_BlocksWhenTasksListPropagatesGenericError(t *testing.T) {
@@ -749,8 +875,8 @@ type fakeDispatcherErrDispatch struct {
 	calls atomic.Int32
 }
 
-func (d *fakeDispatcherErrDispatch) Provider() session.Provider    { return session.ProviderOpenCode }
-func (d *fakeDispatcherErrDispatch) SuggestedMaxConcurrent() int   { return 4 }
+func (d *fakeDispatcherErrDispatch) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *fakeDispatcherErrDispatch) SuggestedMaxConcurrent() int         { return 4 }
 func (d *fakeDispatcherErrDispatch) HealthCheck(_ context.Context) error { return nil }
 
 func (d *fakeDispatcherErrDispatch) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
@@ -768,8 +894,8 @@ type fakeDispatcherBadEnvelope struct {
 	calls atomic.Int32
 }
 
-func (d *fakeDispatcherBadEnvelope) Provider() session.Provider    { return session.ProviderOpenCode }
-func (d *fakeDispatcherBadEnvelope) SuggestedMaxConcurrent() int   { return 4 }
+func (d *fakeDispatcherBadEnvelope) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *fakeDispatcherBadEnvelope) SuggestedMaxConcurrent() int         { return 4 }
 func (d *fakeDispatcherBadEnvelope) HealthCheck(_ context.Context) error { return nil }
 
 func (d *fakeDispatcherBadEnvelope) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {

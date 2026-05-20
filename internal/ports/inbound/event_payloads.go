@@ -89,10 +89,22 @@ type ApplyTaskClaimSkippedPayload struct {
 }
 
 // ApplyTaskEscalatedPayload is the payload of apply.task.escalated.
+//
+// Spec #51: pre-fix the payload only carried task_id/attempts/reason, so
+// the operator watching SSE never saw WHY the implement-agent kept
+// failing — the actual reason (e.g. "Provided spec context is BLOCKED")
+// lived in agent_sessions.envelope and required SQL to retrieve. The
+// new FinalEnvelopeSummary + BlockingRequirements fields surface that
+// signal directly on the wire so an operator can react without DB
+// access. Both are empty/nil when the escalation has no associated
+// envelope (e.g. all 3 attempts were dispatch errors before envelope
+// validation).
 type ApplyTaskEscalatedPayload struct {
-	TaskID   string `json:"task_id"`
-	Attempts int    `json:"attempts"`
-	Reason   string `json:"reason"`
+	TaskID               string   `json:"task_id"`
+	Attempts             int      `json:"attempts"`
+	Reason               string   `json:"reason"`
+	FinalEnvelopeSummary string   `json:"final_envelope_summary,omitempty"`
+	BlockingRequirements []string `json:"blocking_requirements,omitempty"`
 }
 
 // ApplyTaskRetryPayload is the payload of apply.task.retry.
@@ -217,9 +229,18 @@ type PhaseCompletedFromApplyPayload struct {
 }
 
 // PhaseFailedPayload is the payload of phase.failed.
+//
+// Spec #48: FailureReason carries the agent-reported rule id (e.g.
+// "schema_mismatch") or "unknown" when the envelope contains no rule id.
+// FailureDetail carries the agent-reported message or the envelope
+// executive_summary as a fallback. Existing consumers that only read
+// phase_id / phase_type / ended_at / error are unaffected — the two new
+// fields are additive.
 type PhaseFailedPayload struct {
-	PhaseID   string    `json:"phase_id"`
-	PhaseType string    `json:"phase_type"`
-	EndedAt   time.Time `json:"ended_at"`
-	Error     string    `json:"error"`
+	PhaseID       string    `json:"phase_id"`
+	PhaseType     string    `json:"phase_type"`
+	EndedAt       time.Time `json:"ended_at"`
+	Error         string    `json:"error"`
+	FailureReason string    `json:"failure_reason,omitempty"`
+	FailureDetail string    `json:"failure_detail,omitempty"`
 }

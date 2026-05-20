@@ -167,11 +167,23 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 			return true
 		}
 		if recordErr != nil {
-			// Escalation: 3rd consecutive failure.
+			// Escalation: 3rd consecutive failure. Spec #51 — surface the
+			// final envelope summary + LLM-declared blocking reasons so
+			// SSE consumers see WHY without needing DB access. Both
+			// fields stay empty when the task never persisted an
+			// envelope (e.g. all 3 attempts were dispatch errors).
+			finalSummary := ""
+			var blockers []string
+			if env := task.Envelope(); env != nil {
+				finalSummary = env.ExecutiveSummary
+				blockers = extractBlockingReasons(env)
+			}
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyTaskEscalated, inbound.ApplyTaskEscalatedPayload{
-				TaskID:   task.ID().String(),
-				Attempts: task.Attempts(),
-				Reason:   recordErr.Error(),
+				TaskID:               task.ID().String(),
+				Attempts:             task.Attempts(),
+				Reason:               recordErr.Error(),
+				FinalEnvelopeSummary: finalSummary,
+				BlockingRequirements: blockers,
 			})
 			return false
 		}
@@ -198,11 +210,12 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) bool {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
-		Phase:           phase.PhaseApply,
-		ChangeName:      c.Name(),
-		Project:         c.Project(),
-		PriorContext:    enrichedContext,
-		TaskDescription: fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
+		Phase:             phase.PhaseApply,
+		ChangeName:        c.Name(),
+		Project:           c.Project(),
+		PriorContext:      enrichedContext,
+		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
+		PriorPhasesStatus: s.priorPhasesStatus,
 	})
 	if err != nil {
 		return false

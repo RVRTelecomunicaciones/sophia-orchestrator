@@ -41,26 +41,94 @@ services:
       # subprocess sin TTY. Mandatory en cualquier ENTRYPOINT
       # headless. Ver llm-providers.md pitfall #4.
       OPENCODE_DISABLE_TUI: "1"
+      # Workspace mount: the LLM needs to read the actual project
+      # source code to give meaningful answers. The host's
+      # ~/Documents/2026 (parent of the 5 Sophia repos) is mounted
+      # at /workspace inside the container, and the runtime's
+      # allow-lists are expanded to permit read/exec operations
+      # rooted at that path. Without this, the LLM only sees the
+      # opencode SDK types + session logs and produces vague
+      # answers (validated 2026-05-16: "sophia-dev Go source code
+      # is not present in this environment").
+      RUNTIME_ALLOWED_WORKING_DIRS: "/tmp:/workspace"
+      RUNTIME_ALLOWED_FILESYSTEM_ROOTS: "/tmp:/workspace"
+      # API keys forwarded to the opencode subprocess as a FALLBACK
+      # when the OAuth in auth.json doesn't cover the requested model
+      # (e.g. an opencode model that needs a paid OpenAI API tier).
+      # Defaults to empty so OAuth is preferred — set the env vars on
+      # the host shell BEFORE `up -d` to force the paid path:
+      #
+      #   export OPENAI_API_KEY="sk-..."          # only if needed
+      #
+      # 2026-05-18: matriz operacional NO usa Claude por decisión del
+      # operator (sin Anthropic credentials, sin claude/* en routing).
+      # OPENAI + GOOGLE quedan como doble opción.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
     volumes:
       # Bind-mount las credenciales OAuth del operador como secret
       # read-only. El path en el container es el que opencode busca
       # por default ($HOME/.local/share/opencode/auth.json donde
       # $HOME=/home/nonroot porque el container corre como uid 65532).
       - "${HOME}/.local/share/opencode/auth.json:/home/nonroot/.local/share/opencode/auth.json:ro"
+      # Config opencode con plugins opencode-claude-auth y
+      # opencode-gemini-auth (sibling repo runtime-adapters mantiene
+      # el archivo). SIN este mount el container opencode v1.14.48
+      # arranca con catalog vacío para anthropic/* y google/* —
+      # solo github-copilot/* + openai/*. Con los plugins instalados
+      # se expanden los providers para usar las OAuth de Anthropic
+      # y Google que el operator tiene en auth.json.
+      - "${HOME}/Documents/2026/sophia-runtime-adapters/ops/local/opencode-config.json:/home/nonroot/.config/opencode/opencode.json:ro"
+      # Claude Code credentials para el plugin opencode-claude-auth.
+      # Path expected by the plugin per its installation.md:
+      #   ~/.claude/.credentials.json   (note: leading dot in filename)
+      # En macOS el plugin lee del Keychain "Claude Code-credentials".
+      # En Linux containers cae al archivo. Extraer del Keychain:
+      #   mkdir -p ~/.claude && chmod 700 ~/.claude
+      #   security find-generic-password -s "Claude Code-credentials" -w \
+      #     > ~/.claude/.credentials.json
+      #   chmod 600 ~/.claude/.credentials.json
+      - "${HOME}/.claude/.credentials.json:/home/nonroot/.claude/.credentials.json:ro"
+      # Mount the host's Sophia workspace read-only. The runtime's
+      # allow-lists above gate which paths shell.exec subprocesses
+      # (opencode, git status, etc.) can actually touch. Read-only
+      # so a buggy phase cannot rewrite the operator's source from
+      # under them — for write paths (apply phase edits), the orch
+      # creates an isolated worktree separately.
+      - "${HOME}/Documents/2026:/workspace:ro"
 
   orchestator:
     environment:
-      # SOPHIA_DISPATCHER_MODEL es REQUERIDO para opencode subprocess
-      # — sin -m flag, opencode no tiene default y sale silencioso con
+      # SOPHIA_DISPATCHER_MODEL es REQUERIDO para opencode subprocess.
+      # Sin -m flag, opencode no tiene default y sale silencioso con
       # stdout vacío (exit 0), lo cual el orch interpreta como
       # "envelope validation: invalid json: unexpected end of JSON input"
       # y la phase queda blocked.
       #
-      # github-copilot/claude-sonnet-4.6 funciona via OAuth de GitHub
-      # Copilot que el operador autenticó con `opencode auth login
-      # github-copilot`. NO usar `anthropic/*` directo — Anthropic
-      # bloquea OAuth third-party (ver llm-providers.md pitfall #1).
-      SOPHIA_DISPATCHER_MODEL: "github-copilot/claude-sonnet-4.6"
+      # Operator decision 2026-05-18: matriz SIN Claude. Provider mix
+      # de GPT-5.x (via ChatGPT Plus OAuth) + Gemini (via Google
+      # OAuth y/o GitHub Copilot OAuth para los Gemini que Google
+      # direct no expone). NO se usa anthropic/* directo ni
+      # github-copilot/claude-* — Claude queda fuera por decisión
+      # operacional de simplicidad de credentials.
+      SOPHIA_DISPATCHER_MODEL: "openai/gpt-5.4"
+
+      # Per-phase routing matrix — stable hybrid validated 2026-05-19 via
+      # OAuth (Google + OpenAI). Claude direct via the `anthropic/*` family
+      # is intentionally NOT used inside the Docker container because the
+      # `opencode-claude-auth` plugin cannot refresh tokens without the
+      # macOS Keychain (see commit fix + sdd/mcp-host-bridge/charter).
+      # The MCP Host Bridge cycle will reintroduce Claude via a host-side
+      # MCP server that DOES have Keychain access.
+      SOPHIA_DISPATCHER_MODEL_EXPLORE:  "google/gemini-3-flash-preview"
+      SOPHIA_DISPATCHER_MODEL_PROPOSAL: "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_SPEC:     "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_DESIGN:   "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_TASKS:    "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_APPLY:    "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_VERIFY:   "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_ARCHIVE:  "google/gemini-3-flash-preview"
+
       # Tenant binding for memory-engine ingest path. The dev API key
       # seeded by sophia-memory-engine/migrations/postgres/003_create_
       # api_keys.up.sql is bound to (project_id="sophia-dev",
@@ -68,3 +136,4 @@ services:
       # on MemoryScope when persisting artifacts or memory-engine
       # returns HTTP 403 forbidden (cross-tenant write).
       SOPHIA_MEMORY_TENANT_ID: "sophia-dev"
+

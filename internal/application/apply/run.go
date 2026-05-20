@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
-	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
@@ -35,6 +34,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/trace"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -96,8 +96,16 @@ func DefaultRunConfig() RunConfig {
 // RunService implements the 18-step apply phase coordination from spec § 5.
 // Public Execute() satisfies the phase.ApplyExecutor interface so phase.
 // Service can delegate to RunService when Phase.Type == apply.
+//
+// priorPhasesStatus is set per Execute() invocation from
+// inbound.RunPhaseInput.PriorPhasesStatus and read by dispatchImplement
+// when building each implement-agent prompt. The field is reset on every
+// call so concurrent changes (one RunService instance across requests)
+// observe a consistent snapshot for the duration of their Execute.
+// Spec #51.
 type RunService struct {
-	d RunDeps
+	d                 RunDeps
+	priorPhasesStatus map[phase.PhaseType]string
 }
 
 // NewRun constructs a RunService. All non-config Deps are required.
@@ -130,7 +138,12 @@ func NewRun(d RunDeps) *RunService {
 // from the goroutine that handles RunPhase, after the Phase row is in
 // status=running. On return, the phase has either completed (with envelope)
 // or been marked blocked. The phase.Service caller persists the phase.
-func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, _ inbound.RunPhaseInput) (*envelope.Envelope, error) {
+func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error) {
+	// Spec #51: capture the orchestrator-verified prior-phase status
+	// snapshot for the duration of this apply run. Read by
+	// dispatchImplement when building each implement-agent prompt.
+	s.priorPhasesStatus = in.PriorPhasesStatus
+
 	// Step 1: pre-flight — load tasks list from memory-engine.
 	tasksList, err := s.loadTasksList(ctx, c)
 	if err != nil {
@@ -373,6 +386,49 @@ type taskItemSpec struct {
 	FilesPattern []string `json:"files_pattern"`
 }
 
+// unwrapArtifactData extracts the "data" field from a persisted full envelope
+// (produced by persist_artifacts.go) or returns the original bytes unchanged
+// when the input is already a bare payload.
+//
+// Detection rule (Spec #44): if the JSON object contains "data" AND at least
+// one envelope marker key (schema_version, status, phase, change_name,
+// project), the value of "data" is returned. Otherwise the original bytes
+// are returned unchanged to preserve backward-compatibility with legacy bare
+// {groups:[...]} payloads.
+//
+// An invalid JSON input returns an error immediately so callers can surface a
+// proper ErrInvalidTasksList rather than a confusing empty-groups block.
+func unwrapArtifactData(raw string) ([]byte, error) {
+	if raw == "" {
+		return []byte(raw), nil
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &top); err != nil {
+		return nil, fmt.Errorf("unwrapArtifactData: %w", err)
+	}
+
+	dataField, hasData := top["data"]
+	if !hasData {
+		// Bare payload — pass through unchanged.
+		return []byte(raw), nil
+	}
+
+	// Envelope markers: presence of any one is sufficient to confirm this is a
+	// full envelope rather than a data document that happens to have a "data" key.
+	envelopeMarkers := []string{"schema_version", "status", "phase", "change_name", "project"}
+	isEnvelope := false
+	for _, m := range envelopeMarkers {
+		if _, ok := top[m]; ok {
+			isEnvelope = true
+			break
+		}
+	}
+	if !isEnvelope {
+		return []byte(raw), nil
+	}
+	return dataField, nil
+}
+
 // loadTasksList retrieves the tasks list saved by the upstream tasks phase
 // from sophia-memory-engine, addressed by topic_key (per ADR-0005 P0.2).
 //
@@ -398,8 +454,13 @@ func (s *RunService) loadTasksList(ctx context.Context, c *change.Change) (*task
 		return nil, fmt.Errorf("loadTasksList %s: %w", topic, ErrNoTasksList)
 	}
 
+	payload, err := unwrapArtifactData(rec.Content)
+	if err != nil {
+		return nil, fmt.Errorf("loadTasksList %s: %w: %w", topic, ErrInvalidTasksList, err)
+	}
+
 	var tl tasksList
-	if err := json.Unmarshal([]byte(rec.Content), &tl); err != nil {
+	if err := json.Unmarshal(payload, &tl); err != nil {
 		return nil, fmt.Errorf("loadTasksList %s: %w: %w", topic, ErrInvalidTasksList, err)
 	}
 	return &tl, nil

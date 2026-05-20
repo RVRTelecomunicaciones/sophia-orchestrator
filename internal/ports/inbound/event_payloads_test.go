@@ -47,8 +47,12 @@ func TestPayload_WireShape_PreservesKeys(t *testing.T) {
 			[]string{"task_id", "session_id"}},
 		{"ApplyTaskClaimSkipped", inbound.ApplyTaskClaimSkippedPayload{TaskID: "t1", Err: "x"},
 			[]string{"task_id", "err"}},
-		{"ApplyTaskEscalated", inbound.ApplyTaskEscalatedPayload{TaskID: "t1", Attempts: 3, Reason: "r"},
-			[]string{"task_id", "attempts", "reason"}},
+		{"ApplyTaskEscalated", inbound.ApplyTaskEscalatedPayload{
+			TaskID: "t1", Attempts: 3, Reason: "r",
+			FinalEnvelopeSummary: "blocked-because-x",
+			BlockingRequirements: []string{"missing-evidence-y"},
+		},
+			[]string{"task_id", "attempts", "reason", "final_envelope_summary", "blocking_requirements"}},
 		{"ApplyTaskRetry", inbound.ApplyTaskRetryPayload{TaskID: "t1", Attempts: 2},
 			[]string{"task_id", "attempts"}},
 		{"ApplyDispatchError", inbound.ApplyDispatchErrorPayload{TaskID: "t1", Err: "x"},
@@ -74,6 +78,27 @@ func TestPayload_WireShape_PreservesKeys(t *testing.T) {
 		{"PhaseFailed", inbound.PhaseFailedPayload{PhaseID: "p1", PhaseType: "spec", EndedAt: now, Error: "boom"},
 			[]string{"phase_id", "phase_type", "ended_at", "error"}},
 	}
+
+	// Spec #48: FailureReason and FailureDetail are additive — the base
+	// set above verifies backwards compat (omitempty on the new fields
+	// means they don't appear when empty). This case verifies they DO
+	// appear when populated.
+	t.Run("PhaseFailedWithReason", func(t *testing.T) {
+		payload := inbound.PhaseFailedPayload{
+			PhaseID: "p1", PhaseType: "spec", EndedAt: now, Error: "boom",
+			FailureReason: "schema_mismatch",
+			FailureDetail: "tasks output must be data.groups[]",
+		}
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m))
+		require.Equal(t, "schema_mismatch", m["failure_reason"], "failure_reason must appear when set")
+		require.Equal(t, "tasks output must be data.groups[]", m["failure_detail"], "failure_detail must appear when set")
+		// Backwards-compat fields still present.
+		require.Equal(t, "boom", m["error"])
+		require.Equal(t, "p1", m["phase_id"])
+	})
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
