@@ -498,8 +498,21 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 
 	cidLocal := c.ID()
 	pidLocal := p.ID()
-	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
-	s.publishEvent(ctx, p.ID(), eventTypeForStatus(p.Status()), inbound.PhaseCompletedFromApplyPayload{
+	eventType := eventTypeForStatus(p.Status())
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventType, env)
+
+	// Spec #51 — when apply terminates BLOCKED emit the enriched
+	// PhaseFailedPayload (same shape as the single-agent failure path)
+	// so operators see the actual reason via SSE instead of the slim
+	// {envelope_status, envelope_confidence} pair. Non-blocked
+	// terminations keep the slim payload to preserve the existing
+	// contract for clients that don't need the extra fields.
+	if env.Status == envelope.StatusBlocked {
+		s.publishEvent(ctx, p.ID(), eventType,
+			buildApplyFailedPayload(p.ID(), p.Type(), s.d.Clock.Now().UTC(), env))
+		return
+	}
+	s.publishEvent(ctx, p.ID(), eventType, inbound.PhaseCompletedFromApplyPayload{
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	})
