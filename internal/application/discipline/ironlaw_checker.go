@@ -30,11 +30,11 @@ type PhasePredicate struct {
 // (typically spec/design/tasks/verify) to their persisted state. Empty map
 // keys mean "the phase has not been run".
 type Context struct {
-	Action                 Action
-	DesiredPhase           phase.PhaseType
-	PriorPhases            map[phase.PhaseType]PhasePredicate
-	HasGovernanceDecision  bool
-	TaskAttempts           int
+	Action                Action
+	DesiredPhase          phase.PhaseType
+	PriorPhases           map[phase.PhaseType]PhasePredicate
+	HasGovernanceDecision bool
+	TaskAttempts          int
 }
 
 // Violation is one Iron Law violation reported by Check.
@@ -56,7 +56,7 @@ func NewIronLawChecker() *IronLawChecker { return &IronLawChecker{} }
 func (c *IronLawChecker) Check(ctx Context) []Violation {
 	var v []Violation
 
-	// IL2: NO APPLY WITHOUT TASKS APPROVED.
+	// IL2: NO APPLY WITHOUT TASKS DONE.
 	if ctx.Action == ActionRunApply {
 		tp, ok := ctx.PriorPhases[phase.PhaseTasks]
 		threshold := phase.PhaseTasks.ConfidenceThreshold()

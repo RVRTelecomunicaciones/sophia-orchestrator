@@ -184,21 +184,21 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	})
 
 	phaseSvc := phase.New(phase.Deps{
-		ChangeRepo:    changeRepo,
-		PhaseRepo:     phaseRepo,
-		SessionRepo:   sessionRepo,
-		Governance:    govClient,
-		Memory:        memClient,
-		Dispatcher:    dispatcher,
-		SpawnGov:      spawnGov,
-		Validator:     validator,
-		IronLaw:       ironLaw,
-		Prompts:       prompts,
-		Audit:         auditLog,
-		Events:        events,
-		Clock:         clock,
-		IDGen:         idGen,
-		Scheduler: phase.AsyncScheduler,
+		ChangeRepo:  changeRepo,
+		PhaseRepo:   phaseRepo,
+		SessionRepo: sessionRepo,
+		Governance:  govClient,
+		Memory:      memClient,
+		Dispatcher:  dispatcher,
+		SpawnGov:    spawnGov,
+		Validator:   validator,
+		IronLaw:     ironLaw,
+		Prompts:     prompts,
+		Audit:       auditLog,
+		Events:      events,
+		Clock:       clock,
+		IDGen:       idGen,
+		Scheduler:   phase.AsyncScheduler,
 		Config: func() phase.ServiceConfig {
 			c := phase.DefaultServiceConfig()
 			// Tenant binding for memory-engine ingest. Empty in
@@ -254,6 +254,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Ready:              readinessFor(pool),
 		Metrics:            metrics,
 		AllowAnonLocalhost: effectiveAllowAnon,
+		IDGen:              idGen,
 	}
 	if tracer.Enabled() {
 		routerDeps.Tracer = tracer.Tracer("sophia-orchestator/http")

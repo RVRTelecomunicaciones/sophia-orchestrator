@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,13 +26,13 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
-	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -192,6 +193,12 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 	}
 
 	// Step 3: Create Phase row pending — persist BEFORE goroutine.
+	//
+	// Spec #49: for retry idempotency, look up the most-recent prior phase for
+	// this (change_id, phase_type). When one exists and is terminal, start the
+	// new attempt at prior.Attempts() so Start() makes it N+1. On a first run
+	// FindByChangeAndType returns ErrNotFound, and phase.New starts at 0 → Start
+	// makes it 1.
 	pid, err := ids.ParsePhaseID(s.d.IDGen.NewID())
 	if err != nil {
 		return nil, fmt.Errorf("generate phase id: %w", err)
@@ -200,10 +207,14 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 	if budget <= 0 {
 		budget = 3
 	}
-	p, err := phase.New(pid, in.ChangeID, in.PhaseType, budget)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // domain sentinel
+	priorAttempts := 0
+	if prior, priorErr := s.d.PhaseRepo.FindByChangeAndType(ctx, in.ChangeID, in.PhaseType); priorErr == nil && prior.Status().IsTerminal() {
+		priorAttempts = prior.Attempts()
 	}
+	// Hydrate with priorAttempts so Start() increments to priorAttempts+1.
+	// This makes retry N produce attempts=N+1 in the upsert key.
+	p := phase.Hydrate(pid, in.ChangeID, in.PhaseType,
+		phase.PhaseStatusPending, nil, 0, budget, priorAttempts, nil, nil)
 	if err := p.Start(s.d.Clock.Now()); err != nil {
 		return nil, err //nolint:wrapcheck // domain sentinel
 	}
@@ -303,7 +314,9 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		return
 	}
 
-	// Step 8: build prompt.
+	// Step 8: build prompt. Parse tests_required from ContextOverrides so
+	// the apply TDD hard-gate (Spec #46) is conditional on the change's scope.
+	testsRequired := parseScopeTestsRequired(in.ContextOverrides)
 	priorCtx := s.buildPriorContext(ctx, c)
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:           p.Type(),
@@ -311,6 +324,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		Project:         c.Project(),
 		PriorContext:    priorCtx,
 		TaskDescription: in.TaskDescription,
+		TestsRequired:   testsRequired,
 	})
 	if err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("prompt build: %v", err))
@@ -379,6 +393,20 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("envelope validation: %v", err))
 		return
 	}
+
+	// Step 12a: Spec #45 — for PhaseTasks, reject envelopes that carry a
+	// flat top-level "tasks" array instead of the required "data.groups[]"
+	// shape. This catches schema drift early and returns a named rule id
+	// ("schema_mismatch") that clients can act on programmatically.
+	if p.Type() == phase.PhaseTasks {
+		if mismatch := detectTasksSchemaMismatch(env.Data); mismatch != "" {
+			_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
+			_ = s.d.SessionRepo.Save(ctx, sess)
+			s.failPhaseWithReason(ctx, p, sess, "schema_mismatch", mismatch)
+			return
+		}
+	}
+
 	_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
 	_ = s.d.SessionRepo.Save(ctx, sess)
 	s.publishEvent(ctx, p.ID(), inbound.EventAgentEnvelopeReceived, inbound.AgentEnvelopeReceivedPayload{
@@ -616,7 +644,18 @@ func (s *Service) Reject(ctx context.Context, id ids.PhaseID, approver, reason s
 // --- helpers ---
 
 // failPhase persists a synthetic BLOCKED envelope and emits phase.failed.
+// Spec #48: if the phase has a recorded session (sess != nil), extract
+// failure_reason and failure_detail from its envelope before emitting.
 func (s *Service) failPhase(ctx context.Context, p *phase.Phase, reason string) {
+	s.failPhaseWithReason(ctx, p, nil, "", reason)
+}
+
+// failPhaseWithReason is the enriched variant of failPhase. ruleID and detail
+// are forwarded into PhaseFailedPayload.FailureReason / .FailureDetail (Spec #48).
+// When ruleID is empty the method looks up the latest session envelope for the
+// phase and extracts rule_id / message from it; if nothing is found, FailureReason
+// defaults to "unknown".
+func (s *Service) failPhaseWithReason(ctx context.Context, p *phase.Phase, _ any /* reserved */, ruleID, reason string) {
 	c, err := s.d.ChangeRepo.FindByID(ctx, p.ChangeID())
 	if err != nil {
 		return
@@ -643,15 +682,71 @@ func (s *Service) failPhase(ctx context.Context, p *phase.Phase, reason string) 
 	}
 	pidLocal := p.ID()
 	cidLocal := c.ID()
-	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, contract.EventPhaseFailed, map[string]any{"reason": reason})
-	// sophia-wire-v1 §5.3: phase.failed payload carries phase_id +
-	// phase_type + ended_at + error.
-	s.publishEvent(ctx, p.ID(), contract.EventPhaseFailed, inbound.PhaseFailedPayload{
-		PhaseID:   p.ID().String(),
-		PhaseType: string(p.Type()),
-		EndedAt:   s.d.Clock.Now().UTC(),
-		Error:     reason,
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, contract.EventPhaseFailed, map[string]any{
+		"reason":         reason,
+		"failure_reason": ruleID,
 	})
+
+	// Spec #48: populate failure_reason / failure_detail from the session
+	// envelope when a ruleID was not supplied by the caller.
+	failureReason, failureDetail := ruleID, ""
+	if failureReason == "" {
+		failureReason, failureDetail = s.extractFailureReasonFromSession(ctx, p.ID(), reason)
+	} else {
+		failureDetail = reason
+	}
+
+	// sophia-wire-v1 §5.3: phase.failed payload carries phase_id +
+	// phase_type + ended_at + error + failure_reason + failure_detail.
+	s.publishEvent(ctx, p.ID(), contract.EventPhaseFailed, inbound.PhaseFailedPayload{
+		PhaseID:       p.ID().String(),
+		PhaseType:     string(p.Type()),
+		EndedAt:       s.d.Clock.Now().UTC(),
+		Error:         reason,
+		FailureReason: failureReason,
+		FailureDetail: failureDetail,
+	})
+}
+
+// extractFailureReasonFromSession inspects the latest session for the given
+// phase and returns (rule_id, message) extracted from the agent envelope's
+// data block. Falls back to ("unknown", executiveSummary) when nothing
+// can be extracted (Spec #48 fallback contract).
+func (s *Service) extractFailureReasonFromSession(ctx context.Context, phaseID ids.PhaseID, fallbackReason string) (ruleID, detail string) {
+	sessions, err := s.d.SessionRepo.FindByPhaseID(ctx, phaseID)
+	if err != nil || len(sessions) == 0 {
+		return "unknown", fallbackReason
+	}
+	// Use the last session — it represents the most recent dispatch attempt.
+	latest := sessions[len(sessions)-1]
+	env := latest.Envelope()
+	if env == nil {
+		return "unknown", fallbackReason
+	}
+
+	// Try to extract rule_id + message from envelope.data.
+	if len(env.Data) > 0 {
+		var data struct {
+			RuleID  string `json:"rule_id"`
+			Message string `json:"message"`
+		}
+		if jsonErr := json.Unmarshal(env.Data, &data); jsonErr == nil {
+			if data.RuleID != "" {
+				msg := data.Message
+				if msg == "" {
+					msg = env.ExecutiveSummary
+				}
+				return data.RuleID, msg
+			}
+		}
+	}
+
+	// Fall back to executive_summary as the detail.
+	detail = env.ExecutiveSummary
+	if detail == "" {
+		detail = fallbackReason
+	}
+	return "unknown", detail
 }
 
 func (s *Service) loadPriorPhases(ctx context.Context, changeID ids.ChangeID) (map[phase.PhaseType]discipline.PhasePredicate, error) {
@@ -877,3 +972,46 @@ func hashPrompt(p string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// parseScopeTestsRequired reads ContextOverrides["scope"]["tests_required"]
+// and returns the boolean value. Any missing key or type mismatch defaults
+// to false so non-TDD changes are never inadvertently gated (Spec #46).
+func parseScopeTestsRequired(overrides map[string]any) bool {
+	if overrides == nil {
+		return false
+	}
+	scopeRaw, ok := overrides["scope"]
+	if !ok {
+		return false
+	}
+	scope, ok := scopeRaw.(map[string]any)
+	if !ok {
+		return false
+	}
+	v, ok := scope["tests_required"]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// detectTasksSchemaMismatch inspects the raw JSON of an envelope's data block
+// and returns a non-empty error string if the payload uses a flat "tasks" array
+// instead of the required "groups" shape (Spec #45 / #44). Returns "" when the
+// shape is acceptable (including empty data or already correct grouped shape).
+func detectTasksSchemaMismatch(data json.RawMessage) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var d map[string]json.RawMessage
+	if err := json.Unmarshal(data, &d); err != nil {
+		// Can't parse data — not a shape mismatch, let downstream decide.
+		return ""
+	}
+	_, hasGroups := d["groups"]
+	_, hasTasks := d["tasks"]
+	if hasTasks && !hasGroups {
+		return "tasks output must use data.groups[] not a flat tasks array (schema_mismatch)"
+	}
+	return ""
+}

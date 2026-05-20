@@ -10,7 +10,7 @@ type ID string
 // The 5 Iron Laws.
 const (
 	IronLaw1 ID = "IL1_PERSIST_BEFORE_TRANSITION"
-	IronLaw2 ID = "IL2_NO_APPLY_WITHOUT_TASKS_APPROVED"
+	IronLaw2 ID = "IL2_NO_APPLY_WITHOUT_TASKS_DONE"
 	IronLaw3 ID = "IL3_NO_ARCHIVE_WITHOUT_VERIFY"
 	IronLaw4 ID = "IL4_NO_RUNTIME_WITHOUT_GOVERNANCE"
 	IronLaw5 ID = "IL5_NO_FIX_4_WITHOUT_ESCALATION"
@@ -31,8 +31,8 @@ var catalog = []Law{
 	},
 	{
 		ID:          IronLaw2,
-		Description: "No apply without tasks phase DONE and approved.",
-		Rationale:   "Approval gate ensures explicit consent before code edits at scale.",
+		Description: "No apply without tasks phase DONE.",
+		Rationale:   "Tasks phase must reach DONE status with sufficient confidence before code edits begin.",
 	},
 	{
 		ID:          IronLaw3,

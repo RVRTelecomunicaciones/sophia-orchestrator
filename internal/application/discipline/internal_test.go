@@ -34,5 +34,5 @@ func TestRealJitter_PositiveSpan(t *testing.T) {
 func TestHardGatesFor_DefaultBranch(t *testing.T) {
 	// hardGatesFor uses an exhaustive switch on PhaseType plus a default
 	// branch; the default exists as a defensive guard for invalid types.
-	require.Nil(t, hardGatesFor(phase.PhaseType("synthetic-invalid")))
+	require.Nil(t, hardGatesFor(PromptInput{Phase: phase.PhaseType("synthetic-invalid")}))
 }
