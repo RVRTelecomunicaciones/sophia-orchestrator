@@ -125,6 +125,141 @@ Relevant spec scenarios: E3, A9, A10.
   and wins on governance. `mcp-go` remains the named fallback if the official SDK
   stalls (see `sophia-agent-mcp` ADR-0001).
 
+## Smoke test procedure
+
+Run these commands on macOS to verify the integration end-to-end. Each
+step has an expected output; if any step deviates, stop and diagnose
+before continuing.
+
+**Step 1 — Build and start the bridge**
+
+```bash
+# Build
+cd ~/Documents/2026/sophia-agent-mcp
+make build
+
+# Rotate token and save to a temp file
+./bin/sophia-agent-mcp token rotate > /tmp/sophia-mcp-token
+# Expected output (to file): 64 hex characters, e.g.
+#   a3f2...8b1c
+
+export SOPHIA_MCP_BRIDGE_TOKEN=$(cat /tmp/sophia-mcp-token)
+
+# Start the bridge (background)
+./bin/sophia-agent-mcp serve --config configs/example.toml &
+# Expected log line:
+#   {"level":"INFO","msg":"MCP server listening","addr":"127.0.0.1:7775"}
+```
+
+**Step 2 — Probe: unauthenticated request → 401**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7775/mcp
+# Expected: 401
+```
+
+**Step 3 — Probe: tools/list returns agent.run + agent.health only**
+
+```bash
+TOKEN=$(cat /tmp/sophia-mcp-token)
+curl -s \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+  http://127.0.0.1:7775/mcp
+# Expected JSON snapshot (key fields):
+# {
+#   "jsonrpc": "2.0",
+#   "id": 1,
+#   "result": {
+#     "protocolVersion": "2025-06-18",
+#     "serverInfo": {"name": "sophia-agent-mcp", ...}
+#   }
+# }
+
+curl -s \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  http://127.0.0.1:7775/mcp
+# Expected JSON snapshot:
+# {
+#   "jsonrpc": "2.0",
+#   "id": 2,
+#   "result": {
+#     "tools": [
+#       {"name": "agent.run",    ...},
+#       {"name": "agent.health", ...}
+#     ]
+#   }
+# }
+# Tools MUST be exactly these two — no generic shell tool present.
+```
+
+**Step 4 — Probe: agent.health returns ok**
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent.health","arguments":{}}}' \
+  http://127.0.0.1:7775/mcp
+# Expected JSON snapshot (key fields):
+# {
+#   "result": {
+#     "content": [{"text": "{\"status\":\"ok\", \"providers\":[...]}"}]
+#   }
+# }
+```
+
+**Step 5 — Start stack with MCP overlay**
+
+```bash
+# Token must still be exported in this shell
+docker compose \
+  -f ops/local/compose.full-stack.yaml \
+  -f ops/local/compose.mcp.yaml \
+  up -d --build
+# Expected orchestrator log line:
+#   {"msg":"dispatcher registered","provider":"mcp","bridge_url":"http://host.docker.internal:7775"}
+```
+
+**Step 6 — Verify dispatcher via orchestrator API**
+
+```bash
+curl -s \
+  -H "X-API-Key: full-stack-key" \
+  http://localhost:8080/api/v1/ready
+# Expected: HTTP 200 {"status":"ok"} (confirms pg reachable)
+
+# Send a minimal sophia run request to exercise the MCP path end-to-end.
+# Replace <project-id> with a valid project UUID from your local DB.
+# The response should complete a phase and return envelope_raw.
+```
+
+## Linux notes
+
+On Linux hosts running Docker Engine (without Docker Desktop), the DNS
+name `host.docker.internal` is not automatically injected. To enable
+container→host connectivity, add the following to the `orchestator` service
+block in your local override:
+
+```yaml
+services:
+  orchestator:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+This configuration is **documented here for operator reference only**.
+It is **NOT** wired into `compose.mcp.yaml` and **NOT** run in CI.
+macOS via Docker Desktop is the sole validated target in V1 (operator
+decision #4, 2026-05-20). Linux support is best-effort and requires
+operator attestation before production use.
+
+The `compose.mcp.yaml` overlay includes a comment block documenting the
+`extra_hosts` line for Linux operators who need it.
+
 ## References
 
 - ADR-0002: Pluggable dispatcher abstraction
@@ -133,3 +268,5 @@ Relevant spec scenarios: E3, A9, A10.
 - Engram charter: `sdd/mcp-host-bridge/charter` (observation #517)
 - Spec scenarios: A1–A10, C1–C6, E1–E4
 - Design: `openspec/design.md` §1, §6, §7, §11
+- E2E overlay: `ops/local/compose.mcp.yaml`
+- Human validation checklist: `openspec/m3-smoke-checklist.md`

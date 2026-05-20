@@ -1,0 +1,98 @@
+# ops/local/compose.mcp.yaml
+#
+# PURPOSE
+#   Overlay that switches the orchestrator dispatcher from the default
+#   `opencode` subprocess path to the host-side MCP bridge
+#   (`sophia-agent-mcp`). Apply AFTER compose.full-stack.yaml.
+#
+#   The overlay does NOT remove or replace any existing service. It only
+#   adds env vars to the `orchestator` service. The MCP dispatcher
+#   coexists with the opencode dispatcher — switching back is a single
+#   env-var change (SOPHIA_DISPATCHER_PROVIDER=opencode).
+#
+# QUICK START
+#
+#   # Terminal 1 (host): start the MCP bridge
+#   #   sophia-agent-mcp token rotate > /tmp/sophia-mcp-token
+#   #   export SOPHIA_MCP_BRIDGE_TOKEN=$(cat /tmp/sophia-mcp-token)
+#   #   sophia-agent-mcp serve --config ~/.sophia-agent-mcp/config.toml &
+#
+#   # Terminal 2 (host): start the stack with MCP overlay
+#   #   export SOPHIA_MCP_BRIDGE_TOKEN=$(cat /tmp/sophia-mcp-token)
+#   #   docker compose \
+#   #     -f ops/local/compose.full-stack.yaml \
+#   #     -f ops/local/compose.mcp.yaml \
+#   #     up -d --build
+#
+# PRE-REQUISITES
+#   - sophia-agent-mcp binary built and on $PATH (or absolute path used above)
+#   - SOPHIA_MCP_BRIDGE_TOKEN set in the host shell before `up -d`
+#   - Docker Desktop on macOS (provides host.docker.internal DNS magic)
+#
+# LINUX NOTE
+#   On Linux (non-Docker-Desktop), host.docker.internal is not injected
+#   automatically. Add the following to the orchestator service block to
+#   enable container→host routing:
+#
+#     extra_hosts:
+#       - "host.docker.internal:host-gateway"
+#
+#   This is documented here for operator reference. It is NOT added
+#   automatically and NOT included in CI (macOS is the primary target
+#   per operator decision #4, 2026-05-20). See ADR-0008 § "Linux notes".
+
+services:
+  orchestator:
+    environment:
+      # -----------------------------------------------------------------------
+      # Switch dispatcher to MCP host bridge
+      # -----------------------------------------------------------------------
+
+      # Select the MCP dispatcher. When unset or "opencode", the default
+      # opencode subprocess path is used instead. No other config changes.
+      SOPHIA_DISPATCHER_PROVIDER: "mcp"
+
+      # URL of the host-side sophia-agent-mcp process.
+      # host.docker.internal resolves to the host on Docker Desktop (macOS).
+      # For Linux deployments, see the LINUX NOTE in the file header above.
+      SOPHIA_MCP_BRIDGE_URL: "http://host.docker.internal:7775"
+
+      # Bearer token for the bridge. Must match the token in
+      # ~/.sophia-agent-mcp/token on the host. Passed from the host
+      # environment — never hardcoded here.
+      SOPHIA_MCP_BRIDGE_TOKEN: "${SOPHIA_MCP_BRIDGE_TOKEN}"
+
+      # Transport protocol. Only streamable-http is supported in V1.
+      SOPHIA_MCP_TRANSPORT: "streamable-http"
+
+      # Default provider forwarded to the bridge when no per-phase override
+      # is set. The bridge must have this provider in its provider_allowlist.
+      SOPHIA_MCP_PROVIDER: "opencode"
+
+      # Default model forwarded to the bridge for phases without a specific
+      # model override. Must be reachable by the host provider CLI.
+      SOPHIA_MCP_MODEL: "openai/gpt-5.4"
+
+      # -----------------------------------------------------------------------
+      # Per-phase model overrides — stable hybrid matrix (2026-05-20)
+      #
+      # Mirrors the routing matrix from compose.e2e-llm.yaml but routed
+      # through the MCP bridge instead of the in-container opencode subprocess.
+      #
+      # Claude models can be reintroduced here once the host bridge proves
+      # stable with opencode — the bridge already has Keychain access and
+      # the anthropic/* provider is in the default allowlist.
+      # -----------------------------------------------------------------------
+      SOPHIA_DISPATCHER_MODEL: "openai/gpt-5.4"
+
+      SOPHIA_DISPATCHER_MODEL_EXPLORE:  "google/gemini-3-flash-preview"
+      SOPHIA_DISPATCHER_MODEL_PROPOSAL: "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_SPEC:     "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_DESIGN:   "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_TASKS:    "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_APPLY:    "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_VERIFY:   "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_ARCHIVE:  "google/gemini-3-flash-preview"
+
+      # Tenant binding (same as compose.e2e-llm.yaml — unchanged by MCP path)
+      SOPHIA_MEMORY_TENANT_ID: "sophia-dev"
