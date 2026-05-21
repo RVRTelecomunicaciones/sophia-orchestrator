@@ -21,6 +21,16 @@ type PromptInput struct {
 	// changes that explicitly disable strict TDD are not blocked by it.
 	// Spec #46: only injected when scope.tests_required == true.
 	TestsRequired bool
+	// PriorPhasesStatus is the orchestrator-verified terminal status of
+	// each prior phase in the change (e.g. {proposal: "done", spec:
+	// "done_with_concerns"}). Rendered as "# Phase Status Snapshot" so
+	// the LLM sees factual evidence that prior-phase gates have been
+	// satisfied instead of looking for that evidence locally and
+	// blocking when it cannot find it. Spec #51: pre-fix the LLM
+	// (gpt-5.4 in smoke v3) interpreted IL2_NO_APPLY_WITHOUT_TASKS_DONE
+	// as "I must verify tasks are done" and returned BLOCKED with
+	// confidence=0.98 because no local DONE evidence was provided.
+	PriorPhasesStatus map[phase.PhaseType]string
 }
 
 // PromptBuilder produces phase-specific agent prompts with Iron Laws,
@@ -50,11 +60,16 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 	sb.WriteString(in.Project)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("# IRON LAWS (NON-NEGOTIABLE)\n")
+	sb.WriteString("# IRON LAWS (enforced server-side by the orchestrator)\n")
+	sb.WriteString("These invariants are validated BEFORE this prompt fires. Your job is to produce a valid envelope for THIS phase — do NOT re-verify prior phases or look for their evidence locally.\n")
 	for _, law := range ironlaw.All() {
 		fmt.Fprintf(&sb, "- [%s] %s\n", law.ID, law.Description)
 	}
 	sb.WriteString("\n")
+
+	if snapshot := renderPhaseStatusSnapshot(in.PriorPhasesStatus); snapshot != "" {
+		sb.WriteString(snapshot)
+	}
 
 	if gates := hardGatesFor(in); len(gates) > 0 {
 		sb.WriteString("# HARD-GATE Markers\n")
@@ -119,9 +134,15 @@ func hardGatesFor(in PromptInput) []string {
 			"DO NOT skip alternatives — present at least 2 approaches with tradeoffs.",
 		}
 	case phase.PhaseSpec:
+		// Spec #51: removed "DO NOT proceed if proposal is not DONE" —
+		// the orchestrator already blocks the proposal→spec transition
+		// unless proposal reached an advance-allowed terminal status,
+		// and the Phase Status Snapshot exposes that fact to the agent.
+		// The pre-fix gate caused gpt-5.4 to block spec at 21s with
+		// confidence=0.96 in smoke v3 because the agent searched for
+		// local DONE evidence the orchestrator does not embed in prompts.
 		return []string{
 			"DO NOT include placeholders (TBD/TODO/'fill in details').",
-			"DO NOT proceed if proposal is not DONE.",
 		}
 	case phase.PhaseDesign:
 		return []string{
@@ -147,12 +168,41 @@ func hardGatesFor(in PromptInput) []string {
 			"DO NOT claim DONE without running tests and citing exact output.",
 		}
 	case phase.PhaseArchive:
-		return []string{
-			"DO NOT archive without verify DONE at confidence ≥ 0.9.",
-		}
+		// Spec #51: removed "DO NOT archive without verify DONE at
+		// confidence ≥ 0.9" — IL3_NO_ARCHIVE_WITHOUT_VERIFY plus the
+		// orchestrator's transition validation already enforce this,
+		// and the Phase Status Snapshot exposes the verify state to the
+		// agent. Keep this branch empty so the HARD-GATE block is
+		// omitted for archive (no agent-output discipline to assert).
+		return nil
 	default:
 		return nil
 	}
+}
+
+// renderPhaseStatusSnapshot returns the "# Phase Status Snapshot" block
+// listing each prior phase and its orchestrator-verified terminal status.
+// Order is canonical SDD lifecycle order (init → explore → proposal → spec
+// → design → tasks → apply → verify → archive) so the rendered text stays
+// deterministic across runs — important for prompt_sha256 dedup in
+// agent_sessions. Returns "" when statuses is nil or empty.
+//
+// Spec #51: the snapshot is the factual evidence the LLM needs to honor
+// IL2_NO_APPLY_WITHOUT_TASKS_DONE et al. without having to search for
+// that evidence locally and bail when none is found.
+func renderPhaseStatusSnapshot(statuses map[phase.PhaseType]string) string {
+	if len(statuses) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("# Phase Status Snapshot (verified by orchestrator before this prompt fired)\n")
+	for _, pt := range phase.AllPhaseTypes() {
+		if st, ok := statuses[pt]; ok && st != "" {
+			fmt.Fprintf(&sb, "- %s: %s\n", pt, st)
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // dataSchemaFor returns the phase-specific "data" value to embed in the

@@ -219,5 +219,142 @@ func TestPromptBuilder_IncludesHardGatesForApply_WithTDDEnabled(t *testing.T) {
 	require.Contains(t, out, "fix #4")
 }
 
+// ---------------------------------------------------------------------------
+// Spec #51: PriorPhasesStatus snapshot + Iron Laws reframe
+// ---------------------------------------------------------------------------
+
+// TestPromptBuilder_IronLawsHeaderReframed verifies that the Iron Laws block
+// is framed as orchestrator-enforced rather than something the agent must
+// re-verify itself. Pre-fix the header said "(NON-NEGOTIABLE)" which led
+// LLMs (verified with gpt-5.4 in smoke v3) to interpret IL2_NO_APPLY_
+// WITHOUT_TASKS_DONE as "I must find evidence tasks are done" and block
+// with confidence=0.98 when no such evidence appeared in the prompt.
+func TestPromptBuilder_IronLawsHeaderReframed(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseApply, ChangeName: "x", Project: "y", TaskDescription: "apply",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "(NON-NEGOTIABLE)",
+		"Iron Laws header must not use NON-NEGOTIABLE — agents read that as a rule they must verify themselves")
+	require.Contains(t, out, "enforced server-side",
+		"Iron Laws header must clarify the orchestrator enforces them, not the agent")
+}
+
+// TestPromptBuilder_RendersPhaseStatusSnapshot verifies that when
+// PriorPhasesStatus is non-empty the prompt contains a "# Phase Status
+// Snapshot" section listing each prior phase and its terminal status.
+// This is the factual evidence the LLM needs so it does not have to
+// search for it locally.
+func TestPromptBuilder_RendersPhaseStatusSnapshot(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase:           phase.PhaseApply,
+		ChangeName:      "feat-x",
+		Project:         "proj",
+		TaskDescription: "apply",
+		PriorPhasesStatus: map[phase.PhaseType]string{
+			phase.PhaseProposal: "done",
+			phase.PhaseSpec:     "done",
+			phase.PhaseTasks:    "done",
+		},
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "# Phase Status Snapshot",
+		"snapshot section must be rendered when PriorPhasesStatus is non-empty")
+	require.Contains(t, out, "proposal: done")
+	require.Contains(t, out, "spec: done")
+	require.Contains(t, out, "tasks: done")
+	require.Contains(t, out, "(verified by orchestrator")
+}
+
+// TestPromptBuilder_OmitsPhaseStatusSnapshot_WhenEmpty verifies the
+// snapshot section is omitted when PriorPhasesStatus is nil or empty so
+// init/explore prompts (no prior phases) stay clean.
+func TestPromptBuilder_OmitsPhaseStatusSnapshot_WhenEmpty(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseExplore, ChangeName: "x", Project: "y", TaskDescription: "explore",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "# Phase Status Snapshot")
+}
+
+// TestPromptBuilder_PhaseStatusSnapshot_StableOrder verifies the snapshot
+// renders phases in canonical SDD order (init → explore → proposal → spec
+// → design → tasks → apply → verify → archive) instead of Go map
+// iteration order, so the prompt text stays deterministic across runs
+// (important for prompt_sha256 dedup in agent_sessions).
+func TestPromptBuilder_PhaseStatusSnapshot_StableOrder(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseApply, ChangeName: "x", Project: "y", TaskDescription: "apply",
+		PriorPhasesStatus: map[phase.PhaseType]string{
+			phase.PhaseTasks:    "done",
+			phase.PhaseProposal: "done_with_concerns",
+			phase.PhaseSpec:     "done",
+		},
+	})
+	require.NoError(t, err)
+	idxProposal := strings.Index(out, "proposal:")
+	idxSpec := strings.Index(out, "spec:")
+	idxTasks := strings.Index(out, "tasks:")
+	require.Less(t, idxProposal, idxSpec, "proposal must come before spec")
+	require.Less(t, idxSpec, idxTasks, "spec must come before tasks")
+	require.Contains(t, out, "proposal: done_with_concerns")
+}
+
+// ---------------------------------------------------------------------------
+// Spec #51 continued: remove redundant prior-phase hard-gates that overlap
+// with the orchestrator's transition validation + Phase Status Snapshot.
+// ---------------------------------------------------------------------------
+
+// TestPromptBuilder_SpecPhase_OmitsPriorPhaseHardGate verifies that the
+// spec prompt no longer asks the agent to verify proposal is DONE — the
+// orchestrator already blocks the spec→tasks transition unless proposal
+// reached a terminal advance-allowed status, and the Phase Status Snapshot
+// makes the state visible. Pre-fix the literal "DO NOT proceed if proposal
+// is not DONE" caused gpt-5.4 to block spec with confidence=0.96.
+func TestPromptBuilder_SpecPhase_OmitsPriorPhaseHardGate(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseSpec, ChangeName: "x", Project: "y", TaskDescription: "spec",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "DO NOT proceed if proposal is not DONE",
+		"spec hard-gate must NOT re-verify proposal state — orchestrator enforces the transition")
+	require.NotContains(t, out, "if proposal is not DONE")
+	// The placeholder gate must remain — that's a SPEC-OUTPUT discipline.
+	require.Contains(t, out, "placeholders")
+}
+
+// TestPromptBuilder_ArchivePhase_OmitsPriorPhaseHardGate verifies that
+// the archive prompt no longer asks the agent to verify the verify phase
+// is DONE — the orchestrator already blocks the archive transition until
+// verify is done, and the Phase Status Snapshot exposes the state.
+func TestPromptBuilder_ArchivePhase_OmitsPriorPhaseHardGate(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseArchive, ChangeName: "x", Project: "y", TaskDescription: "archive",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, out, "DO NOT archive without verify DONE",
+		"archive hard-gate must NOT re-verify the verify phase — orchestrator enforces the transition")
+}
+
+// TestPromptBuilder_VerifyPhase_KeepsOutputHardGate verifies that the
+// verify phase keeps its OUTPUT discipline gate ("don't claim DONE without
+// running tests and citing output") — that's a gate on the agent's own
+// work, not a redundant prior-phase check, so it stays.
+func TestPromptBuilder_VerifyPhase_KeepsOutputHardGate(t *testing.T) {
+	pb := discipline.NewPromptBuilder()
+	out, err := pb.Build(discipline.PromptInput{
+		Phase: phase.PhaseVerify, ChangeName: "x", Project: "y", TaskDescription: "verify",
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "running tests",
+		"verify output-discipline gate must remain — it constrains the verify agent's own output")
+}
+
 // sanity: ensure `strings` is referenced explicitly (lint hygiene)
 var _ = strings.Contains

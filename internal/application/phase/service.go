@@ -290,8 +290,13 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 
 	// Apply phase delegates to the parallel coordination ApplyExecutor.
 	// Iron Laws + envelope persistence still happen here so the contract
-	// stays uniform across phase types.
+	// stays uniform across phase types. Spec #51: pre-load the prior-
+	// phase status snapshot and stuff it into the input so the apply
+	// executor can pass it down to each implement-agent prompt.
 	if p.Type() == phase.PhaseApply && s.d.ApplyExecutor != nil {
+		if prior, err := s.loadPriorPhases(ctx, c.ID()); err == nil {
+			in.PriorPhasesStatus = phasesPredicateToStatusMap(prior)
+		}
 		s.runApplyPhase(ctx, c, p, in)
 		return
 	}
@@ -316,15 +321,18 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 
 	// Step 8: build prompt. Parse tests_required from ContextOverrides so
 	// the apply TDD hard-gate (Spec #46) is conditional on the change's scope.
+	// Spec #51: pass the orchestrator-verified prior-phase status map so
+	// the LLM sees factual evidence instead of having to search for it.
 	testsRequired := parseScopeTestsRequired(in.ContextOverrides)
 	priorCtx := s.buildPriorContext(ctx, c)
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
-		Phase:           p.Type(),
-		ChangeName:      c.Name(),
-		Project:         c.Project(),
-		PriorContext:    priorCtx,
-		TaskDescription: in.TaskDescription,
-		TestsRequired:   testsRequired,
+		Phase:             p.Type(),
+		ChangeName:        c.Name(),
+		Project:           c.Project(),
+		PriorContext:      priorCtx,
+		TaskDescription:   in.TaskDescription,
+		TestsRequired:     testsRequired,
+		PriorPhasesStatus: phasesPredicateToStatusMap(prior),
 	})
 	if err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("prompt build: %v", err))
@@ -498,8 +506,21 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 
 	cidLocal := c.ID()
 	pidLocal := p.ID()
-	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventTypeForStatus(p.Status()), env)
-	s.publishEvent(ctx, p.ID(), eventTypeForStatus(p.Status()), inbound.PhaseCompletedFromApplyPayload{
+	eventType := eventTypeForStatus(p.Status())
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventType, env)
+
+	// Spec #51 — when apply terminates BLOCKED emit the enriched
+	// PhaseFailedPayload (same shape as the single-agent failure path)
+	// so operators see the actual reason via SSE instead of the slim
+	// {envelope_status, envelope_confidence} pair. Non-blocked
+	// terminations keep the slim payload to preserve the existing
+	// contract for clients that don't need the extra fields.
+	if env.Status == envelope.StatusBlocked {
+		s.publishEvent(ctx, p.ID(), eventType,
+			buildApplyFailedPayload(p.ID(), p.Type(), s.d.Clock.Now().UTC(), env))
+		return
+	}
+	s.publishEvent(ctx, p.ID(), eventType, inbound.PhaseCompletedFromApplyPayload{
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	})
@@ -950,6 +971,21 @@ func actionForPhase(pt phase.PhaseType) discipline.Action {
 	default:
 		return discipline.ActionStartPhase
 	}
+}
+
+// phasesPredicateToStatusMap projects a loadPriorPhases result into the
+// stringified status map consumed by discipline.PromptInput.PriorPhasesStatus.
+// Returns nil when no prior phases exist (init / explore) so the prompt
+// builder skips rendering the snapshot block entirely. Spec #51.
+func phasesPredicateToStatusMap(prior map[phase.PhaseType]discipline.PhasePredicate) map[phase.PhaseType]string {
+	if len(prior) == 0 {
+		return nil
+	}
+	out := make(map[phase.PhaseType]string, len(prior))
+	for pt, pp := range prior {
+		out[pt] = string(pp.Status)
+	}
+	return out
 }
 
 func eventTypeForStatus(s phase.PhaseStatus) string {
