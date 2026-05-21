@@ -95,6 +95,8 @@ func bridgeResultJSON(t *testing.T, status, errClass, errMsg, stdout, stderr str
 }
 
 // newDispatcher creates a Dispatcher pointed at the given server URL.
+// Provider is set to "opencode" so existing tests that do not test the
+// provider field keep working after BUG-6b added the empty-provider guard.
 func newDispatcher(srv *httptest.Server) *mcpdispatcher.Dispatcher {
 	return mcpdispatcher.New(srv.Client(), mcpdispatcher.Config{
 		BridgeURL: srv.URL,
@@ -103,6 +105,7 @@ func newDispatcher(srv *httptest.Server) *mcpdispatcher.Dispatcher {
 		Transport: "streamable-http",
 		TimeoutMS: 5000,
 		Suggested: 4,
+		Provider:  "opencode",
 	})
 }
 
@@ -205,6 +208,7 @@ func TestDispatch_BridgeUnreachable_TransportError(t *testing.T) {
 		BridgeURL: "http://127.0.0.1:19999", // nothing listening
 		Token:     testToken,
 		TimeoutMS: 200,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{
 		Prompt: "hi",
@@ -224,6 +228,7 @@ func TestDispatch_InvalidToken_AuthError(t *testing.T) {
 		Token:     "bad-token",
 		Origin:    "http://localhost",
 		TimeoutMS: 5000,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
 	require.Error(t, err)
@@ -242,6 +247,7 @@ func TestDispatch_Forbidden_AuthError(t *testing.T) {
 		BridgeURL: srv.URL,
 		Token:     testToken,
 		TimeoutMS: 5000,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
 	require.Error(t, err)
@@ -260,6 +266,7 @@ func TestDispatch_HTTP500_TransportError(t *testing.T) {
 		BridgeURL: srv.URL,
 		Token:     testToken,
 		TimeoutMS: 5000,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
 	require.Error(t, err)
@@ -324,6 +331,7 @@ func TestDispatch_MalformedJSONRPC_NoBodyCrash(t *testing.T) {
 		BridgeURL: srv.URL,
 		Token:     testToken,
 		TimeoutMS: 5000,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
 	require.Error(t, err)
@@ -351,6 +359,7 @@ func TestDispatch_Timeout_TransportError(t *testing.T) {
 		BridgeURL: srv.URL,
 		Token:     testToken,
 		TimeoutMS: 5000,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(ctx, outbound.DispatchRequest{Prompt: "hi"})
 	require.Error(t, err)
@@ -391,6 +400,7 @@ func TestDispatch_ModelByPhase(t *testing.T) {
 		TimeoutMS:    5000,
 		DefaultModel: "global-model",
 		ModelByPhase: map[string]string{"apply": "apply-model"},
+		Provider:     "opencode",
 	})
 
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{
@@ -416,6 +426,7 @@ func TestDispatch_DefaultModel(t *testing.T) {
 		Origin:       "http://localhost",
 		TimeoutMS:    5000,
 		DefaultModel: "default-model",
+		Provider:     "opencode",
 	})
 
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{
@@ -423,6 +434,145 @@ func TestDispatch_DefaultModel(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "default-model", capturedModel)
+}
+
+// M1 (BUG-6b): Dispatch injects provider arg into every agent.run call.
+func TestDispatch_InjectsProviderArg(t *testing.T) {
+	var capturedProvider string
+	srv := fakeBridge(t, func(tool string, args map[string]any) (string, int) {
+		require.Equal(t, "agent.run", tool)
+		if p, ok := args["provider"].(string); ok {
+			capturedProvider = p
+		}
+		envelope := map[string]any{"status": "ok"}
+		return bridgeResultJSON(t, "ok", "", "", "stdout", "", envelope, 0, 10), 0
+	})
+
+	d := mcpdispatcher.New(srv.Client(), mcpdispatcher.Config{
+		BridgeURL: srv.URL,
+		Token:     testToken,
+		Origin:    "http://localhost",
+		TimeoutMS: 5000,
+		Provider:  "opencode",
+	})
+
+	result, err := d.Dispatch(context.Background(), outbound.DispatchRequest{
+		Prompt:       "test prompt",
+		WorktreePath: "/tmp/worktree",
+		TimeoutMS:    5000,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "opencode", capturedProvider,
+		"provider arg must be forwarded in tools/call arguments (M1)")
+}
+
+// M1 (BUG-6b): Dispatch also preserves existing required fields alongside provider.
+func TestDispatch_InjectsProviderArg_AllRequiredFieldsPresent(t *testing.T) {
+	type capturedArgs struct {
+		Provider       string
+		Prompt         string
+		CWD            string
+		TimeoutMS      float64
+		OutputContract string
+	}
+	var got capturedArgs
+
+	srv := fakeBridge(t, func(tool string, args map[string]any) (string, int) {
+		got.Provider, _ = args["provider"].(string)
+		got.Prompt, _ = args["prompt"].(string)
+		got.CWD, _ = args["cwd"].(string)
+		got.TimeoutMS, _ = args["timeout_ms"].(float64)
+		got.OutputContract, _ = args["output_contract"].(string)
+		envelope := map[string]any{"status": "ok"}
+		return bridgeResultJSON(t, "ok", "", "", "", "", envelope, 0, 5), 0
+	})
+
+	d := mcpdispatcher.New(srv.Client(), mcpdispatcher.Config{
+		BridgeURL: srv.URL,
+		Token:     testToken,
+		Origin:    "http://localhost",
+		TimeoutMS: 5000,
+		Provider:  "opencode",
+	})
+
+	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{
+		Prompt:       "hello world",
+		WorktreePath: "/repo",
+		TimeoutMS:    3000,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "opencode", got.Provider, "provider must be set")
+	assert.Equal(t, "hello world", got.Prompt, "prompt must be forwarded")
+	assert.Equal(t, "/repo", got.CWD, "cwd must be forwarded")
+	assert.Equal(t, float64(3000), got.TimeoutMS, "timeout_ms must be forwarded")
+	assert.Equal(t, "sophia.envelope.v1", got.OutputContract, "output_contract must be set")
+}
+
+// M3 (BUG-6b): Contract test — fake bridge asserts provider in agent.run args
+// and returns a canned bridgeResult; dispatcher must return non-nil DispatchResult.
+func TestDispatch_Contract_FakeBridge_SeesProvider(t *testing.T) {
+	cannedEnvelope := map[string]any{
+		"status":     "ok",
+		"phase_type": "explore",
+		"artifacts":  []string{"output.md"},
+	}
+	var bridgeSeenProvider string
+
+	srv := fakeBridge(t, func(tool string, args map[string]any) (string, int) {
+		require.Equal(t, "agent.run", tool,
+			"contract: only agent.run should be called in a Dispatch")
+		// Record what the bridge observes — this is the contract assertion.
+		bridgeSeenProvider, _ = args["provider"].(string)
+		return bridgeResultJSON(t, "ok", "", "", "agent output", "", cannedEnvelope, 0, 250), 0
+	})
+
+	d := mcpdispatcher.New(srv.Client(), mcpdispatcher.Config{
+		BridgeURL: srv.URL,
+		Token:     testToken,
+		Origin:    "http://localhost",
+		TimeoutMS: 5000,
+		Provider:  "opencode",
+	})
+
+	result, err := d.Dispatch(context.Background(), outbound.DispatchRequest{
+		Prompt:    "e2e validate: respond OK",
+		PhaseType: "explore",
+		TimeoutMS: 5000,
+	})
+
+	// Contract: bridge must have seen the provider.
+	assert.Equal(t, "opencode", bridgeSeenProvider,
+		"contract: fake bridge must observe arguments.provider == 'opencode' (M3)")
+
+	// Dispatcher must return a non-nil result without error.
+	require.NoError(t, err, "contract: Dispatch must succeed when fake bridge responds 200 ok (M3)")
+	require.NotNil(t, result, "contract: DispatchResult must be non-nil (M3)")
+	assert.Equal(t, "mcp", result.AdapterID, "contract: AdapterID must be 'mcp'")
+	assert.NotNil(t, result.EnvelopeRaw, "contract: EnvelopeRaw must be present")
+
+	var decodedEnv map[string]any
+	require.NoError(t, json.Unmarshal(result.EnvelopeRaw, &decodedEnv))
+	assert.Equal(t, "ok", decodedEnv["status"])
+}
+
+// M1-fail: Dispatch returns provider_error when Provider is empty (guard).
+func TestDispatch_EmptyProvider_ReturnsProviderError(t *testing.T) {
+	srv := fakeBridge(t, func(_ string, _ map[string]any) (string, int) {
+		return "", 0 // should not be called
+	})
+	d := mcpdispatcher.New(srv.Client(), mcpdispatcher.Config{
+		BridgeURL: srv.URL,
+		Token:     testToken,
+		TimeoutMS: 5000,
+		Provider:  "", // intentionally empty
+	})
+
+	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, outbound.ErrDispatchFailed))
+	assert.Contains(t, err.Error(), "provider_error")
+	assert.Contains(t, err.Error(), "ErrProviderEmpty")
 }
 
 // MCP error codes in JSON-RPC response → transport_error
@@ -450,6 +600,7 @@ func TestDispatch_JSONRPCErrorCode(t *testing.T) {
 		BridgeURL: srv.URL,
 		Token:     testToken,
 		TimeoutMS: 5000,
+		Provider:  "opencode",
 	})
 	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
 	require.Error(t, err)

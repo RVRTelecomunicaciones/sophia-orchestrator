@@ -143,6 +143,24 @@ func TestLoad_ExplicitOpenCodeProvider(t *testing.T) {
 	assert.Equal(t, "opencode", cfg.Dispatcher.Provider)
 }
 
+// D4: SOPHIA_MCP_PROVIDER loads into MCPConfig.Provider (BUG-6b)
+func TestLoad_MCPProvider_LoadsFromEnv(t *testing.T) {
+	minimalEnv(t, "SOPHIA_MCP_PROVIDER", "opencode")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "opencode", cfg.Dispatcher.MCP.Provider,
+		"Provider must load from SOPHIA_MCP_PROVIDER")
+}
+
+// D4: SOPHIA_MCP_PROVIDER defaults to empty string when not set.
+func TestLoad_MCPProvider_DefaultsEmpty(t *testing.T) {
+	minimalEnv(t) // no SOPHIA_MCP_PROVIDER
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.Dispatcher.MCP.Provider,
+		"Provider must default to empty string when SOPHIA_MCP_PROVIDER is unset")
+}
+
 // MCP per-phase model overrides load correctly (SOPHIA_MCP_MODEL_<PHASE>)
 func TestLoad_MCPModelByPhase(t *testing.T) {
 	minimalEnv(t,

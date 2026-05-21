@@ -214,6 +214,11 @@ type MCPConfig struct {
 	// Origin is the HTTP Origin header value sent to the bridge.
 	// Default "http://localhost". Loaded from SOPHIA_MCP_ORIGIN.
 	Origin string
+	// Provider is the upstream provider name forwarded as the required
+	// "provider" argument to agent.run (e.g. "opencode"). Required when
+	// provider=mcp. Bootstrap fails fast when MCP is selected and this
+	// is empty. Loaded from SOPHIA_MCP_PROVIDER.
+	Provider string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -310,6 +315,7 @@ func Load() (Config, error) {
 	c.Dispatcher.MCP.Transport = envStr("SOPHIA_MCP_TRANSPORT", "streamable-http")
 	c.Dispatcher.MCP.TimeoutMS = envInt("SOPHIA_MCP_TIMEOUT_MS", 300_000)
 	c.Dispatcher.MCP.Origin = envStr("SOPHIA_MCP_ORIGIN", "http://localhost")
+	c.Dispatcher.MCP.Provider = envStr("SOPHIA_MCP_PROVIDER", "")
 	c.Dispatcher.MCP.DefaultModel = envStr("SOPHIA_MCP_MODEL", c.Dispatcher.MCP.DefaultModel)
 	c.Dispatcher.MCP.ModelByPhase = loadMCPModelByPhase()
 	if allowlist := envStr("SOPHIA_MCP_PROVIDER_ALLOWLIST", ""); allowlist != "" {

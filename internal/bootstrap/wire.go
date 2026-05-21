@@ -53,6 +53,26 @@ type App struct {
 func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	logger := newLogger(cfg)
 
+	// MCP fail-fast guards run BEFORE pool.Open so they can be tested
+	// without a real DB. These checks mirror the existing BridgeURL guard.
+	{
+		mcpSelected := cfg.Dispatcher.Provider == "mcp"
+		if !mcpSelected {
+			for _, p := range cfg.Dispatcher.ProviderByPhase {
+				if p == "mcp" {
+					mcpSelected = true
+					break
+				}
+			}
+		}
+		if mcpSelected && cfg.Dispatcher.MCP.BridgeURL == "" {
+			return nil, fmt.Errorf("bootstrap: SOPHIA_DISPATCHER_PROVIDER=mcp requires SOPHIA_MCP_BRIDGE_URL to be set")
+		}
+		if mcpSelected && cfg.Dispatcher.MCP.Provider == "" {
+			return nil, fmt.Errorf("bootstrap: SOPHIA_DISPATCHER_PROVIDER=mcp (or per-phase override) requires SOPHIA_MCP_PROVIDER to be set")
+		}
+	}
+
 	pool, err := dbpkg.Open(ctx, dbpkg.Config{
 		URL:      cfg.DB.URL,
 		MaxConns: cfg.DB.MaxConns,
@@ -130,11 +150,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		dispatcherFactory.Register("aider", aiderAdapter)
 	}
 	// MCP host-bridge dispatcher — opt-in: registered ONLY when BridgeURL
-	// is configured. Fail-fast when provider=mcp but BridgeURL is empty.
-	if cfg.Dispatcher.Provider == "mcp" && cfg.Dispatcher.MCP.BridgeURL == "" {
-		pool.Close()
-		return nil, fmt.Errorf("bootstrap: SOPHIA_DISPATCHER_PROVIDER=mcp requires SOPHIA_MCP_BRIDGE_URL to be set")
-	}
+	// is configured. Fail-fast guards already ran before pool.Open above.
 	if cfg.Dispatcher.MCP.BridgeURL != "" {
 		mcpAdapter := mcpdispatcher.New(nil, mcpdispatcher.Config{
 			BridgeURL:         cfg.Dispatcher.MCP.BridgeURL,
@@ -145,6 +161,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			ProviderAllowlist: cfg.Dispatcher.MCP.ProviderAllowlist,
 			DefaultModel:      cfg.Dispatcher.MCP.DefaultModel,
 			ModelByPhase:      cfg.Dispatcher.MCP.ModelByPhase,
+			Provider:          cfg.Dispatcher.MCP.Provider,
 		})
 		dispatcherFactory.Register("mcp", mcpAdapter)
 	}

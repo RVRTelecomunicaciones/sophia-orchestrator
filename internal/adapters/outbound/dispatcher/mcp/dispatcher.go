@@ -64,6 +64,11 @@ type Config struct {
 	// ModelByPhase maps a lowercase phase string to a model override.
 	// Same semantics as opencode.Config.ModelByPhase.
 	ModelByPhase map[string]string
+	// Provider is the upstream provider name forwarded as the required
+	// "provider" argument to agent.run (e.g. "opencode"). Set from
+	// SOPHIA_MCP_PROVIDER via bootstrap. Bootstrap fails fast when MCP
+	// is selected and this is empty.
+	Provider string
 	// Suggested is returned by SuggestedMaxConcurrent.
 	// Zero falls back to SuggestedMaxConcurrentDefault.
 	Suggested int
@@ -136,7 +141,14 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 // and maps the response to a DispatchResult. All bridge failure classes
 // are mapped to wrapped outbound.ErrDispatchFailed carrying a failure tag.
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	if d.cfg.Provider == "" {
+		return nil, fmt.Errorf("%w: provider_error: ErrProviderEmpty: SOPHIA_MCP_PROVIDER must be set when using MCP dispatcher",
+			outbound.ErrDispatchFailed)
+	}
+	// provider is set FIRST so it is always present regardless of
+	// subsequent model/phase logic.
 	args := map[string]any{
+		"provider":        d.cfg.Provider,
 		"prompt":          req.Prompt,
 		"cwd":             req.WorktreePath,
 		"timeout_ms":      req.TimeoutMS,
