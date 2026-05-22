@@ -260,6 +260,21 @@ operator attestation before production use.
 The `compose.mcp.yaml` overlay includes a comment block documenting the
 `extra_hosts` line for Linux operators who need it.
 
+### Update 2026-05-21 — Restoration to SDK client
+
+Between 2026-05-20 (this ADR's original acceptance) and 2026-05-21, commit `6777f18`
+removed the `modelcontextprotocol/go-sdk` dependency and reimplemented the dispatcher
+as a raw HTTP/JSON-RPC client. The change (`mcp-e2e-completion`) shipped that detour
+alongside BUG-6a and BUG-6b fixes. E2E validation revealed BUG-7: the bridge enforces
+the MCP `initialize` handshake before accepting any `tools/call`, and the raw client
+skipped it. The `mcp-dispatcher-protocol-rewrite` change restores the SDK client per
+the original decision; the SDK's `client.Connect` handles `initialize` automatically.
+The Auth/Origin headers required by the bridge are injected via a custom
+`http.RoundTripper` wrapped around the `*http.Client` passed into
+`StreamableClientTransport.HTTPClient`. Per-dispatch session lifetime
+(`Connect → CallTool → Close`) is preserved as the V1 default; pooling is a future
+optimisation.
+
 ## References
 
 - ADR-0002: Pluggable dispatcher abstraction
