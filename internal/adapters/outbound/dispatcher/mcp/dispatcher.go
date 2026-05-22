@@ -2,7 +2,7 @@
 // through the sophia-agent-mcp host bridge via MCP Streamable HTTP.
 //
 // The dispatcher is THIN: it shapes the outbound MCP tool call, sends it
-// over HTTP, maps the response to DispatchResult, and translates all
+// via the SDK client, maps the response to DispatchResult, and translates all
 // bridge failure classes into wrapped outbound.ErrDispatchFailed with
 // an explicit failure tag. No policy logic lives here.
 //
@@ -15,6 +15,7 @@
 // V1 constraints:
 //   - Transport: Streamable HTTP only (stdio deferred to V2).
 //   - Tools: agent.run and agent.health.
+//   - Per-dispatch session lifecycle (Connect → CallTool → Close). No pooling.
 //   - The dispatcher MUST NOT import anything from sophia-agent-mcp module.
 package mcp
 
@@ -22,11 +23,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
@@ -84,14 +86,32 @@ func DefaultConfig() Config {
 	}
 }
 
-// Dispatcher implements outbound.AgentDispatcher for the MCP host-bridge.
-type Dispatcher struct {
-	cfg        Config
-	httpClient *http.Client
+// sdkSession is the minimal surface the dispatcher needs from an SDK
+// ClientSession. Tests substitute fakeSession; production uses the real
+// *sdkmcp.ClientSession returned by client.Connect.
+type sdkSession interface {
+	CallTool(ctx context.Context, params *sdkmcp.CallToolParams) (*sdkmcp.CallToolResult, error)
+	Close() error
 }
 
-// New constructs a Dispatcher. httpClient may be nil; a default client
-// with a 5-minute timeout is created automatically.
+// sessionOpener opens a new MCP session for a single dispatch or health-check.
+// The real implementation wraps StreamableClientTransport + client.Connect.
+// Tests inject a fake opener that returns a fakeSession.
+type sessionOpener func(ctx context.Context) (sdkSession, error)
+
+// Dispatcher implements outbound.AgentDispatcher for the MCP host-bridge.
+type Dispatcher struct {
+	cfg  Config
+	open sessionOpener // default: real SDK opener; tests inject fakes
+}
+
+// New constructs a Dispatcher. httpClient may be nil; a default client with a
+// 5-minute timeout is created automatically. The client is wrapped with
+// authRoundTripper so every SDK HTTP request carries Authorization and Origin
+// headers.
+//
+// The constructor signature New(httpClient *http.Client, cfg Config) is stable
+// (unchanged from before the rewrite) — wire.go requires no edits.
 func New(httpClient *http.Client, cfg Config) *Dispatcher {
 	if cfg.Transport == "" {
 		cfg.Transport = "streamable-http"
@@ -105,12 +125,29 @@ func New(httpClient *http.Client, cfg Config) *Dispatcher {
 	if cfg.Suggested <= 0 {
 		cfg.Suggested = SuggestedMaxConcurrentDefault
 	}
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: time.Duration(cfg.TimeoutMS) * time.Millisecond,
-		}
+
+	// Wrap the caller-supplied HTTP client with authRoundTripper so every
+	// SDK HTTP request carries Authorization and Origin headers.
+	wrapped := wrapHTTPClient(httpClient, cfg.Token, cfg.Origin)
+
+	sdkClient := sdkmcp.NewClient(
+		&sdkmcp.Implementation{Name: "sophia-orchestator", Version: "v2.1"},
+		nil,
+	)
+
+	// Capture cfg and wrapped client into the opener closure.
+	cfgSnapshot := cfg
+	return &Dispatcher{
+		cfg: cfgSnapshot,
+		open: func(ctx context.Context) (sdkSession, error) {
+			transport := &sdkmcp.StreamableClientTransport{
+				Endpoint:             strings.TrimRight(cfgSnapshot.BridgeURL, "/") + "/mcp",
+				HTTPClient:           wrapped,
+				DisableStandaloneSSE: true, // per-dispatch sessions; no server-push needed
+			}
+			return sdkClient.Connect(ctx, transport, nil)
+		},
 	}
-	return &Dispatcher{cfg: cfg, httpClient: httpClient}
 }
 
 // Provider returns session.ProviderMCP.
@@ -122,11 +159,10 @@ func (d *Dispatcher) SuggestedMaxConcurrent() int { return d.cfg.Suggested }
 // HealthCheck calls agent.health on the bridge and returns nil if at least
 // one provider is installed and authenticated; non-nil otherwise.
 func (d *Dispatcher) HealthCheck(ctx context.Context) error {
-	resp, err := d.callTool(ctx, "agent.health", map[string]any{})
+	resp, err := d.callSDK(ctx, "agent.health", map[string]any{})
 	if err != nil {
 		return fmt.Errorf("mcp HealthCheck: %w", err)
 	}
-	// Bridge returns {"status":"ok","providers":[...]} or {"status":"error",...}.
 	if resp.Status != "ok" {
 		msg := resp.ErrorMsg
 		if msg == "" {
@@ -137,16 +173,20 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// Dispatch builds an agent.run MCP tool call, sends it to the bridge,
-// and maps the response to a DispatchResult. All bridge failure classes
-// are mapped to wrapped outbound.ErrDispatchFailed carrying a failure tag.
+// Dispatch builds an agent.run MCP tool call, sends it to the bridge via the
+// SDK client, and maps the response to a DispatchResult. All bridge failure
+// classes are mapped to wrapped outbound.ErrDispatchFailed carrying a failure tag.
+//
+// BUG-6b guard: if cfg.Provider is empty the dispatcher returns provider_error
+// BEFORE opening any SDK session (Q4).
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
 	if d.cfg.Provider == "" {
 		return nil, fmt.Errorf("%w: provider_error: ErrProviderEmpty: SOPHIA_MCP_PROVIDER must be set when using MCP dispatcher",
 			outbound.ErrDispatchFailed)
 	}
+
 	// provider is set FIRST so it is always present regardless of
-	// subsequent model/phase logic.
+	// subsequent model/phase logic (BUG-6b / Q3).
 	args := map[string]any{
 		"provider":        d.cfg.Provider,
 		"prompt":          req.Prompt,
@@ -158,9 +198,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 		args["model"] = model
 	}
 
-	resp, err := d.callTool(ctx, "agent.run", args)
+	resp, err := d.callSDK(ctx, "agent.run", args)
 	if err != nil {
-		// callTool already wrapped with the appropriate tag.
 		return nil, err
 	}
 
@@ -206,33 +245,91 @@ func (d *Dispatcher) modelFor(phaseType string) string {
 	return d.cfg.DefaultModel
 }
 
-// --- MCP JSON-RPC wire types (local, no import from sophia-agent-mcp) ---
+// callSDK opens a per-dispatch SDK session, calls the named tool, closes the
+// session, and decodes the result into a bridgeResult. All SDK and HTTP errors
+// are mapped to the existing error taxonomy.
+//
+// R1 (BUG-7): the SDK's client.Connect handles the MCP initialize handshake
+// automatically before any CallTool, so "method invalid during initialization"
+// cannot originate from this dispatcher.
+func (d *Dispatcher) callSDK(ctx context.Context, tool string, args map[string]any) (*bridgeResult, error) {
+	sess, err := d.open(ctx)
+	if err != nil {
+		return nil, classifyConnectError(err)
+	}
+	defer sess.Close() //nolint:errcheck
 
-// jsonRPCRequest is a minimal JSON-RPC 2.0 request envelope.
-type jsonRPCRequest struct {
-	JSONRPC string `json:"jsonrpc"`
-	ID      int    `json:"id"`
-	Method  string `json:"method"`
-	Params  any    `json:"params"`
+	result, err := sess.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      tool,
+		Arguments: args,
+	})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("%w: transport_error: context: %w",
+				outbound.ErrDispatchFailed, err)
+		}
+		return nil, fmt.Errorf("%w: transport_error: %w",
+			outbound.ErrDispatchFailed, err)
+	}
+
+	// IsError=true → provider_error with the text content as detail.
+	if result.IsError {
+		text := extractTextContent(result)
+		return nil, fmt.Errorf("%w: provider_error: %s",
+			outbound.ErrDispatchFailed, text)
+	}
+
+	// Decode the bridge envelope from the text content.
+	text := extractTextContent(result)
+	if text == "" {
+		return nil, fmt.Errorf("%w: envelope_error: tool result has no text content",
+			outbound.ErrDispatchFailed)
+	}
+	var br bridgeResult
+	if err := json.Unmarshal([]byte(text), &br); err != nil {
+		return nil, fmt.Errorf("%w: envelope_error: decode bridge result: %w",
+			outbound.ErrDispatchFailed, err)
+	}
+	return &br, nil
 }
 
-// toolCallParams is the MCP tools/call params shape.
-type toolCallParams struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+// classifyConnectError maps errors returned by client.Connect (before any
+// CallTool) to the error taxonomy.
+//
+// The SDK at v1.6.0 does not export typed HTTP status errors. When the bridge
+// returns 401 or 403, the SDK error string contains "Unauthorized" or
+// "Forbidden" respectively (see streamable.go checkResponse). String matching
+// is the documented fallback strategy per design §Error Taxonomy Mapping.
+func classifyConnectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%w: transport_error: context: %w",
+			outbound.ErrDispatchFailed, err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "Forbidden") ||
+		strings.Contains(msg, "401") || strings.Contains(msg, "403") {
+		return fmt.Errorf("%w: auth_error: %w",
+			outbound.ErrDispatchFailed, err)
+	}
+	return fmt.Errorf("%w: transport_error: %w",
+		outbound.ErrDispatchFailed, err)
 }
 
-// jsonRPCResponse is the JSON-RPC 2.0 response envelope.
-type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"id"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
-}
-
-type jsonRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+// extractTextContent returns the text from the first TextContent item in a
+// CallToolResult, or the empty string if none is found.
+func extractTextContent(result *sdkmcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, c := range result.Content {
+		if tc, ok := c.(*sdkmcp.TextContent); ok {
+			return tc.Text
+		}
+	}
+	return ""
 }
 
 // bridgeResult is the decoded result payload from a bridge tool call.
@@ -247,141 +344,16 @@ type bridgeResult struct {
 	EnvelopeRaw json.RawMessage `json:"envelope_raw"`
 }
 
-// callTool sends a JSON-RPC tools/call request to the bridge and returns
-// the decoded result. It maps HTTP and framing errors to transport_error,
-// 401/403 to auth_error.
-func (d *Dispatcher) callTool(ctx context.Context, tool string, args map[string]any) (*bridgeResult, error) {
-	rpcReq := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "tools/call",
-		Params: toolCallParams{
-			Name:      tool,
-			Arguments: args,
-		},
-	}
-	body, err := json.Marshal(rpcReq)
-	if err != nil {
-		return nil, fmt.Errorf("%w: transport_error: marshal: %w",
-			outbound.ErrDispatchFailed, err)
-	}
-
-	endpoint := strings.TrimRight(d.cfg.BridgeURL, "/") + "/mcp"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("%w: transport_error: build request: %w",
-			outbound.ErrDispatchFailed, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+d.cfg.Token)
-	if d.cfg.Origin != "" {
-		httpReq.Header.Set("Origin", d.cfg.Origin)
-	}
-	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-
-	httpResp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("%w: transport_error: %w",
-			outbound.ErrDispatchFailed, err)
-	}
-	defer httpResp.Body.Close() //nolint:errcheck
-
-	switch httpResp.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, fmt.Errorf("%w: auth_error: bridge returned HTTP %d",
-			outbound.ErrDispatchFailed, httpResp.StatusCode)
-	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%w: transport_error: bridge returned HTTP %d",
-			outbound.ErrDispatchFailed, httpResp.StatusCode)
-	}
-
-	rawBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: transport_error: read body: %w",
-			outbound.ErrDispatchFailed, err)
-	}
-
-	var rpcResp jsonRPCResponse
-	if err := json.Unmarshal(rawBody, &rpcResp); err != nil {
-		return nil, fmt.Errorf("%w: transport_error: decode JSON-RPC: %w",
-			outbound.ErrDispatchFailed, err)
-	}
-
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("%w: transport_error: JSON-RPC error %d: %s",
-			outbound.ErrDispatchFailed, rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-
-	// MCP wraps tool results in a content array: {"content":[{"type":"text","text":"..."}]}
-	// or the raw tool result directly, depending on SDK version.
-	result, err := extractBridgeResult(rpcResp.Result)
-	if err != nil {
-		return nil, fmt.Errorf("%w: transport_error: decode result: %w",
-			outbound.ErrDispatchFailed, err)
-	}
-	return result, nil
-}
-
-// mcpToolResult is the outer MCP tools/call result shape.
-type mcpToolResult struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	IsError bool `json:"isError"`
-}
-
-// extractBridgeResult decodes the MCP tools/call result envelope.
-// The go-sdk wraps tool results in a {"content":[{"type":"text","text":"<json>"}]} shape.
-func extractBridgeResult(raw json.RawMessage) (*bridgeResult, error) {
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("empty result")
-	}
-
-	var toolResult mcpToolResult
-	if err := json.Unmarshal(raw, &toolResult); err != nil {
-		return nil, fmt.Errorf("decode tool result: %w", err)
-	}
-
-	// Find the text content item.
-	var text string
-	for _, c := range toolResult.Content {
-		if c.Type == "text" {
-			text = c.Text
-			break
-		}
-	}
-	if text == "" {
-		// Fallback: try to decode raw directly as bridgeResult
-		// (some test stubs return it unwrapped).
-		var br bridgeResult
-		if err := json.Unmarshal(raw, &br); err != nil {
-			return nil, fmt.Errorf("no text content in tool result")
-		}
-		return &br, nil
-	}
-
-	var br bridgeResult
-	if err := json.Unmarshal([]byte(text), &br); err != nil {
-		return nil, fmt.Errorf("decode bridge result text: %w", err)
-	}
-	return &br, nil
-}
-
 // parseEnvelopeRaw validates and normalises the envelope_raw JSON from the bridge.
 // Returns an error if the value is not a JSON object.
 func parseEnvelopeRaw(raw json.RawMessage) ([]byte, error) {
-	// Trim whitespace.
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("envelope_raw is empty")
 	}
-	// Must be a JSON object ({...}).
 	if trimmed[0] != '{' {
 		return nil, fmt.Errorf("envelope_raw is not a JSON object (got %q)", string(trimmed[:min(20, len(trimmed))]))
 	}
-	// Validate it parses.
 	var probe map[string]any
 	if err := json.Unmarshal(trimmed, &probe); err != nil {
 		return nil, fmt.Errorf("envelope_raw parse error: %w", err)
