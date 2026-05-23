@@ -56,7 +56,7 @@ type Envelope struct {
 	Confidence       float64         `json:"confidence"`
 	ExecutiveSummary string          `json:"executive_summary"`
 	ArtifactsSaved   []ArtifactRef   `json:"artifacts_saved"`
-	NextRecommended  []string        `json:"next_recommended"`
+	NextRecommended  NextRecommended `json:"next_recommended"`
 	Risks            []Risk          `json:"risks"`
 	Data             json.RawMessage `json:"data"`
 }
