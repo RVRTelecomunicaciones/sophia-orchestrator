@@ -44,6 +44,7 @@ func TestProvider_V1_OnlyOpenCode(t *testing.T) {
 	require.False(t, session.ProviderClaudeCode.IsValidV1())
 	require.False(t, session.ProviderCursor.IsValidV1())
 	require.False(t, session.ProviderGemini.IsValidV1())
+	require.False(t, session.ProviderMCP.IsValidV1(), "mcp is V2.1 — not in V1 gate")
 	require.False(t, session.Provider("nope").IsValidV1())
 }
 
@@ -57,6 +58,7 @@ func TestProvider_IsValid_AllKnown(t *testing.T) {
 	require.True(t, session.ProviderClaudeCode.IsValid())
 	require.True(t, session.ProviderCursor.IsValid())
 	require.True(t, session.ProviderGemini.IsValid())
+	require.True(t, session.ProviderMCP.IsValid(), "mcp shipped V2.1 (mcp-host-bridge)")
 	require.False(t, session.Provider("nope").IsValid())
 }
 

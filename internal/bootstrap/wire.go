@@ -19,6 +19,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/aider"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/factory"
+	mcpdispatcher "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/mcp"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/ollama"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/opencode"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/governance"
@@ -51,6 +52,26 @@ type App struct {
 // Wire constructs the App by composing every concrete dependency.
 func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	logger := newLogger(cfg)
+
+	// MCP fail-fast guards run BEFORE pool.Open so they can be tested
+	// without a real DB. These checks mirror the existing BridgeURL guard.
+	{
+		mcpSelected := cfg.Dispatcher.Provider == "mcp"
+		if !mcpSelected {
+			for _, p := range cfg.Dispatcher.ProviderByPhase {
+				if p == "mcp" {
+					mcpSelected = true
+					break
+				}
+			}
+		}
+		if mcpSelected && cfg.Dispatcher.MCP.BridgeURL == "" {
+			return nil, fmt.Errorf("bootstrap: SOPHIA_DISPATCHER_PROVIDER=mcp requires SOPHIA_MCP_BRIDGE_URL to be set")
+		}
+		if mcpSelected && cfg.Dispatcher.MCP.Provider == "" {
+			return nil, fmt.Errorf("bootstrap: SOPHIA_DISPATCHER_PROVIDER=mcp (or per-phase override) requires SOPHIA_MCP_PROVIDER to be set")
+		}
+	}
 
 	pool, err := dbpkg.Open(ctx, dbpkg.Config{
 		URL:      cfg.DB.URL,
@@ -127,6 +148,22 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			ModelByPhase: cfg.Dispatcher.Aider.ModelByPhase,
 		})
 		dispatcherFactory.Register("aider", aiderAdapter)
+	}
+	// MCP host-bridge dispatcher — opt-in: registered ONLY when BridgeURL
+	// is configured. Fail-fast guards already ran before pool.Open above.
+	if cfg.Dispatcher.MCP.BridgeURL != "" {
+		mcpAdapter := mcpdispatcher.New(nil, mcpdispatcher.Config{
+			BridgeURL:         cfg.Dispatcher.MCP.BridgeURL,
+			Token:             cfg.Dispatcher.MCP.Token,
+			Origin:            cfg.Dispatcher.MCP.Origin,
+			Transport:         cfg.Dispatcher.MCP.Transport,
+			TimeoutMS:         cfg.Dispatcher.MCP.TimeoutMS,
+			ProviderAllowlist: cfg.Dispatcher.MCP.ProviderAllowlist,
+			DefaultModel:      cfg.Dispatcher.MCP.DefaultModel,
+			ModelByPhase:      cfg.Dispatcher.MCP.ModelByPhase,
+			Provider:          cfg.Dispatcher.MCP.Provider,
+		})
+		dispatcherFactory.Register("mcp", mcpAdapter)
 	}
 	// Wrap factory in an AgentDispatcher facade so service.go +
 	// teamlead.go keep talking to a single dispatcher instance.
