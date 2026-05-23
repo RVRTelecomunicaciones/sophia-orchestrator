@@ -104,13 +104,18 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
   "confidence": 0.0,
   "executive_summary": "...",
   "artifacts_saved": [{"topic_key": "sdd/%s/%s", "type": %q}],
-  "next_recommended": [],
+  "next_recommended": ["short string suggestion 1", "short string suggestion 2"],
   "risks": [{"description": "...", "level": "low|medium|high"}],
   "data": %s
 }`, in.Phase, in.ChangeName, in.Project, in.ChangeName, in.Phase, in.Phase, dataSchema)
 	sb.WriteString("\n```\n\n")
 	fmt.Fprintf(&sb, "Confidence threshold for this phase: %.2f. ", in.Phase.ConfidenceThreshold())
-	sb.WriteString("Status MUST be one of the four enum values.\n")
+	sb.WriteString("Status MUST be one of the four enum values. ")
+	// Spec #57: gpt-5.4 in smoke v4 emitted next_recommended as an
+	// array of objects which failed envelope validation. The validator
+	// now coerces objects to strings, but pin the expected shape in
+	// the prompt so well-behaved models keep emitting plain strings.
+	sb.WriteString("next_recommended MUST be a JSON array of plain strings, not objects.\n")
 
 	return sb.String(), nil
 }
