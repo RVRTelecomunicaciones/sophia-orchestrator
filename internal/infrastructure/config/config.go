@@ -219,6 +219,14 @@ type MCPConfig struct {
 	// provider=mcp. Bootstrap fails fast when MCP is selected and this
 	// is empty. Loaded from SOPHIA_MCP_PROVIDER.
 	Provider string
+	// DefaultCWD is the absolute host directory the dispatcher
+	// substitutes for any DispatchRequest whose WorktreePath is empty
+	// or ".". Empty preserves legacy behaviour. Loaded from
+	// SOPHIA_MCP_DEFAULT_CWD. See Spec #60 (BUG-14) — bridge cwd
+	// allowlist is exact-match so without a permitted absolute path
+	// here, all pre-apply phases (which run without a worktree) get
+	// rejected by the bridge with cwd_not_allowed.
+	DefaultCWD string
 }
 
 // SpawnConfig tunes the SpawnGovernor.
@@ -316,6 +324,7 @@ func Load() (Config, error) {
 	c.Dispatcher.MCP.TimeoutMS = envInt("SOPHIA_MCP_TIMEOUT_MS", 300_000)
 	c.Dispatcher.MCP.Origin = envStr("SOPHIA_MCP_ORIGIN", "http://localhost")
 	c.Dispatcher.MCP.Provider = envStr("SOPHIA_MCP_PROVIDER", "")
+	c.Dispatcher.MCP.DefaultCWD = envStr("SOPHIA_MCP_DEFAULT_CWD", c.Dispatcher.MCP.DefaultCWD)
 	c.Dispatcher.MCP.DefaultModel = envStr("SOPHIA_MCP_MODEL", c.Dispatcher.MCP.DefaultModel)
 	c.Dispatcher.MCP.ModelByPhase = loadMCPModelByPhase()
 	if allowlist := envStr("SOPHIA_MCP_PROVIDER_ALLOWLIST", ""); allowlist != "" {

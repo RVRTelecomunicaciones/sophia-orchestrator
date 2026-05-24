@@ -69,6 +69,15 @@ services:
       # is set. The bridge must have this provider in its provider_allowlist.
       SOPHIA_MCP_PROVIDER: "opencode"
 
+      # Default working directory the dispatcher forwards to the bridge
+      # whenever the phase has no worktree (explore/proposal/spec/tasks/
+      # verify/archive — apply provides its own absolute worktree path).
+      # MUST be a host path the bridge's cwd_allowlist permits exactly.
+      # Without this the bridge resolves the "." sentinel against its own
+      # pwd and rejects with `provider_error: cwd_not_allowed` (Spec #60).
+      # Override per host as needed.
+      SOPHIA_MCP_DEFAULT_CWD: "${SOPHIA_MCP_DEFAULT_CWD:-/Users/russell/Documents/2026}"
+
       # Default model forwarded to the bridge for phases without a specific
       # model override. Must be reachable by the host provider CLI.
       SOPHIA_MCP_MODEL: "openai/gpt-5.4"

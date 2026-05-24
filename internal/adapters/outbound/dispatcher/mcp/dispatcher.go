@@ -71,6 +71,18 @@ type Config struct {
 	// SOPHIA_MCP_PROVIDER via bootstrap. Bootstrap fails fast when MCP
 	// is selected and this is empty.
 	Provider string
+	// DefaultCWD is the absolute host-side working directory the
+	// dispatcher substitutes for any DispatchRequest whose
+	// WorktreePath is empty or "." (phases that run without a
+	// worktree — explore/proposal/spec/tasks/verify/archive). Empty
+	// keeps legacy behaviour: forward the literal "." which the
+	// bridge then resolves against its own pwd. Spec #60 (BUG-14)
+	// rationale: the bridge's cwd allowlist is exact-match and
+	// usually does NOT contain the bridge pwd, so forwarding "."
+	// caused `provider_error: cwd_not_allowed` on every pre-apply
+	// phase. Set this to a path the bridge's cwd_allowlist permits.
+	// Loaded from SOPHIA_MCP_DEFAULT_CWD via bootstrap.
+	DefaultCWD string
 	// Suggested is returned by SuggestedMaxConcurrent.
 	// Zero falls back to SuggestedMaxConcurrentDefault.
 	Suggested int
@@ -190,7 +202,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	args := map[string]any{
 		"provider":        d.cfg.Provider,
 		"prompt":          req.Prompt,
-		"cwd":             req.WorktreePath,
+		"cwd":             resolveCWDForBridge(req.WorktreePath, d.cfg.DefaultCWD),
 		"timeout_ms":      req.TimeoutMS,
 		"output_contract": "sophia.envelope.v1",
 	}
@@ -232,6 +244,29 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 		DurationMS:  resp.DurationMS,
 		AdapterID:   "mcp",
 	}, nil
+}
+
+// resolveCWDForBridge picks the cwd to forward to the bridge. When the
+// caller's WorktreePath is the relative-cwd sentinel ("" or "."), the
+// substitution returns defaultCWD so the bridge receives an absolute,
+// allowlisted host directory. Any other value passes through unchanged
+// so apply-phase callers (which always provide an absolute worktree)
+// keep working without surprise rewrites.
+//
+// Spec #60 (BUG-14) — the bridge's cwd allowlist is exact-match. If
+// defaultCWD is empty we keep the legacy behaviour (forward "."), which
+// lets the bridge resolve against its own pwd; this is what every
+// pre-fix smoke did and what unit tests that don't exercise BUG-14
+// expect. Operators wire SOPHIA_MCP_DEFAULT_CWD to a permitted host
+// path in compose.mcp.yaml.
+func resolveCWDForBridge(worktreePath, defaultCWD string) string {
+	if defaultCWD == "" {
+		return worktreePath
+	}
+	if worktreePath == "" || worktreePath == "." {
+		return defaultCWD
+	}
+	return worktreePath
 }
 
 // modelFor returns the model for the given phase, following the same
