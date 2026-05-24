@@ -13,7 +13,6 @@
 package opencode
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -201,7 +200,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 		)
 	}
 
-	envRaw := extractLastFencedJSON(receipt.Stdout)
+	envRaw := extractEnvelopeRaw(receipt.Stdout)
 	return &outbound.DispatchResult{
 		ExitCode:    receipt.ExitCode,
 		Stdout:      receipt.Stdout,
@@ -215,14 +214,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 // newlines; non-greedy to support multiple blocks (we want the LAST match).
 var fencedJSONRE = regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
 
-// extractLastFencedJSON returns the JSON inside the LAST fenced block in
-// stdout, or nil if none. Trailing whitespace is trimmed.
+// extractLastFencedJSON is a backward-compatibility shim. The hybrid
+// stream-aware extractor lives in extract_envelope.go. Callers (and the
+// existing test suite) keep working unchanged.
 func extractLastFencedJSON(stdout []byte) []byte {
-	matches := fencedJSONRE.FindAllSubmatch(stdout, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	return bytes.TrimSpace(matches[len(matches)-1][1])
+	return extractEnvelopeRaw(stdout)
 }
 
 // opencodeWorktreeConfigJSON returns a marshaled opencode config that

@@ -1,0 +1,4 @@
+{"type":"step_start","timestamp":1779632790567,"sessionID":"s1","part":{"type":"step-start"}}
+{"type":"text","timestamp":1779632790569,"sessionID":"s1","part":{"type":"text","text":"Here is the spec analysis. I will return the envelope as fenced JSON.\n\n"}}
+{"type":"text","timestamp":1779632790600,"sessionID":"s1","part":{"type":"text","text":"```json\n{\"schema_version\":\"v1\",\"phase\":\"spec\",\"change_name\":\"x\",\"project\":\"y\",\"status\":\"DONE\",\"confidence\":0.92,\"executive_summary\":\"ok\",\"artifacts_saved\":[],\"next_recommended\":[],\"risks\":[],\"data\":{}}\n```"}}
+{"type":"step_finish","timestamp":1779632790677,"sessionID":"s1","part":{"type":"step-finish","reason":"stop","tokens":{"total":120,"input":50,"output":70,"reasoning":0,"cache":{"write":0,"read":0}},"cost":0}}
