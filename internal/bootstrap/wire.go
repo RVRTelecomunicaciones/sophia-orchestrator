@@ -162,6 +162,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			DefaultModel:      cfg.Dispatcher.MCP.DefaultModel,
 			ModelByPhase:      cfg.Dispatcher.MCP.ModelByPhase,
 			Provider:          cfg.Dispatcher.MCP.Provider,
+			DefaultCWD:        cfg.Dispatcher.MCP.DefaultCWD,
 		})
 		dispatcherFactory.Register("mcp", mcpAdapter)
 	}
