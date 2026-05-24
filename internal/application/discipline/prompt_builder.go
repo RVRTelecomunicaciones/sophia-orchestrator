@@ -92,7 +92,13 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 	sb.WriteString("\n\n")
 
 	sb.WriteString("# Required Output\n")
-	sb.WriteString("Return JSON envelope as the LAST fenced ```json block in stdout:\n\n")
+	// Spec #58 (BUG-13): under opencode `--format json` the LLM's text
+	// reaches stdout inside NDJSON stream events. The orch's hybrid
+	// extractor handles bare envelopes, but a fenced block is the
+	// cheapest path on every formatter — well-behaved models that wrap
+	// the envelope in ```json fences keep working across all output
+	// modes without falling back to NDJSON heuristics.
+	sb.WriteString("Wrap the final JSON envelope in a ```json fenced markdown block. The orchestrator extracts the LAST fenced block; everything before it can be free-form reasoning. Do NOT emit a bare JSON object as your only output.\n\n")
 	sb.WriteString("```json\n")
 	dataSchema := dataSchemaFor(in.Phase)
 	fmt.Fprintf(&sb, `{

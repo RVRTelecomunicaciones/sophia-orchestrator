@@ -1,0 +1,7 @@
+I have analyzed the change and produced a spec.
+
+```json
+{"schema_version":"v1","phase":"spec","change_name":"x","project":"y","status":"DONE","confidence":0.9,"executive_summary":"classic text mode","artifacts_saved":[],"next_recommended":[],"risks":[],"data":{}}
+```
+
+Done.
