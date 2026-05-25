@@ -204,6 +204,14 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	applySvc := apply.New(boardRepo)
 
 	// Apply-phase parallel coordination (spec § 5).
+	// Spec #61 (BUG-15): WorktreeRoot is overridable via
+	// SOPHIA_APPLY_WORKTREE_ROOT so MCP-bridge deployments can point
+	// it at a host-mounted path the bridge can see. Empty preserves
+	// the container-local default.
+	applyRunCfg := apply.DefaultRunConfig()
+	if root := cfg.Apply.WorktreeRoot; root != "" {
+		applyRunCfg.WorktreeRoot = root
+	}
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,
@@ -217,7 +225,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Memory:      memClient,
 		Clock:       clock,
 		IDGen:       idGen,
-		Config:      apply.DefaultRunConfig(),
+		Config:      applyRunCfg,
 		Metrics:     metrics,
 	})
 

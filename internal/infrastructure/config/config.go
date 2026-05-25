@@ -20,9 +20,30 @@ type Config struct {
 	Runtime     ServiceConfig
 	Dispatcher  DispatcherConfig
 	Spawn       SpawnConfig
+	Apply       ApplyConfig
 	Obs         ObsConfig
 	Environment string // dev | staging | prod
 	LogLevel    string // debug | info | warn | error
+}
+
+// ApplyConfig configures the apply-phase coordinator. Loaded from
+// SOPHIA_APPLY_* env vars at boot.
+//
+// Spec #61 (BUG-15) rationale — the apply runtime creates per-group
+// git worktrees under WorktreeRoot. The default `/tmp/sophia/worktrees`
+// is container-local: when the MCP dispatcher forwards that path to a
+// host-side `sophia-agent-mcp` bridge, the bridge can't see the path
+// (different filesystem namespace) and its exact-match cwd_allowlist
+// rejects it. Operators using the MCP bridge MUST override this to a
+// host-mounted path that is mirrored into the runtime container under
+// the SAME absolute name (so the orch and the bridge use a single
+// string). See ops/local/compose.mcp.yaml for the canonical wiring.
+type ApplyConfig struct {
+	// WorktreeRoot is the base directory the apply coordinator uses
+	// for per-group git worktrees. Empty falls back to
+	// apply.DefaultRunConfig().WorktreeRoot (currently
+	// "/tmp/sophia/worktrees"). Loaded from SOPHIA_APPLY_WORKTREE_ROOT.
+	WorktreeRoot string
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -300,6 +321,8 @@ func Load() (Config, error) {
 	c.Memory.TenantID = envStr("SOPHIA_MEMORY_TENANT_ID", "")
 	c.Runtime.BaseURL = envStr("SOPHIA_RUNTIME_URL", "")
 	c.Runtime.APIKey = envStr("SOPHIA_RUNTIME_API_KEY", "")
+
+	c.Apply.WorktreeRoot = envStr("SOPHIA_APPLY_WORKTREE_ROOT", c.Apply.WorktreeRoot)
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)

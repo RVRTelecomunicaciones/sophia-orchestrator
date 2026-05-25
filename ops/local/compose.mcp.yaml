@@ -105,3 +105,32 @@ services:
 
       # Tenant binding (same as compose.e2e-llm.yaml — unchanged by MCP path)
       SOPHIA_MEMORY_TENANT_ID: "sophia-dev"
+
+      # Spec #61 (BUG-15): apply phase worktrees must live in a path
+      # the host bridge can see. We use a PATH-MIRRORED bind mount —
+      # the SAME absolute string resolves to the same files on both
+      # the runtime container and the host — so the orch can forward
+      # the worktree path verbatim and the bridge accepts it.
+      #
+      # The actual mount is declared on the runtime-adapters service
+      # below. Path defaults to a dotted directory under the operator's
+      # workspace; override per host as needed.
+      SOPHIA_APPLY_WORKTREE_ROOT: "${SOPHIA_APPLY_WORKTREE_ROOT:-/Users/russell/Documents/2026/.sophia-worktrees}"
+
+  # Runtime-adapters needs (a) the worktree root path-mirrored as a
+  # writable bind mount and (b) its filesystem allowlist extended so
+  # `git worktree add` + opencode subprocess operations under that
+  # path pass the shell adapter's safety guards.
+  runtime-adapters:
+    environment:
+      # Extend the writable working-dirs allowlist with the worktree
+      # path. The base "/tmp:/workspace" comes from compose.e2e-llm.yaml.
+      # The MCP path is the SAME string as on the host (mirror mount).
+      RUNTIME_ALLOWED_WORKING_DIRS: "/tmp:/workspace:${SOPHIA_APPLY_WORKTREE_ROOT:-/Users/russell/Documents/2026/.sophia-worktrees}"
+      RUNTIME_ALLOWED_FILESYSTEM_ROOTS: "/tmp:/workspace:${SOPHIA_APPLY_WORKTREE_ROOT:-/Users/russell/Documents/2026/.sophia-worktrees}"
+    volumes:
+      # Path-mirrored writable mount so container ops on the path
+      # land on disk where the host bridge can also read them. The
+      # operator MUST `mkdir -p` the host path before `up -d` (the
+      # bind mount otherwise creates an empty owner=root dir).
+      - "${SOPHIA_APPLY_WORKTREE_ROOT:-/Users/russell/Documents/2026/.sophia-worktrees}:${SOPHIA_APPLY_WORKTREE_ROOT:-/Users/russell/Documents/2026/.sophia-worktrees}:rw"
