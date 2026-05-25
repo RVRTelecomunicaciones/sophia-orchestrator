@@ -117,6 +117,14 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 	sb.WriteString("\n```\n\n")
 	fmt.Fprintf(&sb, "Confidence threshold for this phase: %.2f. ", in.Phase.ConfidenceThreshold())
 	sb.WriteString("Status MUST be one of the four enum values. ")
+	// Spec #66 (BUG-20): with large source context (e.g. SDD self-
+	// refactor where the LLM reads the entire orch tree) gpt-5.4 has
+	// been observed producing 30 KB of free-form analysis and
+	// FORGETTING to close with the envelope. The extractor returns
+	// nil and the orch reports `envelope_raw is absent`. Spell out
+	// the terminal-output discipline aggressively so it survives a
+	// long thinking-aloud preamble.
+	sb.WriteString("CRITICAL: regardless of how long your reasoning is, the LAST thing in your stdout MUST be the ```json fenced envelope shown above. The orchestrator's extractor scans for the LAST fenced JSON block; if you end with prose, code, or any other content after the envelope, the entire phase fails with `envelope_raw is absent` and your work is discarded. Reserve your final lines for the envelope and nothing else. ")
 	// Spec #57: gpt-5.4 in smoke v4 emitted next_recommended as an
 	// array of objects which failed envelope validation. The validator
 	// now coerces objects to strings, but pin the expected shape in
