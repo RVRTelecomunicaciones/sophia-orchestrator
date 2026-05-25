@@ -212,6 +212,10 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	if root := cfg.Apply.WorktreeRoot; root != "" {
 		applyRunCfg.WorktreeRoot = root
 	}
+	// Spec #65 (BUG-19): when configured, pre-populate every worktree
+	// with a copy of the source repo so the implement agent has source
+	// to read and edit. Empty keeps the legacy empty-mkdir behaviour.
+	applyRunCfg.SourceRepoPath = cfg.Apply.SourceRepoPath
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,

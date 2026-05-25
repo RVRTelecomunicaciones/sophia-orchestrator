@@ -44,6 +44,22 @@ type ApplyConfig struct {
 	// apply.DefaultRunConfig().WorktreeRoot (currently
 	// "/tmp/sophia/worktrees"). Loaded from SOPHIA_APPLY_WORKTREE_ROOT.
 	WorktreeRoot string
+
+	// SourceRepoPath is the path (from the runtime container's
+	// perspective) to the repository the apply phase should copy into
+	// each newly created worktree. Empty preserves the legacy V1
+	// behaviour where createWorktrees only `mkdir -p`s an empty
+	// directory — fine for create-only smoke tasks (greeting.go) but
+	// blocks any edit-existing-code task because the LLM lands in an
+	// empty cwd and can't find the source.
+	//
+	// Set this to e.g. "/workspace/sophia-orchestator" (under the
+	// existing read-only workspace bind mount) so the orch performs
+	// `cp -aR <source>/. <worktree>/` before dispatching the implement
+	// agent. The agent then has full source visibility AND can run
+	// `git diff` against the copied .git. Loaded from
+	// SOPHIA_APPLY_SOURCE_REPO_PATH. Spec #65 (BUG-19).
+	SourceRepoPath string
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -323,6 +339,7 @@ func Load() (Config, error) {
 	c.Runtime.APIKey = envStr("SOPHIA_RUNTIME_API_KEY", "")
 
 	c.Apply.WorktreeRoot = envStr("SOPHIA_APPLY_WORKTREE_ROOT", c.Apply.WorktreeRoot)
+	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)

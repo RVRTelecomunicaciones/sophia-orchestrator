@@ -74,6 +74,13 @@ type RunConfig struct {
 	DepWaitTimeout                int // seconds; 0 ⇒ default 600 (10min)
 	DispatchTimeoutMS             int
 	WorktreeRoot                  string // base dir for per-group worktrees
+	// SourceRepoPath is the path (from the runtime container's
+	// perspective) to copy into each new worktree via `cp -aR
+	// <source>/. <worktree>/` BEFORE dispatching the implement agent.
+	// Empty preserves the legacy V1 behaviour of an empty `mkdir -p`
+	// directory — fine for create-only smoke tasks, but the implement
+	// agent has no source to read or edit. Spec #65 (BUG-19).
+	SourceRepoPath string
 	// Environment is the orchestrator's deployment env ("dev" | "staging" |
 	// "prod"). Forwarded as a memory-engine scope filter on topic-key lookups
 	// so we read records saved within the same environment.
@@ -619,10 +626,42 @@ func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksLi
 	return board, nil
 }
 
-// createWorktrees calls runtime shell.exec@v1 to create one git worktree
-// per group. V1.5 (when runtime ships git.worktree.create@v1 capability)
-// will swap to that typed capability. For V1 we use the existing shell.exec
-// with explicit git commands.
+// createWorktrees creates one per-group worktree directory and (when
+// configured) pre-populates it with a copy of the source repository
+// so the implement agent has source code to read and edit.
+//
+// Two execution modes, switched by RunConfig.SourceRepoPath:
+//
+//   - Empty (legacy V1, Spec § 5.2): single `mkdir -p <path>` call.
+//     The worktree is an empty directory; the implement agent can
+//     ONLY create files. Sufficient for create-only smoke tasks
+//     (greeting.go) but blocks any edit-existing-code task because
+//     the agent's cwd has no source to discover. Comment on this
+//     branch dated the proper fix as "V1.5 will swap to
+//     git.worktree.create@v1 once runtime ships the typed capability
+//     AND we have an upstream repo to clone from" — that capability
+//     never landed; this commit takes the pragmatic intermediate path
+//     instead.
+//
+//   - Set (Spec #65 / BUG-19): two shell.exec calls per group —
+//     `mkdir -p <path>` followed by `cp -aR <source>/. <path>/`. The
+//     copy uses `-a` (preserve mode/timestamps/symlinks) and the
+//     `/.` source suffix (copy contents, not the source directory
+//     itself, so the destination keeps its own name). Includes the
+//     repo's `.git` so the implement agent can run `git diff` to
+//     understand the baseline. Source path is interpreted from the
+//     runtime container's namespace (e.g. "/workspace/<repo>" under
+//     the read-only workspace bind mount).
+//
+// Both modes use shell.exec@v1 because runtime-adapters has not
+// shipped a typed git.worktree.create@v1 capability. When that lands
+// the SourceRepoPath branch should swap to it; the empty branch
+// stays as the smoke/no-source fallback.
+//
+// Errors from any sub-call are reported via apply.worktree.error
+// SSE event but NEVER fail the phase. The implement agent will hit
+// its own error if the cwd is missing or empty; we surface the cause
+// in observability rather than aborting the apply pipeline here.
 func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, board *apply.Board) error {
 	for _, g := range board.Groups() {
 		path := filepath.Join(s.d.Config.WorktreeRoot, c.ID().String(), g.Name())
@@ -636,26 +675,49 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 			return fmt.Errorf("persist worktree assignment: %w", err)
 		}
 
-		// M-E0 wire-alignment: payload shape mirrors runtime ExecPayload
-		// (command not cmd; no inner timeout_ms — that's outer).
-		// V1 smoke: mkdir -p the path. V1.5 will swap to git.worktree.create@v1
-		// once runtime ships the typed capability AND we have an upstream repo
-		// to clone from. Plain mkdir lets the dispatcher's --dir flag find a
-		// real directory; opencode will then cd into it.
-		payload, _ := json.Marshal(map[string]any{
+		// Step 1: mkdir the worktree path. Runs in both modes — `cp -aR`
+		// would create the leaf directory automatically but `mkdir -p`
+		// also creates the change-id parent and any missing root
+		// segments under WorktreeRoot.
+		mkdirPayload, _ := json.Marshal(map[string]any{
 			"command": "mkdir",
 			"args":    []string{"-p", path},
 		})
-		_, err := s.d.Runtime.Execute(ctx, outbound.ExecutionRequest{
+		if _, err := s.d.Runtime.Execute(ctx, outbound.ExecutionRequest{
 			Capability: "shell.exec@v1",
-			Payload:    payload,
+			Payload:    mkdirPayload,
 			TimeoutMS:  30_000,
-		})
-		if err != nil {
+		}); err != nil {
 			s.publishEvent(ctx, board.PhaseID(), inbound.EventApplyWorktreeError, inbound.ApplyWorktreeErrorPayload{
 				GroupID: g.ID().String(),
-				Err:     err.Error(),
+				Err:     fmt.Sprintf("mkdir: %v", err),
 			})
+			continue
+		}
+
+		// Step 2: when SourceRepoPath is set, copy the source tree into
+		// the freshly-created worktree (Spec #65 / BUG-19). The "/."
+		// suffix on source tells cp to copy the contents rather than
+		// the source directory itself — destination/.git/, destination/
+		// internal/ etc., not destination/<src>/...
+		if src := s.d.Config.SourceRepoPath; src != "" {
+			cpPayload, _ := json.Marshal(map[string]any{
+				"command": "cp",
+				"args":    []string{"-aR", src + "/.", path + "/"},
+			})
+			if _, err := s.d.Runtime.Execute(ctx, outbound.ExecutionRequest{
+				Capability: "shell.exec@v1",
+				Payload:    cpPayload,
+				// Copy can be slower than mkdir — give it a fuller
+				// budget. 5 minutes is still well under the apply
+				// dispatch timeout.
+				TimeoutMS: 300_000,
+			}); err != nil {
+				s.publishEvent(ctx, board.PhaseID(), inbound.EventApplyWorktreeError, inbound.ApplyWorktreeErrorPayload{
+					GroupID: g.ID().String(),
+					Err:     fmt.Sprintf("cp source repo: %v", err),
+				})
+			}
 		}
 	}
 	return nil

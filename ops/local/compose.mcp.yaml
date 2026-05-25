@@ -117,6 +117,17 @@ services:
       # workspace; override per host as needed.
       SOPHIA_APPLY_WORKTREE_ROOT: "${SOPHIA_APPLY_WORKTREE_ROOT:-/Users/russell/Documents/2026/.sophia-worktrees}"
 
+      # Spec #65 (BUG-19): the source repo path the apply phase copies
+      # into every newly created worktree via `cp -aR <source>/.
+      # <worktree>/`. Empty preserves the V1 "empty mkdir" behaviour
+      # (create-only smoke tasks). Set this to the in-container path
+      # of the repo whose source the implement agent needs to read or
+      # edit. Default points at sophia-orchestator under the existing
+      # read-only /workspace bind mount — the implement agent gets the
+      # whole orch tree (including .git for `git diff`) inside its
+      # writable per-group worktree.
+      SOPHIA_APPLY_SOURCE_REPO_PATH: "${SOPHIA_APPLY_SOURCE_REPO_PATH:-/workspace/sophia-orchestator}"
+
   # Runtime-adapters needs (a) the worktree root path-mirrored as a
   # writable bind mount and (b) its filesystem allowlist extended so
   # `git worktree add` + opencode subprocess operations under that
