@@ -106,27 +106,38 @@ services:
       # y la phase queda blocked.
       #
       # Operator decision 2026-05-18: matriz SIN Claude. Provider mix
-      # de GPT-5.x (via ChatGPT Plus OAuth) + Gemini (via Google
-      # OAuth y/o GitHub Copilot OAuth para los Gemini que Google
-      # direct no expone). NO se usa anthropic/* directo ni
+      # de GPT-5.x + Gemini. NO se usa anthropic/* directo ni
       # github-copilot/claude-* — Claude queda fuera por decisión
       # operacional de simplicidad de credentials.
-      SOPHIA_DISPATCHER_MODEL: "openai/gpt-5.4"
+      #
+      # BUG-22 (2026-05-27): gpt-5.4 se rutea por GitHub Copilot OAuth,
+      # NO por ChatGPT Plus OAuth (`openai/gpt-5.4`). Razón: el token
+      # OAuth de ChatGPT Plus no carga el scope `api.responses.write`
+      # que requiere el endpoint /v1/responses al que opencode dispatcha
+      # gpt-5.4 — el backend devuelve 401 silencioso y opencode emite
+      # solo `step_start` + EOF, lo que el orch interpreta como envelope
+      # inválida y bloquea con retries hasta IL5. Mismo modelo, otra
+      # ruta OAuth (Copilot) = sin el bug. Validado E2E 27-05: 4/4
+      # phases pre-apply attempts=1, confidence>=0.74, sin retries.
+      # Investigación completa en engram topic_key
+      # `sophia/bugs/bug-22-gpt-5-4-empty-stdout-research`.
+      SOPHIA_DISPATCHER_MODEL: "github-copilot/gpt-5.4"
 
-      # Per-phase routing matrix — stable hybrid validated 2026-05-19 via
-      # OAuth (Google + OpenAI). Claude direct via the `anthropic/*` family
-      # is intentionally NOT used inside the Docker container because the
-      # `opencode-claude-auth` plugin cannot refresh tokens without the
-      # macOS Keychain (see commit fix + sdd/mcp-host-bridge/charter).
-      # The MCP Host Bridge cycle will reintroduce Claude via a host-side
-      # MCP server that DOES have Keychain access.
+      # Per-phase routing matrix — stable hybrid validated 2026-05-27
+      # via Copilot OAuth (gpt-5.4) + Google OAuth (gemini). Claude
+      # direct via `anthropic/*` is intentionally NOT used inside the
+      # Docker container because `opencode-claude-auth` cannot refresh
+      # tokens without the macOS Keychain. The MCP Host Bridge cycle
+      # reintroduces Claude via a host-side MCP server WITH Keychain
+      # access — but operator policy keeps the in-container matrix
+      # Claude-free for credential-isolation reasons.
       SOPHIA_DISPATCHER_MODEL_EXPLORE:  "google/gemini-3-flash-preview"
-      SOPHIA_DISPATCHER_MODEL_PROPOSAL: "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_SPEC:     "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_DESIGN:   "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_TASKS:    "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_APPLY:    "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_VERIFY:   "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_PROPOSAL: "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_SPEC:     "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_DESIGN:   "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_TASKS:    "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_APPLY:    "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_VERIFY:   "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_ARCHIVE:  "google/gemini-3-flash-preview"
 
       # Tenant binding for memory-engine ingest path. The dev API key
