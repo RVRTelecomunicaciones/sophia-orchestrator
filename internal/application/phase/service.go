@@ -284,6 +284,17 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 			GateURL: s.approvalURL(decision),
 			Reason:  decision.Reason,
 		}
+		// Spec #67 (BUG-21): the approval gate check in Approve/Reject
+		// reads `approval.required` from the AUDIT log
+		// (checkGateState → s.d.Audit.HasEventForPhase). publishEvent
+		// only writes to the SSE phase_events table, so without an
+		// explicit audit append the gate is invisible to the resolver
+		// and Approve fails with ErrPhaseNotGated even though SSE
+		// clients saw the event. Append BEFORE publish so the audit
+		// row is durable before any caller can race to Approve.
+		cidLocal := c.ID()
+		pidLocal := p.ID()
+		s.appendAudit(ctx, &cidLocal, &pidLocal, nil, contract.EventApprovalRequired, approvalPayload)
 		s.publishEvent(ctx, p.ID(), contract.EventApprovalRequired, approvalPayload)
 		return
 	}
