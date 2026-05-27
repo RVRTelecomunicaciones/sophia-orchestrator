@@ -86,6 +86,34 @@ ORDER BY attempts DESC LIMIT 1`
 	return scanPhase(row)
 }
 
+// FindAllRunning returns every Phase whose status is "running" across
+// ALL changes. Used by the boot-time recovery scan to detect phases
+// stranded by an orchestrator crash (Spec #68 / BUG-23). Returns an
+// empty slice when nothing is running — never returns ErrNotFound.
+func (r *PhaseRepo) FindAllRunning(ctx context.Context) ([]*phase.Phase, error) {
+	const q = `
+SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at
+FROM phases WHERE status = 'running'
+ORDER BY started_at`
+	rows, err := r.pool.Query(ctx, q)
+	if err != nil {
+		return nil, wrapErr("PhaseRepo.FindAllRunning", err)
+	}
+	defer rows.Close()
+	out := make([]*phase.Phase, 0)
+	for rows.Next() {
+		p, scanErr := scanPhase(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapErr("PhaseRepo.FindAllRunning.iter", err)
+	}
+	return out, nil
+}
+
 // FindRunningByChange returns the Phase currently running for a Change, or
 // outbound.ErrNotFound if none.
 func (r *PhaseRepo) FindRunningByChange(ctx context.Context, changeID ids.ChangeID) (*phase.Phase, error) {
