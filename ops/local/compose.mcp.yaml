@@ -80,7 +80,7 @@ services:
 
       # Default model forwarded to the bridge for phases without a specific
       # model override. Must be reachable by the host provider CLI.
-      SOPHIA_MCP_MODEL: "openai/gpt-5.4"
+      SOPHIA_MCP_MODEL: "github-copilot/gpt-5.4"
 
       # -----------------------------------------------------------------------
       # Per-phase model overrides — stable hybrid matrix (2026-05-20)
@@ -92,15 +92,15 @@ services:
       # stable with opencode — the bridge already has Keychain access and
       # the anthropic/* provider is in the default allowlist.
       # -----------------------------------------------------------------------
-      SOPHIA_DISPATCHER_MODEL: "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL: "github-copilot/gpt-5.4"
 
       SOPHIA_DISPATCHER_MODEL_EXPLORE:  "google/gemini-3-flash-preview"
-      SOPHIA_DISPATCHER_MODEL_PROPOSAL: "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_SPEC:     "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_DESIGN:   "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_TASKS:    "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_APPLY:    "openai/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_VERIFY:   "openai/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_PROPOSAL: "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_SPEC:     "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_DESIGN:   "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_TASKS:    "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_APPLY:    "github-copilot/gpt-5.4"
+      SOPHIA_DISPATCHER_MODEL_VERIFY:   "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_ARCHIVE:  "google/gemini-3-flash-preview"
 
       # Tenant binding (same as compose.e2e-llm.yaml — unchanged by MCP path)
