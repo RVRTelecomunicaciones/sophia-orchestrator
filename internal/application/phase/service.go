@@ -208,7 +208,16 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 		budget = 3
 	}
 	priorAttempts := 0
-	if prior, priorErr := s.d.PhaseRepo.FindByChangeAndType(ctx, in.ChangeID, in.PhaseType); priorErr == nil && prior.Status().IsTerminal() {
+	// BUG-24: include PhaseStatusNeedsContext in the "retry bumps
+	// attempts" set. The domain contract (internal/domain/phase/status.go)
+	// documents NeedsContext as non-terminal-but-retryable-within-budget;
+	// when the operator re-POSTs Run on a needs_context row we MUST
+	// land on a new (change_id, phase_type, attempts) tuple so the
+	// upsert lands on a fresh row instead of clobbering the prior one
+	// in place (which would leave the API-returned phase_id unwritten
+	// and surface as phase_not_found on the very next poll).
+	if prior, priorErr := s.d.PhaseRepo.FindByChangeAndType(ctx, in.ChangeID, in.PhaseType); priorErr == nil &&
+		(prior.Status().IsTerminal() || prior.Status() == phase.PhaseStatusNeedsContext) {
 		priorAttempts = prior.Attempts()
 	}
 	// Hydrate with priorAttempts so Start() increments to priorAttempts+1.

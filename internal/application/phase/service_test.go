@@ -1294,6 +1294,98 @@ func TestRun_RetryBumpsAttempts(t *testing.T) {
 		"retry of a terminal phase must have attempts=2 (prior.Attempts()+1)")
 }
 
+// TestRun_RetryAfterNeedsContextBumpsAttempts pins BUG-24. When the prior
+// phase for (change_id, phase_type) is in PhaseStatusNeedsContext, a new
+// Run call MUST bump attempts to prior.Attempts()+1 — not collide on the
+// same (change_id, phase_type, attempts) upsert key as the prior row.
+//
+// Domain contract (internal/domain/phase/status.go): "NEEDS_CONTEXT is
+// NOT terminal — the orchestrator may retry within budget." So Run is
+// the right entry point for the retry; the bug was that service.Run
+// only bumped priorAttempts when prior.Status().IsTerminal(), which
+// excluded NeedsContext and made the retry land at attempts=1 again.
+// Real-world symptom (pg): the (change_id, phase_type, attempts) upsert
+// updates the existing row in place, the operator-returned phase_id
+// is never persisted, and FindByID returns phase_not_found while the
+// prior row silently transitions through running back to a terminal
+// status under a goroutine the operator never sees.
+func TestRun_RetryAfterNeedsContextBumpsAttempts(t *testing.T) {
+	h := newHarness(t)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+
+	// First Run completes via the harness's mock dispatcher with the
+	// default DONE envelope. We mutate the persisted phase to
+	// needs_context to model the operator-visible state where the LLM
+	// asked for more context.
+	out1, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	first, _ := h.phaseRepo.FindByID(context.Background(), out1.PhaseID)
+	require.Equal(t, 1, first.Attempts(), "sanity: first run attempts=1")
+
+	firstHydrated := phase.Hydrate(
+		first.ID(), first.ChangeID(), first.Type(),
+		phase.PhaseStatusNeedsContext,
+		first.Envelope(), first.Confidence(),
+		first.RetryBudget(), first.Attempts(),
+		first.StartedAt(), first.CompletedAt(),
+	)
+	require.NoError(t, h.phaseRepo.Save(context.Background(), firstHydrated))
+
+	// Reset the change so the next-valid-transition check accepts a
+	// fresh Spec run (same trick as TestRun_RetryBumpsAttempts).
+	h.changeRepo.byID[cid.String()] = domainchange.Hydrate(
+		cid, "feat-x", "proj",
+		domainchange.StatusActive, phase.PhaseProposal,
+		domainchange.ArtifactStoreMemoryEngine, "main",
+		time.Now(), time.Now(),
+	)
+
+	// Re-wire the service with a fresh ID generator so the retry
+	// receives ids different from the first run's. If service.Run
+	// reused the prior phase_id (no attempts bump → pg upsert clobber)
+	// the test would not detect the bug, so the fresh-id contract is
+	// explicit here.
+	h.svc = appphase.New(appphase.Deps{
+		ChangeRepo:  h.changeRepo,
+		PhaseRepo:   h.phaseRepo,
+		SessionRepo: h.sessRepo,
+		Governance:  h.governance,
+		Memory:      h.memory,
+		Dispatcher:  h.dispatcher,
+		SpawnGov:    h.spawn,
+		Validator:   discipline.NewValidator(),
+		IronLaw:     discipline.NewIronLawChecker(),
+		Prompts:     discipline.NewPromptBuilder(),
+		Audit:       h.audit,
+		Events:      h.events,
+		Clock:       h.clock,
+		IDGen: shared.FixedIDGenerator([]string{
+			"01ARZ3NDEKTSV4RRFFQ69G5P03",
+			"01ARZ3NDEKTSV4RRFFQ69G5S03",
+		}),
+		Scheduler: appphase.SyncScheduler,
+	})
+
+	out2, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+
+	second, err := h.phaseRepo.FindByID(context.Background(), out2.PhaseID)
+	require.NoError(t, err,
+		"the phase_id returned from Run MUST be persisted — operator polls "+
+			"this id and a not-found surfaces the prior bug where the upsert "+
+			"key collided and the new id was never written")
+	require.Equal(t, 2, second.Attempts(),
+		"retry of a needs_context phase must have attempts=2 (prior.Attempts()+1) "+
+			"so the (change_id, phase_type, attempts) upsert lands on a new row")
+	require.NotEqual(t, out1.PhaseID, out2.PhaseID,
+		"retry must yield a fresh phase_id — collapsing them hides the "+
+			"prior attempt from history")
+}
+
 // --- Spec #46 tests_required from ContextOverrides ---
 
 // TestRun_TestsRequired_WiredFromContextOverrides verifies that when
