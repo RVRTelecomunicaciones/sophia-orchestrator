@@ -124,6 +124,21 @@ func (r *fakePhaseRepo) FindRunningByChange(_ context.Context, _ ids.ChangeID) (
 	return r.running, nil
 }
 
+// FindAllRunning supports the BUG-23 boot recovery scan. Returns every
+// phase in byID whose status is PhaseStatusRunning. Empty slice (not
+// ErrNotFound) is the contract when nothing matches.
+func (r *fakePhaseRepo) FindAllRunning(_ context.Context) ([]*phase.Phase, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*phase.Phase, 0)
+	for _, p := range r.byID {
+		if p.Status() == phase.PhaseStatusRunning {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
 func (r *fakePhaseRepo) LockByChange(_ context.Context, _ ids.ChangeID) error { return r.lockErr }
 
 type fakeSessionRepo struct {

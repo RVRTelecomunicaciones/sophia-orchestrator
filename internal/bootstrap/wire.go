@@ -32,6 +32,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/eventstream"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/recovery"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/config"
 	dbpkg "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/db"
@@ -316,6 +317,21 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Handler:     router,
 		ReadTimeout: cfg.HTTP.ReadTimeout,
 		// WriteTimeout intentionally 0 — SSE long-poll incompatible with it.
+	}
+
+	// Spec #68 (BUG-23): boot-time recovery scan. Mark every phase
+	// left at PhaseStatusRunning by a previous crashed process as
+	// PhaseStatusInterrupted so the operator's status polls show a
+	// clear "needs Resume" signal instead of a phantom "running"
+	// row no goroutine owns. Runs BEFORE HTTP listen so the first
+	// status query returns the post-recovery state.
+	recoverySvc := recovery.NewService(phaseRepo, logger)
+	recoveryCtx, recoveryCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer recoveryCancel()
+	if marked, err := recoverySvc.MarkStuckInterrupted(recoveryCtx); err != nil {
+		// Fail-soft: log but keep booting. Even partial recovery is
+		// better than refusing to start.
+		logger.Error("bootstrap: recovery scan returned error", slog.String("err", err.Error()), slog.Int("marked", marked))
 	}
 
 	return &App{cfg: cfg, logger: logger, pool: pool, server: srv, tracer: tracer}, nil

@@ -43,6 +43,13 @@ type PhaseRepository interface {
 	FindByID(ctx context.Context, id ids.PhaseID) (*phase.Phase, error)
 	FindByChangeAndType(ctx context.Context, changeID ids.ChangeID, pt phase.PhaseType) (*phase.Phase, error)
 	FindRunningByChange(ctx context.Context, changeID ids.ChangeID) (*phase.Phase, error)
+	// FindAllRunning returns every Phase currently in PhaseStatusRunning,
+	// across ALL Changes. Used by the boot-time recovery scan (Spec #68 /
+	// BUG-23) to find phases stranded by an orchestrator crash so the
+	// recovery service can mark them interrupted and surface them to the
+	// operator for explicit Resume. Returns an empty slice (NOT
+	// ErrNotFound) when nothing is running.
+	FindAllRunning(ctx context.Context) ([]*phase.Phase, error)
 	// LockByChange acquires a Postgres advisory lock keyed by the change_id
 	// so only one phase can be running per Change at a time. Released on
 	// transaction commit/rollback.
