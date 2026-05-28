@@ -51,7 +51,19 @@ func (r *fakeBoardRepo) SaveBoard(_ context.Context, b *domainapply.Board) error
 	return nil
 }
 
-func (r *fakeBoardRepo) FindBoardByPhaseID(_ context.Context, _ ids.PhaseID) (*domainapply.Board, error) {
+// FindBoardByPhaseID is BUG-28 retry-aware: scans the saved boards for
+// one matching the requested phase_id. Tests that want to model "Resume
+// on a blocked apply phase" pre-populate the boards/groups/tasks via
+// the regular Save* methods and this method returns the prior board so
+// buildBoard reuses it instead of creating a new one.
+func (r *fakeBoardRepo) FindBoardByPhaseID(_ context.Context, phaseID ids.PhaseID) (*domainapply.Board, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, b := range r.boards {
+		if b.PhaseID() == phaseID {
+			return b, nil
+		}
+	}
 	return nil, outbound.ErrNotFound
 }
 
@@ -867,6 +879,72 @@ func TestExecute_BUG29_NoTargetPath_SkipsMaterialize(t *testing.T) {
 	require.NotContains(t, types, "apply.materialize.started",
 		"empty TargetPath MUST NOT emit materialize.started — the pass should be entirely skipped")
 	require.NotContains(t, types, "apply.materialize.completed")
+}
+
+// TestExecute_BUG28_ReusesExistingBoardAndSkipsDoneTasks pins the
+// per-group resumability contract. When a previous apply attempt
+// against the same phase_id left some groups Completed and some Failed,
+// the next Execute MUST:
+//   - reuse the existing board (no new SaveBoard call),
+//   - skip the already-Completed group (no re-dispatch, no governor
+//     spend),
+//   - re-attempt the failed group's tasks (which produce DONE this
+//     time given the fake dispatcher's default behaviour).
+//
+// Real-world trigger: 2026-05-27 Node 22 todolist smoke. One group
+// produced real files, three cascade-failed. The operator wanted to
+// resume only the failed three; pre-fix, re-running apply blew away the
+// successful group's worktree. With BUG-28 + BUG-30, Service.Resume on
+// the blocked apply phase replays Execute, the existing board is
+// loaded, the done group is skipped, and only the failed ones re-run.
+func TestExecute_BUG28_ReusesExistingBoardAndSkipsDoneTasks(t *testing.T) {
+	svc, board, disp, _, _, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	mem.putTasksList("feat-x", map[string]any{
+		"groups": []map[string]any{
+			{
+				"name": "completed-group",
+				"tasks": []map[string]any{
+					{"description": "already-done-task", "files_pattern": []string{"a/*"}},
+				},
+			},
+			{
+				"name": "failed-group",
+				"tasks": []map[string]any{
+					{"description": "needs-retry-task", "files_pattern": []string{"b/*"}},
+				},
+			},
+		},
+	})
+
+	// First Execute: dispatcher returns DONE for both groups so the
+	// board is fully populated with completed groups + done tasks.
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	board.mu.Lock()
+	require.Len(t, board.boards, 1, "first execute creates exactly one board")
+	priorBoards := len(board.boards)
+	board.mu.Unlock()
+
+	disp.dispatchCalls.Store(0) // reset counter so we can detect new dispatches
+
+	// Second Execute: same phase_id. buildBoard must reuse the prior
+	// board (no new SaveBoard call). The completed-group is skipped
+	// via BUG-28's GroupStatusCompleted shortcut. The failed-group's
+	// tasks are already TaskStatusDone from the first run, so
+	// runImplementWithRetry's TaskStatusDone shortcut skips them too.
+	_, err = svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	require.Equal(t, priorBoards, len(board.boards),
+		"BUG-28: second Execute MUST reuse the existing board — no new SaveBoard call")
+	require.Zero(t, disp.dispatchCalls.Load(),
+		"BUG-28: with all tasks already Done, the second Execute MUST NOT dispatch any new LLM work")
 }
 
 // TestExecute_BlocksWhenTasksListMissing locks in Iron Law #1: missing

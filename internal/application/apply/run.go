@@ -219,11 +219,22 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	}
 
 	// Step 4: board → running.
-	if err := board.Start(); err != nil {
-		return s.failEnv(c, p, fmt.Sprintf("board start: %v", err)), err
-	}
-	if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
-		return s.failEnv(c, p, fmt.Sprintf("save board: %v", err)), err
+	//
+	// BUG-28: when this is a Resume of a previously-blocked apply phase,
+	// the board (reused via FindBoardByPhaseID) is already past Building
+	// and Start would error with ErrInvalidBoardTransition. Skip the
+	// transition in that case — the board's lifecycle status doesn't
+	// need to round-trip back to running for the per-group retry to
+	// work. The finalize step at the end of Execute will re-evaluate the
+	// board's terminal status (Complete/Fail) from the aggregated group
+	// outcomes regardless.
+	if board.Status() == apply.BoardStatusBuilding {
+		if err := board.Start(); err != nil {
+			return s.failEnv(c, p, fmt.Sprintf("board start: %v", err)), err
+		}
+		if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
+			return s.failEnv(c, p, fmt.Sprintf("save board: %v", err)), err
+		}
 	}
 	s.publishEvent(ctx, p.ID(), inbound.EventApplyBoardCreated, inbound.ApplyBoardCreatedPayload{
 		BoardID: board.ID().String(),
@@ -325,6 +336,19 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 		wg.Add(1)
 		go func(group *apply.Group) {
 			defer wg.Done()
+
+			// BUG-28: skip groups that already completed in a previous
+			// Execute attempt (Service.Resume reused the existing board
+			// for this phase_id). We signal success to the DAG without
+			// re-running the team-lead so downstream dependents see the
+			// completion without waiting for redundant LLM work.
+			if group.Status() == apply.GroupStatusCompleted {
+				dag.Signal(group.ID(), false, nil)
+				resultsMu.Lock()
+				results[group.ID()] = groupOutcome{failed: false, tasksDone: len(group.Tasks())}
+				resultsMu.Unlock()
+				return
+			}
 
 			// Wait for upstream group dependencies.
 			//
@@ -694,6 +718,19 @@ func (s *RunService) loadPriorContext(ctx context.Context, c *change.Change) (st
 }
 
 func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksList) (*apply.Board, error) {
+	// BUG-28: when the same phase_id already carries a board (operator
+	// resumed a previously-blocked apply phase via Service.Resume), reuse
+	// the existing board so all per-group / per-task statuses survive the
+	// retry. The run loops downstream (runAllGroups, runTeamLead,
+	// runImplementWithRetry) consult those statuses to skip work that
+	// already succeeded — only the failed groups attempt again, the
+	// successful worktrees stay intact, and the retry budget at the
+	// phase level was already incremented by Phase.Restart in the Service
+	// Resume path.
+	if existing, err := s.d.BoardRepo.FindBoardByPhaseID(ctx, p.ID()); err == nil && existing != nil {
+		return existing, nil
+	}
+
 	bid, err := ids.ParseBoardID(s.d.IDGen.NewID())
 	if err != nil {
 		return nil, fmt.Errorf("board id: %w", err)

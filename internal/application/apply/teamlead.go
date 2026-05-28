@@ -171,6 +171,16 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 // escalation on the 3rd consecutive failure. Returns true iff the task
 // reached envelope.StatusDone.
 func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task, priorContext string) bool {
+	// BUG-28: skip tasks that already completed in a previous Execute
+	// attempt. The board was reused via FindBoardByPhaseID, so the task
+	// status carries forward. Skipping here avoids re-claiming (which
+	// would fail anyway because ClaimTask only accepts pending tasks),
+	// avoids spending governor budget, and avoids dispatching the LLM
+	// for work already done.
+	if task.Status() == apply.TaskStatusDone {
+		return true
+	}
+
 	// Atomically claim the task before spending compute on it. If another
 	// in-flight team-lead claimed the same task (shouldn't happen given
 	// one team-lead per group, but defensive) we early-out as success
