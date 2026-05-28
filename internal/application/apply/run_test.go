@@ -208,6 +208,11 @@ type fakeSpawnGov struct {
 	maxActive int
 	failOn    int // fail Acquire on Nth call
 	calls     int
+	// saturateUntilCall returns discipline.ErrSaturated for every Acquire
+	// call whose 1-indexed number is <= saturateUntilCall. Used by the
+	// BUG-26 bounded-retry test to model transient saturation that clears
+	// after a few attempts.
+	saturateUntilCall int
 }
 
 func (s *fakeSpawnGov) Acquire(_ context.Context) error {
@@ -216,6 +221,9 @@ func (s *fakeSpawnGov) Acquire(_ context.Context) error {
 	s.calls++
 	if s.failOn > 0 && s.calls == s.failOn {
 		return errors.New("saturated")
+	}
+	if s.saturateUntilCall > 0 && s.calls <= s.saturateUntilCall {
+		return discipline.ErrSaturated
 	}
 	s.active++
 	if s.active > s.maxActive {
@@ -486,6 +494,41 @@ func TestExecute_DispatchFailureMarksGroupFailed(t *testing.T) {
 	require.GreaterOrEqual(t, disp.dispatchCalls.Load(), int32(3))
 	require.Contains(t, events.types(), "apply.task.escalated")
 	require.Contains(t, events.types(), "apply.group.failed")
+}
+
+// TestRunImplement_BoundedRetriesOnSaturation pins BUG-26: transient
+// SpawnGovernor saturation must not immediately drop a task into the
+// "failed" bucket. Real apply phases (3+ groups, multiple implementers,
+// default Max=4) routinely hit ErrSaturated on the first Acquire call
+// and the task then "fails" without ever having dispatched. The result
+// is a group cascade-failure that confuses operators because they see
+// "task failed" with attempts=0 in the audit log.
+//
+// Contract: runImplementWithRetry must retry Acquire a bounded number
+// of times on ErrSaturated before treating saturation as a real
+// failure. Other Acquire errors (ctx cancel, repo error) still fail
+// fast — saturation is the only transient class.
+func TestRunImplement_BoundedRetriesOnSaturation(t *testing.T) {
+	svc, _, disp, spawn, _, _ := newRunService(t)
+	// Simulate 2 transient saturations on the implementer's Acquire
+	// before the slot frees up. The first Acquire of the run is the
+	// team-lead's (call #1) — saturate calls #2 and #3 so the team-lead
+	// succeeds but the implementer hits ErrSaturated twice. Call #4 (the
+	// implementer's third try) must succeed and dispatch the task.
+	spawn.saturateUntilCall = 3
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"transient saturation must not poison the apply outcome — the task should "+
+			"dispatch and reach DONE after the governor frees up")
+	require.GreaterOrEqual(t, disp.dispatchCalls.Load(), int32(1),
+		"the implementer MUST eventually dispatch once the governor accepts the acquire")
+	require.GreaterOrEqual(t, spawn.calls, 4,
+		"Acquire must be retried on ErrSaturated, not fail on the first hit")
 }
 
 func TestExecute_SpawnGovernorBoundsParallelism(t *testing.T) {
