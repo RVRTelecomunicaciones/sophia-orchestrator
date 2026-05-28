@@ -136,6 +136,24 @@ type RuntimeDispatchFailedPayload struct {
 	Err    string `json:"err"`
 }
 
+// ApplyMaterializeStartedPayload is the payload of apply.materialize.started.
+type ApplyMaterializeStartedPayload struct {
+	TargetPath string `json:"target_path"`
+}
+
+// ApplyMaterializeCompletedPayload is the payload of apply.materialize.completed.
+type ApplyMaterializeCompletedPayload struct {
+	TargetPath         string `json:"target_path"`
+	GroupsMaterialized int    `json:"groups_materialized"`
+}
+
+// ApplyMaterializeErrorPayload is the payload of apply.materialize.error.
+// Best-effort per-group failure during the BUG-29 materialize pass.
+type ApplyMaterializeErrorPayload struct {
+	GroupID string `json:"group_id"`
+	Err     string `json:"err"`
+}
+
 // MemoryArtifactPersistFailedPayload is the payload of
 // memory.artifact_persist_failed. PhaseID identifies the phase whose
 // envelope declared the artifact; TopicKey is the failing

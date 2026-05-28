@@ -81,6 +81,19 @@ type RunConfig struct {
 	// directory — fine for create-only smoke tasks, but the implement
 	// agent has no source to read or edit. Spec #65 (BUG-19).
 	SourceRepoPath string
+	// TargetPath is the OPERATOR-FACING destination where successful
+	// group worktrees are materialized at the end of the apply phase
+	// (BUG-29). Empty preserves the legacy behaviour — worktrees stay
+	// isolated under WorktreeRoot/<change_id>/<group_name>/ and the
+	// operator must copy them manually. When set to e.g.
+	// "/Users/x/Documents/myproject", a successful apply phase copies
+	// each successful group's worktree into
+	// <TargetPath>/<group_name>/ before returning. Failed (or degraded
+	// + failed) groups are NOT materialized — partial deliveries don't
+	// pollute the operator's target tree.
+	//
+	// Loaded from SOPHIA_APPLY_TARGET_PATH.
+	TargetPath string
 	// WorktreeInit selects how createWorktrees populates each newly-
 	// created worktree before dispatching the implement agent.
 	//
@@ -224,7 +237,76 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	}
 
 	// Step 18: aggregate, finalize.
-	return s.finalize(ctx, c, p, board, groupResults), nil
+	finalEnv := s.finalize(ctx, c, p, board, groupResults)
+
+	// BUG-29: materialize successful group worktrees into the
+	// operator-facing TargetPath when configured. Failed groups are
+	// skipped so the target tree never carries half-broken deliveries.
+	// Errors are surfaced via apply.materialize.error but do NOT mutate
+	// the phase outcome — the source-of-truth is the per-group worktree
+	// under WorktreeRoot, and the operator can re-materialize manually.
+	if s.d.Config.TargetPath != "" {
+		s.materializeWorktrees(ctx, p, board, groupResults)
+	}
+
+	return finalEnv, nil
+}
+
+// materializeWorktrees copies each successful group's worktree into
+// <TargetPath>/<group_name>/ via shell.exec cp. Best-effort: per-group
+// errors are emitted as apply.materialize.error but do not abort the
+// remaining groups. See BUG-29.
+func (s *RunService) materializeWorktrees(ctx context.Context, p *phase.Phase, board *apply.Board, results map[ids.GroupID]groupOutcome) {
+	s.publishEvent(ctx, p.ID(), inbound.EventApplyMaterializeStarted, inbound.ApplyMaterializeStartedPayload{
+		TargetPath: s.d.Config.TargetPath,
+	})
+	groupsMaterialized := 0
+	for _, g := range board.Groups() {
+		outcome, ok := results[g.ID()]
+		if !ok || outcome.failed {
+			continue
+		}
+		src := g.WorktreePath()
+		if src == "" {
+			continue
+		}
+		dst := filepath.Join(s.d.Config.TargetPath, g.Name())
+		mkdirPayload, _ := json.Marshal(map[string]any{
+			"command": "mkdir",
+			"args":    []string{"-p", dst},
+		})
+		if _, err := s.d.Runtime.Execute(ctx, outbound.ExecutionRequest{
+			Capability: "shell.exec@v1",
+			Payload:    mkdirPayload,
+			TimeoutMS:  30_000,
+		}); err != nil {
+			s.publishEvent(ctx, p.ID(), inbound.EventApplyMaterializeError, inbound.ApplyMaterializeErrorPayload{
+				GroupID: g.ID().String(),
+				Err:     fmt.Sprintf("mkdir target: %v", err),
+			})
+			continue
+		}
+		cpPayload, _ := json.Marshal(map[string]any{
+			"command": "cp",
+			"args":    []string{"-aR", src + "/.", dst + "/"},
+		})
+		if _, err := s.d.Runtime.Execute(ctx, outbound.ExecutionRequest{
+			Capability: "shell.exec@v1",
+			Payload:    cpPayload,
+			TimeoutMS:  300_000,
+		}); err != nil {
+			s.publishEvent(ctx, p.ID(), inbound.EventApplyMaterializeError, inbound.ApplyMaterializeErrorPayload{
+				GroupID: g.ID().String(),
+				Err:     fmt.Sprintf("cp to target: %v", err),
+			})
+			continue
+		}
+		groupsMaterialized++
+	}
+	s.publishEvent(ctx, p.ID(), inbound.EventApplyMaterializeCompleted, inbound.ApplyMaterializeCompletedPayload{
+		TargetPath:         s.d.Config.TargetPath,
+		GroupsMaterialized: groupsMaterialized,
+	})
 }
 
 // runAllGroups dispatches one goroutine per group. Each waits on its
