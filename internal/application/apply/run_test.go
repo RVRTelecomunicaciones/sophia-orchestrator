@@ -730,6 +730,69 @@ func TestExecute_BuildsBoardFromMultiGroupTasksList(t *testing.T) {
 	require.GreaterOrEqual(t, len(board.tasks), 4)
 }
 
+// TestExecute_BUG30_DependentGroupRunsDespiteUpstreamFailure pins the
+// cascade-soften contract: when a group's upstream dependency fails, the
+// downstream group MUST still execute its tasks (not be auto-skipped via
+// cascade) and the orch MUST emit apply.group.degraded so observers see
+// the soften happen.
+//
+// Pre-fix behaviour: failure of "domain" → "application" cascaded to
+// apply.group.failed without ever attempting application's tasks. End
+// result was an entire apply BLOCKED on a single upstream LLM regression.
+//
+// Real-world trigger: 2026-05-27 Node 22 todolist smoke — 1 task in
+// "server bootstrap" escalated, the other 3 groups (depending on it)
+// cascade-skipped without ever dispatching, so 3 worktrees stayed empty.
+// With this fix those 3 groups would still attempt, and the operator
+// gets concrete partial results to inspect.
+func TestExecute_BUG30_DependentGroupRunsDespiteUpstreamFailure(t *testing.T) {
+	svc, _, disp, _, events, mem := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	// Force the upstream group's task to dispatch BLOCKED via the fake
+	// dispatcher's task-id filter. The downstream group's task uses a
+	// different description so it dispatches DONE.
+	disp.mu.Lock()
+	disp.failOnTaskID = "upstream-blocked-task"
+	disp.mu.Unlock()
+
+	mem.putTasksList("feat-x", map[string]any{
+		"groups": []map[string]any{
+			{
+				"name": "upstream",
+				"tasks": []map[string]any{
+					{"description": "upstream-blocked-task", "files_pattern": []string{"a/*"}},
+				},
+			},
+			{
+				"name":       "downstream",
+				"depends_on": []string{"upstream"},
+				"tasks": []map[string]any{
+					{"description": "downstream-ok-task", "files_pattern": []string{"b/*"}},
+				},
+			},
+		},
+	})
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	types := events.types()
+	require.Contains(t, types, "apply.group.degraded",
+		"a degraded event MUST fire for the downstream group whose upstream failed — without it operators "+
+			"have no signal that a group ran in degraded mode")
+	require.Contains(t, types, "apply.group.failed",
+		"the upstream group itself still fails — soften does not hide real failures")
+
+	// The downstream task MUST have been dispatched. Pre-fix the goroutine
+	// returned at dag.Wait before ever calling the dispatcher; if the
+	// dispatch counter is still 1 after 2 tasks then the downstream was
+	// cascade-skipped — the exact regression BUG-30 closes.
+	require.GreaterOrEqual(t, disp.dispatchCalls.Load(), int32(2),
+		"downstream task MUST dispatch even though upstream failed; cascade-skip is the BUG-30 regression")
+}
+
 // TestExecute_BlocksWhenTasksListMissing locks in Iron Law #1: missing
 // tasks list ⇒ apply phase yields a BLOCKED envelope, not a silent
 // fallback run.

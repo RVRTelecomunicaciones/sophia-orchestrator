@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,6 +170,26 @@ func NewRun(d RunDeps) *RunService {
 // from the goroutine that handles RunPhase, after the Phase row is in
 // status=running. On return, the phase has either completed (with envelope)
 // or been marked blocked. The phase.Service caller persists the phase.
+// extractFailedDep parses the dag.Wait ErrGroupFailed error and returns
+// (failed_dep_id, root_cause_err). The shape matches dag.go's wrap:
+//   "apply: group failed: dependency <gid> failed: <root>"
+// On unexpected shape we return ("", err.Error()) so the degraded event
+// still carries the message even if the dep id can't be peeled off.
+func extractFailedDep(err error) (string, string) {
+	msg := err.Error()
+	const marker = "dependency "
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		return "", msg
+	}
+	rest := msg[idx+len(marker):]
+	endIdx := strings.Index(rest, " failed: ")
+	if endIdx < 0 {
+		return "", msg
+	}
+	return rest[:endIdx], strings.TrimPrefix(rest[endIdx:], " failed: ")
+}
+
 func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error) {
 	// Spec #51: capture the orchestrator-verified prior-phase status
 	// snapshot for the duration of this apply run. Read by
@@ -244,17 +265,38 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 			defer wg.Done()
 
 			// Wait for upstream group dependencies.
+			//
+			// BUG-30 (cascade soften): when an upstream dep FAILED
+			// (ErrGroupFailed), we used to mark this group failed
+			// without ever attempting its tasks — a single LLM
+			// regression at the top of the DAG cascaded to every
+			// downstream group and an entire apply phase blocked.
+			// Now we distinguish: ErrGroupFailed → emit
+			// apply.group.degraded and CONTINUE; ctx cancel or
+			// ErrDependencyTimeout still hard-fail (those are
+			// environmental, not LLM, signals).
 			depTimeout := s.depWaitDuration().ToDuration()
 			if err := dag.Wait(ctx, group.DependsOn(), depTimeout); err != nil {
-				dag.Signal(group.ID(), true, err)
-				resultsMu.Lock()
-				results[group.ID()] = groupOutcome{failed: true, err: err}
-				resultsMu.Unlock()
-				s.publishEvent(ctx, p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
-					GroupID: group.ID().String(),
-					Reason:  err.Error(),
-				})
-				return
+				if errors.Is(err, ErrGroupFailed) {
+					failedDep, depErr := extractFailedDep(err)
+					s.publishEvent(ctx, p.ID(), inbound.EventApplyGroupDegraded, inbound.ApplyGroupDegradedPayload{
+						GroupID:      group.ID().String(),
+						FailedDep:    failedDep,
+						FailedDepErr: depErr,
+						ContinuedRun: true,
+					})
+					// fall through — execute the group anyway
+				} else {
+					dag.Signal(group.ID(), true, err)
+					resultsMu.Lock()
+					results[group.ID()] = groupOutcome{failed: true, err: err}
+					resultsMu.Unlock()
+					s.publishEvent(ctx, p.ID(), inbound.EventApplyGroupFailed, inbound.ApplyGroupFailedPayload{
+						GroupID: group.ID().String(),
+						Reason:  err.Error(),
+					})
+					return
+				}
 			}
 
 			// Bound parallel-group concurrency.
