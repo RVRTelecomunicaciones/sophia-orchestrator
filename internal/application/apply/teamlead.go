@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
@@ -16,6 +17,56 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
+
+// saturationRetryBudget caps how many times runImplementWithRetry will
+// retry SpawnGov.Acquire after receiving discipline.ErrSaturated before
+// surfacing the saturation as a real task failure. Saturation is a
+// transient signal: the governor is full, slots will free up as other
+// in-flight tasks Release. Without this budget a single saturation hit
+// would fail the task with attempts=0 and cascade to a false group
+// failure (Spec / BUG-26).
+const saturationRetryBudget = 5
+
+// saturationBackoff returns the sleep duration before the next Acquire
+// retry attempt. Starts at 500ms and doubles each retry, capping at 4s,
+// so total wait across the budget is ~10s — bounded but generous enough
+// to ride out typical contention bursts in a 3-group apply phase.
+func saturationBackoff(attempt int) time.Duration {
+	const (
+		base       = 500 * time.Millisecond
+		maxBackoff = 4 * time.Second
+	)
+	d := base << attempt //nolint:gosec // attempt is bounded by saturationRetryBudget
+	if d > maxBackoff {
+		return maxBackoff
+	}
+	return d
+}
+
+// acquireWithSaturationRetries calls SpawnGov.Acquire up to
+// saturationRetryBudget times, sleeping with exponential backoff between
+// attempts on discipline.ErrSaturated. Non-saturation errors fail fast
+// (ctx cancel, repo error). Saturation is transient: slots free as
+// in-flight tasks Release, so a bounded retry rides out contention
+// without poisoning the calling phase. See BUG-26.
+func acquireWithSaturationRetries(ctx context.Context, gov SpawnGovernor) error {
+	var err error
+	for attempt := 0; attempt < saturationRetryBudget; attempt++ {
+		err = gov.Acquire(ctx)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, discipline.ErrSaturated) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(saturationBackoff(attempt)):
+		}
+	}
+	return err
+}
 
 // runTeamLead executes one team-lead workflow for a single Group: claim
 // each task, spawn implement-agents in parallel (bounded by config),
@@ -149,8 +200,12 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		if err := ctx.Err(); err != nil {
 			return false
 		}
-		// SpawnGovernor gating per implement attempt.
-		if err := s.d.SpawnGov.Acquire(ctx); err != nil {
+		// SpawnGovernor gating per implement attempt. BUG-26: retry on
+		// ErrSaturated before surfacing the saturation as a real
+		// failure — saturation is transient (slots free as other
+		// in-flight tasks Release). Other Acquire errors (ctx cancel,
+		// repo error) still fail fast inside the helper.
+		if err := acquireWithSaturationRetries(ctx, s.d.SpawnGov); err != nil {
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyImplementSpawnGovernorError, inbound.ApplyImplementSpawnGovernorErrorPayload{
 				TaskID: task.ID().String(),
 				Err:    err.Error(),
