@@ -81,11 +81,35 @@ type RunConfig struct {
 	// directory — fine for create-only smoke tasks, but the implement
 	// agent has no source to read or edit. Spec #65 (BUG-19).
 	SourceRepoPath string
+	// WorktreeInit selects how createWorktrees populates each newly-
+	// created worktree before dispatching the implement agent.
+	//
+	//   "" or "source_clone" — default. When SourceRepoPath is non-empty,
+	//                          copy the source tree into the worktree
+	//                          via `cp -aR <src>/. <worktree>/` (the
+	//                          BUG-19 behaviour). Correct for cycles
+	//                          that EDIT the orch's own source tree.
+	//   "empty"             — skip the source copy regardless of
+	//                          SourceRepoPath. The worktree is just
+	//                          `mkdir -p`'d. Use this for cross-language
+	//                          NEW-FEATURE cycles where seeing the orch's
+	//                          Go source confuses the implement LLM into
+	//                          returning BLOCKED (BUG-27, observed in the
+	//                          2026-05-27 Node 22 todolist smoke).
+	//
+	// Loaded from SOPHIA_APPLY_WORKTREE_INIT.
+	WorktreeInit string
 	// Environment is the orchestrator's deployment env ("dev" | "staging" |
 	// "prod"). Forwarded as a memory-engine scope filter on topic-key lookups
 	// so we read records saved within the same environment.
 	Environment string
 }
+
+// WorktreeInitMode constants for RunConfig.WorktreeInit.
+const (
+	WorktreeInitSourceClone = "source_clone"
+	WorktreeInitEmpty       = "empty"
+)
 
 // DefaultRunConfig returns V1 defaults aligned with spec § 5.2:
 // 2x2 = 4 max concurrent agents, 10min dep wait, 30min dispatch, V1
@@ -702,6 +726,19 @@ func (s *RunService) createWorktrees(ctx context.Context, c *change.Change, boar
 		// suffix on source tells cp to copy the contents rather than
 		// the source directory itself — destination/.git/, destination/
 		// internal/ etc., not destination/<src>/...
+		//
+		// BUG-27: skip the copy entirely when WorktreeInit == "empty".
+		// Cross-language NEW-FEATURE cycles (e.g. building a Node 22
+		// TODO API from the orch's Go workspace) hit semantic mismatch
+		// when the implement LLM lands in a worktree full of Go source
+		// it isn't supposed to touch — observed in the 2026-05-27
+		// todolist smoke where every implement attempt returned BLOCKED
+		// and IL5-escalated. The operator picks the mode per cycle via
+		// SOPHIA_APPLY_WORKTREE_INIT; default remains source_clone so
+		// existing self-modification cycles are unaffected.
+		if s.d.Config.WorktreeInit == WorktreeInitEmpty {
+			continue
+		}
 		if src := s.d.Config.SourceRepoPath; src != "" {
 			cpPayload, _ := json.Marshal(map[string]any{
 				"command": "cp",

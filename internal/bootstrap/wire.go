@@ -217,6 +217,10 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// with a copy of the source repo so the implement agent has source
 	// to read and edit. Empty keeps the legacy empty-mkdir behaviour.
 	applyRunCfg.SourceRepoPath = cfg.Apply.SourceRepoPath
+	// BUG-27: per-cycle override of the worktree init strategy. Operators
+	// switch to "empty" for cross-language new-feature cycles where the
+	// orch's Go source tree would confuse the implement LLM.
+	applyRunCfg.WorktreeInit = cfg.Apply.WorktreeInit
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,
