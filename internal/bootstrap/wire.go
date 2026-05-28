@@ -221,6 +221,10 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// switch to "empty" for cross-language new-feature cycles where the
 	// orch's Go source tree would confuse the implement LLM.
 	applyRunCfg.WorktreeInit = cfg.Apply.WorktreeInit
+	// BUG-29: operator-facing target where successful worktrees land at
+	// end of apply. Empty preserves the legacy behaviour of leaving
+	// worktrees isolated under WorktreeRoot.
+	applyRunCfg.TargetPath = cfg.Apply.TargetPath
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,

@@ -67,6 +67,12 @@ type ApplyConfig struct {
 	// internal/application/apply/run.go RunConfig.WorktreeInit for the
 	// full rationale and the BUG-27 motivation.
 	WorktreeInit string
+	// TargetPath, when non-empty, triggers the apply phase to copy
+	// every successful group's worktree into <TargetPath>/<group_name>/
+	// at the end of Execute (BUG-29). Empty preserves the legacy
+	// behaviour of leaving worktrees isolated under WorktreeRoot.
+	// Loaded from SOPHIA_APPLY_TARGET_PATH.
+	TargetPath string
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -348,6 +354,7 @@ func Load() (Config, error) {
 	c.Apply.WorktreeRoot = envStr("SOPHIA_APPLY_WORKTREE_ROOT", c.Apply.WorktreeRoot)
 	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)
 	c.Apply.WorktreeInit = envStr("SOPHIA_APPLY_WORKTREE_INIT", c.Apply.WorktreeInit)
+	c.Apply.TargetPath = envStr("SOPHIA_APPLY_TARGET_PATH", c.Apply.TargetPath)
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)

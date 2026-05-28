@@ -111,6 +111,20 @@ const (
 	// timeout, etc.). See dispatcher M-E0 #3 hardening.
 	EventRuntimeDispatchFailed = "runtime.dispatch_failed"
 
+	// EventApplyMaterializeStarted (BUG-29) is published when the apply
+	// phase begins copying successful group worktrees into the
+	// operator-facing TargetPath.
+	EventApplyMaterializeStarted = "apply.materialize.started"
+	// EventApplyMaterializeCompleted is published once the materialize
+	// pass finishes. GroupsMaterialized reports how many successful
+	// groups were copied.
+	EventApplyMaterializeCompleted = "apply.materialize.completed"
+	// EventApplyMaterializeError is published per-group when the
+	// materialize copy fails (mkdir or cp). Does NOT abort the
+	// remaining groups — operator inspects the worktree under
+	// WorktreeRoot for any group that did not land in TargetPath.
+	EventApplyMaterializeError = "apply.materialize.error"
+
 	// EventMemoryArtifactPersistFailed is published when the orch tried to
 	// persist an envelope.ArtifactsSaved entry to memory-engine and the
 	// Ingest call failed. The phase itself is NOT failed — the envelope is
@@ -152,6 +166,9 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},
 	EventMemoryArtifactPersistFailed:      {},
+	EventApplyMaterializeStarted:          {},
+	EventApplyMaterializeCompleted:        {},
+	EventApplyMaterializeError:            {},
 }
 
 // IsKnownEventType reports whether the given type string is one of the
