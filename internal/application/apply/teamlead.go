@@ -33,12 +33,12 @@ const saturationRetryBudget = 5
 // to ride out typical contention bursts in a 3-group apply phase.
 func saturationBackoff(attempt int) time.Duration {
 	const (
-		base = 500 * time.Millisecond
-		cap_ = 4 * time.Second
+		base       = 500 * time.Millisecond
+		maxBackoff = 4 * time.Second
 	)
 	d := base << attempt //nolint:gosec // attempt is bounded by saturationRetryBudget
-	if d > cap_ {
-		return cap_
+	if d > maxBackoff {
+		return maxBackoff
 	}
 	return d
 }
