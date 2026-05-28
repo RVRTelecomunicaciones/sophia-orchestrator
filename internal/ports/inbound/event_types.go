@@ -66,6 +66,12 @@ const (
 	// EventApplyGroupFailed is published when a group's wait/Acquire/team-
 	// lead returns an error, OR when at least one task BLOCKED.
 	EventApplyGroupFailed = "apply.group.failed"
+	// EventApplyGroupDegraded (BUG-30) is published when a group's
+	// upstream dependency failed but the group continues to execute
+	// anyway. The group's outcome is independent of the failed
+	// dependency — this event surfaces the degraded condition without
+	// cascading the failure.
+	EventApplyGroupDegraded = "apply.group.degraded"
 
 	// EventApplyTeamLeadSpawned is published once per group when the
 	// team-lead session is created.
@@ -148,6 +154,7 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyWorktreeError:               {},
 	EventApplyGroupCompleted:              {},
 	EventApplyGroupFailed:                 {},
+	EventApplyGroupDegraded:               {},
 	EventApplyTeamLeadSpawned:             {},
 	EventApplyImplementSpawnFailed:        {},
 	EventApplyImplementSpawnGovernorError: {},

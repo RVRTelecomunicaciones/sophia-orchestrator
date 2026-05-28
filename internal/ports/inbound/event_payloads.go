@@ -57,6 +57,20 @@ type ApplyGroupFailedPayload struct {
 	Reason  string `json:"reason"`
 }
 
+// ApplyGroupDegradedPayload is the payload of apply.group.degraded — a new
+// signal introduced by BUG-30. Emitted when a group's upstream dependency
+// failed but the group is being executed ANYWAY (cascade soften) so the
+// rest of the apply phase still makes progress. The implement agents in
+// this group know their priorContext is incomplete; the operator inspects
+// the dependency failure reason via FailedDep alongside the group's own
+// outcome to decide next steps (resume, manual fix, accept partial).
+type ApplyGroupDegradedPayload struct {
+	GroupID       string `json:"group_id"`
+	FailedDep     string `json:"failed_dep"`
+	FailedDepErr  string `json:"failed_dep_err"`
+	ContinuedRun bool   `json:"continued_run"`
+}
+
 // ApplyTeamLeadSpawnedPayload is the payload of apply.team_lead.spawned.
 type ApplyTeamLeadSpawnedPayload struct {
 	SessionID string `json:"session_id"`
