@@ -170,26 +170,6 @@ func NewRun(d RunDeps) *RunService {
 // from the goroutine that handles RunPhase, after the Phase row is in
 // status=running. On return, the phase has either completed (with envelope)
 // or been marked blocked. The phase.Service caller persists the phase.
-// extractFailedDep parses the dag.Wait ErrGroupFailed error and returns
-// (failed_dep_id, root_cause_err). The shape matches dag.go's wrap:
-//   "apply: group failed: dependency <gid> failed: <root>"
-// On unexpected shape we return ("", err.Error()) so the degraded event
-// still carries the message even if the dep id can't be peeled off.
-func extractFailedDep(err error) (string, string) {
-	msg := err.Error()
-	const marker = "dependency "
-	idx := strings.Index(msg, marker)
-	if idx < 0 {
-		return "", msg
-	}
-	rest := msg[idx+len(marker):]
-	endIdx := strings.Index(rest, " failed: ")
-	if endIdx < 0 {
-		return "", msg
-	}
-	return rest[:endIdx], strings.TrimPrefix(rest[endIdx:], " failed: ")
-}
-
 func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error) {
 	// Spec #51: capture the orchestrator-verified prior-phase status
 	// snapshot for the duration of this apply run. Read by
@@ -854,4 +834,27 @@ func roleForApply(role string) session.AgentRole {
 		return session.RoleTeamLead
 	}
 	return session.RoleImplement
+}
+
+// extractFailedDep parses the dag.Wait ErrGroupFailed error and returns
+// (failed_dep_id, root_cause_err). The shape matches dag.go's wrap:
+//
+//	"apply: group failed: dependency <gid> failed: <root>"
+//
+// On unexpected shape we return ("", err.Error()) so the degraded event
+// still carries the message even if the dep id can't be peeled off.
+// Spec / BUG-30.
+func extractFailedDep(err error) (string, string) {
+	msg := err.Error()
+	const marker = "dependency "
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		return "", msg
+	}
+	rest := msg[idx+len(marker):]
+	endIdx := strings.Index(rest, " failed: ")
+	if endIdx < 0 {
+		return "", msg
+	}
+	return rest[:endIdx], strings.TrimPrefix(rest[endIdx:], " failed: ")
 }
