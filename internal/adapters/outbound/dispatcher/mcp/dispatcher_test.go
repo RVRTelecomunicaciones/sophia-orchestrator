@@ -428,6 +428,44 @@ func TestDispatch_MalformedEnvelope_Envelope(t *testing.T) {
 	}
 }
 
+// BUG-25: opencode 1.15+ auto-rejects requests that mention absolute paths
+// outside the worktree allowlist. The subprocess exits 0 with only a
+// step_start event in stdout and a stderr line like:
+//   "permission requested: external_directory (/foo/bar/*); auto-rejecting"
+// The bridge forwards exit_code=0 + stderr verbatim + no envelope_raw. The
+// dispatcher previously surfaced this as a generic "envelope_raw is absent"
+// error, which sends operators on a wild goose chase (looking for bridge
+// or model bugs) when the real cause is a permission denial they can fix
+// by adjusting the prompt or extending the opencode allowlist.
+//
+// Classify this case explicitly so the error message names the rejected
+// path and points at the opencode permission system.
+func TestDispatch_OpencodePermissionRejection_Classified(t *testing.T) {
+	stderr := "\x1b[93m\x1b[1m! \x1b[0mpermission requested: " +
+		"external_directory (/Users/russell/Documents/2026/todolist-demo/*); auto-rejecting\n"
+	sess := &fakeSession{
+		result: mkTextResult(bridgeJSON("ok", "", "",
+			`{"type":"step_start","sessionID":"ses_x"}`, stderr,
+			nil, 0, 7190)),
+	}
+	d := newTestDispatcher(singleOpener(sess))
+
+	_, err := d.Dispatch(context.Background(), outbound.DispatchRequest{Prompt: "hi"})
+
+	require.Error(t, err)
+	require.True(t, errors.Is(err, outbound.ErrDispatchFailed),
+		"must wrap ErrDispatchFailed")
+	// The classified error MUST mention the root cause (permission denial)
+	// and the rejected path so the operator can act without reading bridge
+	// or opencode logs.
+	assert.Contains(t, err.Error(), "opencode_permission_denied",
+		"must classify the rejection as opencode_permission_denied, not generic envelope_error")
+	assert.Contains(t, err.Error(), "external_directory",
+		"must echo the opencode rejection class so the operator sees the kind of permission")
+	assert.Contains(t, err.Error(), "/Users/russell/Documents/2026/todolist-demo",
+		"must echo the rejected path verbatim so the operator can fix the prompt or allowlist")
+}
+
 // ---------------------------------------------------------------------------
 // Q3 — args["provider"] injected on every agent.run
 // ---------------------------------------------------------------------------

@@ -227,6 +227,21 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 
 	// status == "ok" — extract envelope_raw.
 	if resp.EnvelopeRaw == nil {
+		// BUG-25: opencode 1.15+ auto-rejects requests that mention paths
+		// outside the worktree allowlist. The subprocess exits 0 with
+		// only a step_start event in stdout and a stderr line shaped
+		//   "permission requested: <class> (<path>); auto-rejecting"
+		// The bridge forwards exit_code=0, no envelope_raw, and the
+		// stderr verbatim. Surfacing this as a generic envelope_error
+		// sends operators chasing bridge or model bugs; classify the
+		// rejection explicitly so the message names the cause and the
+		// rejected path.
+		if class, path, ok := detectOpencodePermissionRejection(resp.Stderr); ok {
+			return nil, fmt.Errorf(
+				"%w: opencode_permission_denied: %s %q auto-rejected by opencode permission system; remove the absolute path from the prompt or extend the opencode allowlist",
+				outbound.ErrDispatchFailed, class, path,
+			)
+		}
 		return nil, fmt.Errorf("%w: envelope_error: bridge returned ok but envelope_raw is absent",
 			outbound.ErrDispatchFailed)
 	}
@@ -377,6 +392,44 @@ type bridgeResult struct {
 	ExitCode    int             `json:"exit_code"`
 	DurationMS  int             `json:"duration_ms"`
 	EnvelopeRaw json.RawMessage `json:"envelope_raw"`
+}
+
+// detectOpencodePermissionRejection scans bridge stderr for opencode's
+// auto-rejection line that fires when the prompt mentions a path outside
+// the worktree allowlist. Returns the permission class and the rejected
+// path when the pattern matches.
+//
+// Real-world stderr sample (ANSI prefix stripped):
+//
+//	"! permission requested: external_directory (/Users/x/foo/*); auto-rejecting"
+//
+// Match is intentionally loose on prefix/suffix (ANSI escapes vary by
+// opencode version) and strict on the "permission requested: <class> (<path>)"
+// shape. Returns ok=false when the pattern is absent — the caller then
+// surfaces the generic envelope_error so a future opencode permission
+// taxonomy change does not silently swallow a real envelope bug.
+func detectOpencodePermissionRejection(stderr string) (class, path string, ok bool) {
+	const marker = "permission requested:"
+	idx := strings.Index(stderr, marker)
+	if idx < 0 {
+		return "", "", false
+	}
+	rest := stderr[idx+len(marker):]
+	// Expect: " <class> (<path>); auto-rejecting"
+	openParen := strings.Index(rest, "(")
+	if openParen < 0 {
+		return "", "", false
+	}
+	closeParen := strings.Index(rest[openParen:], ")")
+	if closeParen < 0 {
+		return "", "", false
+	}
+	class = strings.TrimSpace(rest[:openParen])
+	path = rest[openParen+1 : openParen+closeParen]
+	if class == "" || path == "" {
+		return "", "", false
+	}
+	return class, path, true
 }
 
 // parseEnvelopeRaw validates and normalises the envelope_raw JSON from the bridge.
