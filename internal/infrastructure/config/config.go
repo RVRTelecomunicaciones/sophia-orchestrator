@@ -60,6 +60,13 @@ type ApplyConfig struct {
 	// `git diff` against the copied .git. Loaded from
 	// SOPHIA_APPLY_SOURCE_REPO_PATH. Spec #65 (BUG-19).
 	SourceRepoPath string
+	// WorktreeInit selects how the apply phase populates each newly-
+	// created worktree before dispatching the implement agent. Valid
+	// values: "source_clone" (default, preserves BUG-19) | "empty".
+	// Loaded from SOPHIA_APPLY_WORKTREE_INIT. See
+	// internal/application/apply/run.go RunConfig.WorktreeInit for the
+	// full rationale and the BUG-27 motivation.
+	WorktreeInit string
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -340,6 +347,7 @@ func Load() (Config, error) {
 
 	c.Apply.WorktreeRoot = envStr("SOPHIA_APPLY_WORKTREE_ROOT", c.Apply.WorktreeRoot)
 	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)
+	c.Apply.WorktreeInit = envStr("SOPHIA_APPLY_WORKTREE_INIT", c.Apply.WorktreeInit)
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)

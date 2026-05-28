@@ -119,13 +119,34 @@ func (r *fakeSessionRepo) FindByPhaseID(_ context.Context, _ ids.PhaseID) ([]*se
 	return nil, nil
 }
 
-type fakeRuntime struct{}
+type fakeRuntime struct {
+	mu    sync.Mutex
+	calls []outbound.ExecutionRequest
+}
 
-func (fakeRuntime) Execute(_ context.Context, _ outbound.ExecutionRequest) (*outbound.ExecutionReceipt, error) {
+func (r *fakeRuntime) Execute(_ context.Context, req outbound.ExecutionRequest) (*outbound.ExecutionReceipt, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, req)
+	r.mu.Unlock()
 	return &outbound.ExecutionReceipt{
 		Status:   outbound.ReceiptSuccess,
 		ExitCode: 0,
 	}, nil
+}
+
+// payloadCommand decodes the runtime.Execute payload and returns the
+// "command" field. Used by BUG-27 tests to assert what shell commands
+// the apply phase emitted to the runtime adapter without coupling to
+// the full payload JSON shape.
+func payloadCommand(req outbound.ExecutionRequest) string {
+	var m map[string]any
+	if err := json.Unmarshal(req.Payload, &m); err != nil {
+		return ""
+	}
+	if v, ok := m["command"].(string); ok {
+		return v
+	}
+	return ""
 }
 
 type fakeDispatcher struct {
@@ -432,7 +453,7 @@ func newRunService(t *testing.T, opts ...func(*apply.RunDeps)) (*apply.RunServic
 	deps := apply.RunDeps{
 		BoardRepo:   board,
 		SessionRepo: newFakeSessionRepo(),
-		Runtime:     fakeRuntime{},
+		Runtime:     &fakeRuntime{},
 		Dispatcher:  disp,
 		SpawnGov:    spawn,
 		Validator:   discipline.NewValidator(),
@@ -529,6 +550,80 @@ func TestRunImplement_BoundedRetriesOnSaturation(t *testing.T) {
 		"the implementer MUST eventually dispatch once the governor accepts the acquire")
 	require.GreaterOrEqual(t, spawn.calls, 4,
 		"Acquire must be retried on ErrSaturated, not fail on the first hit")
+}
+
+// TestCreateWorktrees_WorktreeInitEmpty_SkipsSourceCopy pins BUG-27.
+// When the operator opts a change into WorktreeInit="empty", the apply
+// phase must NOT copy SourceRepoPath into each new worktree, even when
+// SourceRepoPath is configured. The default mode keeps the BUG-19
+// behaviour (source_clone), so existing orch self-modification cycles
+// are unaffected.
+//
+// Real-world trigger: the 2026-05-27 Node 22 todolist smoke. With
+// source_clone the worktree was pre-populated with the orch's Go tree
+// (AGENTS.md, CLAUDE.md, cmd/sophia-orchestator/main.go, …) and every
+// implement attempt for a Node JS task returned BLOCKED with envelope
+// "this isn't the right project" — 4/4 groups cascade-failed.
+func TestCreateWorktrees_WorktreeInitEmpty_SkipsSourceCopy(t *testing.T) {
+	rt := &fakeRuntime{}
+	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Runtime = rt
+		d.Config.SourceRepoPath = "/tmp/should-not-be-copied"
+		d.Config.WorktreeInit = apply.WorktreeInitEmpty
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var sawMkdir, sawCp bool
+	for _, call := range rt.calls {
+		switch payloadCommand(call) {
+		case "mkdir":
+			sawMkdir = true
+		case "cp":
+			sawCp = true
+		}
+	}
+	require.True(t, sawMkdir,
+		"createWorktrees must still mkdir -p the per-group directory even when WorktreeInit=empty")
+	require.False(t, sawCp,
+		"WorktreeInit=empty MUST suppress the cp -aR source copy that BUG-19 introduced; "+
+			"a cp call here is the BUG-27 regression that poisons cross-language new-feature cycles")
+}
+
+// TestCreateWorktrees_WorktreeInitDefault_PreservesSourceClone pins the
+// other side of BUG-27: when WorktreeInit is unset, the legacy BUG-19
+// behaviour (cp -aR source) must still fire. Otherwise this fix would
+// silently break every orch self-modification cycle on the next deploy.
+func TestCreateWorktrees_WorktreeInitDefault_PreservesSourceClone(t *testing.T) {
+	rt := &fakeRuntime{}
+	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Runtime = rt
+		d.Config.SourceRepoPath = "/tmp/source-clone-target"
+		// WorktreeInit deliberately left empty — default behaviour.
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var sawCp bool
+	for _, call := range rt.calls {
+		if payloadCommand(call) == "cp" {
+			sawCp = true
+			break
+		}
+	}
+	require.True(t, sawCp,
+		"default WorktreeInit (empty string) MUST still trigger the BUG-19 cp -aR — operators rely "+
+			"on this for orch self-modification cycles where the source IS the target")
 }
 
 func TestExecute_SpawnGovernorBoundsParallelism(t *testing.T) {
