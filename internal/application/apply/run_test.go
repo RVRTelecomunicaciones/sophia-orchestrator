@@ -730,6 +730,82 @@ func TestExecute_BuildsBoardFromMultiGroupTasksList(t *testing.T) {
 	require.GreaterOrEqual(t, len(board.tasks), 4)
 }
 
+// TestExecute_BUG29_MaterializeCopiesSuccessfulWorktreesToTarget pins
+// the worktree materialization contract. When TargetPath is set on the
+// RunConfig and the apply phase completes with at least one successful
+// group, each successful group's worktree MUST be copied into
+// <TargetPath>/<group_name>/. The current behaviour (TargetPath empty)
+// is unchanged — the materialize pass is skipped.
+//
+// Real-world trigger: 2026-05-27 Node 22 todolist smoke. The apply phase
+// generated working Node code into
+// /Users/.../.sophia-worktrees/<cid>/server bootstrap/, but the operator
+// had to cp -aR manually to land it at /Users/.../todolist-demo/. With
+// this fix the same cycle would deliver the project at TargetPath
+// without operator intervention.
+func TestExecute_BUG29_MaterializeCopiesSuccessfulWorktreesToTarget(t *testing.T) {
+	rt := &fakeRuntime{}
+	target := t.TempDir()
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Runtime = rt
+		d.Config.TargetPath = target
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var sawTargetCp bool
+	for _, call := range rt.calls {
+		if payloadCommand(call) != "cp" {
+			continue
+		}
+		// args[-1] is the destination path; loosely match TargetPath
+		// prefix so we don't depend on the exact group name layout.
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(call.Payload, &m))
+		args, _ := m["args"].([]any)
+		require.Greater(t, len(args), 0, "cp args must be present")
+		dst, _ := args[len(args)-1].(string)
+		if strings.HasPrefix(dst, target) {
+			sawTargetCp = true
+			break
+		}
+	}
+	require.True(t, sawTargetCp,
+		"materialize MUST issue a cp landing under TargetPath when at least one group succeeds; "+
+			"BUG-29 regression is the worktrees-never-reach-target symptom from the live smoke")
+
+	types := events.types()
+	require.Contains(t, types, "apply.materialize.started")
+	require.Contains(t, types, "apply.materialize.completed")
+}
+
+// TestExecute_BUG29_NoTargetPath_SkipsMaterialize pins the default-off
+// contract: empty TargetPath MUST suppress the materialize pass entirely.
+// Cycles that don't opt in (the default for orch self-modification) see
+// zero new events, zero new cp commands beyond the BUG-19 source clone.
+func TestExecute_BUG29_NoTargetPath_SkipsMaterialize(t *testing.T) {
+	rt := &fakeRuntime{}
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Runtime = rt
+		// TargetPath deliberately empty.
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{ChangeID: c.ID(), PhaseType: phase.PhaseApply})
+	require.NoError(t, err)
+
+	types := events.types()
+	require.NotContains(t, types, "apply.materialize.started",
+		"empty TargetPath MUST NOT emit materialize.started — the pass should be entirely skipped")
+	require.NotContains(t, types, "apply.materialize.completed")
+}
+
 // TestExecute_BlocksWhenTasksListMissing locks in Iron Law #1: missing
 // tasks list ⇒ apply phase yields a BLOCKED envelope, not a silent
 // fallback run.
