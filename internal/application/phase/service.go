@@ -566,7 +566,7 @@ func (s *Service) Resume(ctx context.Context, id ids.PhaseID) (*inbound.RunPhase
 	}
 	if p.Status().IsTerminal() {
 		// BUG-28: blocked apply phases are the only resumable terminal.
-		if !(p.Status() == phase.PhaseStatusBlocked && p.Type() == phase.PhaseApply) {
+		if p.Status() != phase.PhaseStatusBlocked || p.Type() != phase.PhaseApply {
 			return nil, fmt.Errorf("%w: %s", ErrAlreadyTerminal, p.Status())
 		}
 	}
