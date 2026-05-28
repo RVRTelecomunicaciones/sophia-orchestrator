@@ -134,3 +134,46 @@ func TestMarkInterrupted_RejectsTerminal(t *testing.T) {
 	require.NoError(t, p.Complete(mkEnv(envelope.StatusDone, 0.85, phase.PhaseSpec), ts()))
 	require.ErrorIs(t, p.MarkInterrupted(), phase.ErrTerminal)
 }
+
+// --- Restart (BUG-28) ---
+
+// TestRestart_FromBlocked transitions a blocked phase back to running and
+// bumps attempts. Used by the apply-phase retry path so operators can
+// replay a partially-failed apply without losing the successful groups'
+// worktrees (the application layer reuses the existing board for the
+// same phase_id).
+func TestRestart_FromBlocked(t *testing.T) {
+	p, _ := phase.New(mkPhaseID(t), mkChangeID(t), phase.PhaseApply, 3)
+	require.NoError(t, p.Start(ts()))
+	require.NoError(t, p.Complete(mkEnv(envelope.StatusBlocked, 0.0, phase.PhaseApply), ts()))
+	require.Equal(t, phase.PhaseStatusBlocked, p.Status())
+	require.Equal(t, 1, p.Attempts())
+
+	require.NoError(t, p.Restart(ts()))
+	require.Equal(t, phase.PhaseStatusRunning, p.Status())
+	require.Equal(t, 2, p.Attempts(), "Restart consumes the retry budget like Start does")
+	require.Nil(t, p.CompletedAt(), "Restart MUST clear completedAt so the next Complete writes a fresh terminal time")
+	require.Nil(t, p.Envelope(), "Restart MUST clear the prior BLOCKED envelope so the new Execute writes its own outcome cleanly")
+}
+
+func TestRestart_RejectsDone(t *testing.T) {
+	p, _ := phase.New(mkPhaseID(t), mkChangeID(t), phase.PhaseApply, 3)
+	require.NoError(t, p.Start(ts()))
+	require.NoError(t, p.Complete(mkEnv(envelope.StatusDone, 0.85, phase.PhaseApply), ts()))
+	require.ErrorIs(t, p.Restart(ts()), phase.ErrTerminal,
+		"done phases are NOT retryable — Restart is BUG-28-blocked-specific")
+}
+
+func TestRestart_RejectsNonTerminal(t *testing.T) {
+	p, _ := phase.New(mkPhaseID(t), mkChangeID(t), phase.PhaseApply, 3)
+	require.NoError(t, p.Start(ts()))
+	require.ErrorIs(t, p.Restart(ts()), phase.ErrNotBlocked,
+		"running phases must go through Resume, not Restart")
+}
+
+func TestRestart_BudgetExhausted(t *testing.T) {
+	p, _ := phase.New(mkPhaseID(t), mkChangeID(t), phase.PhaseApply, 1)
+	require.NoError(t, p.Start(ts()))
+	require.NoError(t, p.Complete(mkEnv(envelope.StatusBlocked, 0.0, phase.PhaseApply), ts()))
+	require.ErrorIs(t, p.Restart(ts()), phase.ErrBudgetExhausted)
+}

@@ -549,13 +549,26 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 // Resume re-launches an interrupted phase. V1: validates the phase is in
 // running or interrupted status and reschedules runAsync. The retry budget
 // is preserved.
+//
+// BUG-28 extension: blocked apply phases ARE resumable. Apply is the only
+// terminal status that earns this exception because the underlying board
+// + worktrees + per-task statuses are all preserved across retries — the
+// re-Execute reuses the existing board, skips done groups/tasks, and only
+// reattempts the ones that previously failed. Other terminal statuses
+// (done / done_with_concerns) stay non-resumable: those phases produced
+// an accepted envelope and replaying them is semantically wrong. Blocked
+// non-apply phases also stay non-resumable today — the retry semantics
+// for spec/proposal/etc. live in the existing Service.Run path (BUG-24).
 func (s *Service) Resume(ctx context.Context, id ids.PhaseID) (*inbound.RunPhaseOutput, error) {
 	p, err := s.d.PhaseRepo.FindByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("find phase: %w", err)
 	}
 	if p.Status().IsTerminal() {
-		return nil, fmt.Errorf("%w: %s", ErrAlreadyTerminal, p.Status())
+		// BUG-28: blocked apply phases are the only resumable terminal.
+		if p.Status() != phase.PhaseStatusBlocked || p.Type() != phase.PhaseApply {
+			return nil, fmt.Errorf("%w: %s", ErrAlreadyTerminal, p.Status())
+		}
 	}
 	c, err := s.d.ChangeRepo.FindByID(ctx, p.ChangeID())
 	if err != nil {
@@ -565,6 +578,19 @@ func (s *Service) Resume(ctx context.Context, id ids.PhaseID) (*inbound.RunPhase
 	// Mark interrupted phases as running again to enable Complete.
 	if p.Status() == phase.PhaseStatusInterrupted {
 		if err := p.Start(s.d.Clock.Now()); err != nil {
+			return nil, err //nolint:wrapcheck
+		}
+		if err := s.d.PhaseRepo.Save(ctx, p); err != nil {
+			return nil, fmt.Errorf("save phase: %w", err)
+		}
+	}
+
+	// BUG-28: blocked apply transitions back to running via Restart, which
+	// consumes the retry budget. Apply.Execute then reuses the existing
+	// board for this phase_id (no board re-creation) and the run loops
+	// skip groups/tasks already at Completed/Done.
+	if p.Status() == phase.PhaseStatusBlocked && p.Type() == phase.PhaseApply {
+		if err := p.Restart(s.d.Clock.Now()); err != nil {
 			return nil, err //nolint:wrapcheck
 		}
 		if err := s.d.PhaseRepo.Save(ctx, p); err != nil {

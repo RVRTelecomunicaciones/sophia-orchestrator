@@ -149,3 +149,34 @@ func (p *Phase) MarkInterrupted() error {
 	p.status = PhaseStatusInterrupted
 	return nil
 }
+
+// Restart transitions a blocked Phase back to PhaseStatusRunning so the
+// orchestrator can replay Execute against the same phase_id (BUG-28).
+// Unlike Start, Restart is gated to PhaseStatusBlocked specifically —
+// done / done_with_concerns are intentionally non-retryable because the
+// phase already produced an accepted envelope.
+//
+// On success: status → running, attempts++ (consumes retry budget),
+// startedAt refreshed, completedAt cleared, prior envelope/confidence
+// reset so the new Execute writes its own outcome cleanly. Returns
+// ErrBudgetExhausted when the retry budget is at zero, ErrTerminal when
+// called on a non-blocked terminal status, and ErrNotBlocked when the
+// status is not terminal at all (use Start / Resume on those).
+func (p *Phase) Restart(now time.Time) error {
+	if p.status != PhaseStatusBlocked {
+		if p.status.IsTerminal() {
+			return ErrTerminal
+		}
+		return ErrNotBlocked
+	}
+	if p.attempts >= p.retryBudget {
+		return ErrBudgetExhausted
+	}
+	p.status = PhaseStatusRunning
+	p.attempts++
+	p.startedAt = &now
+	p.completedAt = nil
+	p.envelope = nil
+	p.confidence = 0
+	return nil
+}
