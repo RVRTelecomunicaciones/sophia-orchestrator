@@ -203,6 +203,15 @@ Sprint scope for this:
   high-priority pair has a contract test in CI; the matrix is
   committed and reviewed.
 
+### Closed: PhaseStatus drift audit (2026-05-31)
+
+| Drift source | Finding | Resolution |
+|---|---|---|
+| `sophia-wire-v1.md §524` stale phase-status set | Spec listed 5 values `{pending, running, blocked, done, failed}`; orch domain already emitted 7 canonical values since changelog 0.1.2 events were added, but §524 was never updated. `failed` appeared as a phase status but is in fact the **`phase.failed` EVENT**, not a reachable phase status. | Updated §524 to the canonical 7: `pending, running, done, done_with_concerns, blocked, needs_context, interrupted`. Added clarifying note that `failed` is the `phase.failed` event; a failing phase persists `status=blocked` and emits that event. SHA256 regenerated and mirrored to both repos in the same commit pair (feature-branch-chain: orch PR → cli PR). |
+| `sophia-cli` PhaseStatus definitions | CLI carried two conflicting internal definitions (`pkg/contract/events.go` and `internal/domain/phase.go`) both including a phantom `PhaseStatusFailed` that orch never emits at phase level. `runner.go` switched on literal strings `"failed"`, `"timed_out"`, `"aborted"` — none of which are valid phase statuses. | Addressed in Slice B (cli mirror + status unification). CLI drift detector added in Slice C. |
+
+**Governance note:** the same-commit-pair rule (`Spec checksum bumps; BOTH repos must re-mirror in the SAME commit pair.`) is the enforcement gate. Slice A (orch) and Slice B (cli) are chained PRs that must merge together before either repo's CI gate passes independently.
+
 ## Related ADRs / branches
 
 - ADR-0005 (Local-First Ecosystem Hardening) — the parent milestone.

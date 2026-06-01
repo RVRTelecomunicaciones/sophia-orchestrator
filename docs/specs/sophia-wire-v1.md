@@ -521,8 +521,18 @@ resumes (step 6).
 "tasks", "apply", "verify", "archive" }` (the orchestrator's 9
 canonical SDD phases).
 
-`phase status` ∈ `{ "pending", "running", "blocked", "done", "failed" }`.
-`blocked` indicates the phase is waiting on an approval gate.
+`phase status` ∈ `{ "pending", "running", "done", "done_with_concerns", "blocked",
+"needs_context", "interrupted" }`.
+
+> **Note on `failed`:** `failed` is the **event** `phase.failed` (Section 5.3),
+> NOT a phase status. When a phase fails, its status persists as `"blocked"` and
+> the orchestrator emits a `phase.failed` SSE event carrying the error detail.
+> Clients MUST NOT switch on a phase `status` value of `"failed"` — it will never
+> appear in `GET /api/v1/phases/{phase_id}` or `PhaseDTO`.
+
+`blocked` indicates either an approval gate is waiting OR the phase reached a
+hard-failure terminal state (disambiguated by the presence or absence of a
+`phase.failed` event on the phase's SSE stream).
 
 ### 6.2 `PhaseResponse`
 
