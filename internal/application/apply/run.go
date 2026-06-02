@@ -765,9 +765,16 @@ func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksLi
 		for _, ts := range gs.Tasks {
 			tid, err := ids.ParseTaskID(s.d.IDGen.NewID())
 			if err != nil {
-				return nil, fmt.Errorf("task id: %w", err)
+				return nil, fmt.Errorf("group id: %w", err)
 			}
-			task, err := apply.NewTask(tid, gid, ts.Description, ts.FilesPattern)
+			// Strip the group-name prefix from files_pattern. The group's
+			// worktree is ALREADY rooted at <WorktreeRoot>/<change>/<group>/
+			// and the agent runs with cwd = that worktree, so a file pattern
+			// like "backend/go.mod" for group "backend" would resolve to
+			// backend/backend/go.mod (double-nesting bug). Patterns are
+			// relative to the group worktree, so the leading "<group>/" is
+			// redundant and must be removed.
+			task, err := apply.NewTask(tid, gid, ts.Description, stripGroupPrefix(gs.Name, ts.FilesPattern))
 			if err != nil {
 				return nil, fmt.Errorf("new task: %w", err)
 			}
@@ -791,6 +798,26 @@ func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksLi
 		}
 	}
 	return board, nil
+}
+
+// stripGroupPrefix removes a leading "<groupName>/" segment from each file
+// pattern. The apply phase roots every group's worktree at
+// <WorktreeRoot>/<change_id>/<groupName>/ and dispatches the implement agent
+// with cwd = that worktree. File patterns are therefore RELATIVE to the group
+// worktree; a pattern that repeats the group name (e.g. "backend/go.mod" for
+// group "backend") double-nests to backend/backend/go.mod on disk. Stripping
+// the redundant prefix keeps generated files at the worktree root where the
+// build (and the materialize step into <TargetPath>/<group>/) expect them.
+//
+// Only an exact leading "<groupName>/" is removed; patterns that merely
+// contain the group name deeper in the path are left untouched.
+func stripGroupPrefix(groupName string, patterns []string) []string {
+	prefix := groupName + "/"
+	out := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		out = append(out, strings.TrimPrefix(p, prefix))
+	}
+	return out
 }
 
 // createWorktrees creates one per-group worktree directory and (when
