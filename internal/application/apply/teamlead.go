@@ -135,7 +135,19 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 	if hadFailure {
 		_ = group.Fail()
 	} else {
-		_ = group.Complete()
+		// Group build gate: detect manifest, run build, handle feedback loop.
+		// On no-manifest the group completes immediately (backward compat).
+		// On build failure + budget exhausted the group is failed + escalated.
+		buildErr := s.runGroupBuildFeedbackLoop(ctx, c, p, group, priorContext)
+		if buildErr != nil {
+			_ = group.Fail()
+		} else {
+			_ = group.Complete()
+		}
+		if buildErr != nil {
+			_ = s.d.BoardRepo.SaveGroup(ctx, group)
+			return groupOutcome{failed: true, err: ErrGroupFailed, tasksDone: done}
+		}
 	}
 	_ = s.d.BoardRepo.SaveGroup(ctx, group)
 
