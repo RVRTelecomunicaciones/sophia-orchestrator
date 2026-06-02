@@ -131,14 +131,21 @@ services:
       # reintroduces Claude via a host-side MCP server WITH Keychain
       # access — but operator policy keeps the in-container matrix
       # Claude-free for credential-isolation reasons.
-      SOPHIA_DISPATCHER_MODEL_EXPLORE:  "google/gemini-3-flash-preview"
+      # NOTE 2026-06-02: google/gemini-3-flash-preview returns "Model not
+      # found" against current operator opencode auth — model availability
+      # drifted since the 2026-05-27 validation. EXPLORE + ARCHIVE switched
+      # to github-copilot/gpt-5.4 (verified working E2E: explore phase
+      # status=done, confidence 0.88). Model availability is operator-auth
+      # dependent; if your auth lacks gpt-5.4, set a model your `opencode
+      # models` lists (e.g. github-copilot/claude-sonnet-4.6).
+      SOPHIA_DISPATCHER_MODEL_EXPLORE:  "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_PROPOSAL: "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_SPEC:     "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_DESIGN:   "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_TASKS:    "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_APPLY:    "github-copilot/gpt-5.4"
       SOPHIA_DISPATCHER_MODEL_VERIFY:   "github-copilot/gpt-5.4"
-      SOPHIA_DISPATCHER_MODEL_ARCHIVE:  "google/gemini-3-flash-preview"
+      SOPHIA_DISPATCHER_MODEL_ARCHIVE:  "github-copilot/gpt-5.4"
 
       # Tenant binding for memory-engine ingest path. The dev API key
       # seeded by sophia-memory-engine/migrations/postgres/003_create_
