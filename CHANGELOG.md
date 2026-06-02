@@ -7,13 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+(empty — first changes after the v0.2.0 cut land here)
+
+---
+
+## [v0.2.0] — 2026-06-02
+
+Coordinated final release with `sophia-cli v0.2.0`. Both repos carry
+byte-identical `docs/specs/sophia-wire-v1.md` mirrors (SHA256
+`0c2ff06ec54b44476b358b08da857ece377dbf933ec56012accaf4457396a07c`), enforced
+by the cross-repo wire-contract matrix. Promoted after the 7-day soak window
+(zero unresolved RED entries) plus an operator end-to-end smoke validation of
+the full stack (orch → governance → runtime → opencode → LLM → envelope persist;
+explore phase status=done, confidence 0.88).
+
 ### Added
 
-- `scripts/local-mode/run-orchestrator-local.sh` and `run-runtime-local.sh` —
-  run orchestator and runtime-adapters on the macOS host so runtime-adapters
-  can spawn the user's local `opencode`/`claude` binaries (M-E0 #2).
-- `docs/runbooks/m-e0-local-execution.md` — step-by-step runbook for the
-  partial-compose local-mode topology.
+- **M-E0 — real local OpenCode execution**: `scripts/local-mode/run-orchestrator-local.sh`
+  and `run-runtime-local.sh` run orchestator + runtime-adapters on the host so
+  runtime-adapters can spawn the user's local `opencode`/`claude` binaries (#2);
+  `docs/runbooks/m-e0-local-execution.md` runbook for the partial-compose topology.
+- **MCP Host Bridge (ADR-0008, V2.1)**: SDK-based MCP dispatcher client + provider,
+  contract-tested initialize→tools/call sequence, host-side dispatch to local LLM CLIs.
+- **M-WA1 — wire-contract matrix**: `docs/architecture/wire-contracts.md` (living doc)
+  enforced by `test/wirecontract/` contract tests across orch↔memory/governance/runtime.
+- `/api/v1/ready` endpoint + readiness DB ping.
+- `current_phase_id` in the change GET response.
+
+### Changed
+
+- Canonicalized the §524 phase-status set in `sophia-wire-v1.md` to the closed
+  7-value set (pending, running, done, done_with_concerns, blocked, needs_context,
+  interrupted); `failed` clarified as the `phase.failed` event, not a status.
+  Re-mirrored with `sophia-cli` (SHA `0c2ff06…`); ADR-0006 row closed.
+- Restored the SDK-based MCP client per ADR-0008 original intent.
+- `DONE_WITH_CONCERNS` now advances the change to the next phase.
+- Per-group resumability: Resume blocked apply phases (BUG-28).
+
+### Fixed
+
+- E2E dispatcher model: `google/gemini-3-flash-preview` is unavailable against
+  current auth; routed EXPLORE + ARCHIVE to `github-copilot/gpt-5.4` (#58).
+- The BUG-6 … BUG-30 wire/dispatch cycle (dispatcher provider arg injection,
+  synthetic envelope from git status, host-mounted worktree, resume terminal
+  guard, and related M-E0 fixes).
 
 ---
 
