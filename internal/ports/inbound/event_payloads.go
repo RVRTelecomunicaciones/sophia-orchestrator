@@ -65,9 +65,9 @@ type ApplyGroupFailedPayload struct {
 // the dependency failure reason via FailedDep alongside the group's own
 // outcome to decide next steps (resume, manual fix, accept partial).
 type ApplyGroupDegradedPayload struct {
-	GroupID       string `json:"group_id"`
-	FailedDep     string `json:"failed_dep"`
-	FailedDepErr  string `json:"failed_dep_err"`
+	GroupID      string `json:"group_id"`
+	FailedDep    string `json:"failed_dep"`
+	FailedDepErr string `json:"failed_dep_err"`
 	ContinuedRun bool   `json:"continued_run"`
 }
 
@@ -148,6 +148,38 @@ type ApplyEnvelopeValidationFailedPayload struct {
 type RuntimeDispatchFailedPayload struct {
 	TaskID string `json:"task_id"`
 	Err    string `json:"err"`
+}
+
+// ApplyBuildStartedPayload is the payload of apply.build.started. Emitted
+// immediately before the build command executes.
+type ApplyBuildStartedPayload struct {
+	GroupID  string   `json:"group_id"`
+	Manifest string   `json:"manifest"`
+	Command  string   `json:"command"`
+	Args     []string `json:"args"`
+	Attempt  int      `json:"attempt"`
+}
+
+// ApplyBuildPassedPayload is the payload of apply.build.passed.
+type ApplyBuildPassedPayload struct {
+	GroupID    string `json:"group_id"`
+	Manifest   string `json:"manifest"`
+	Command    string `json:"command"`
+	Attempt    int    `json:"attempt"`
+	DurationMS int    `json:"duration_ms"`
+}
+
+// ApplyBuildFailedPayload is the payload of apply.build.failed. Stderr
+// is truncated to stderrBudgetBytes (4 KB head+tail); Truncated is true
+// when truncation occurred. ExitCode is -1 for runtime/transport errors.
+type ApplyBuildFailedPayload struct {
+	GroupID   string `json:"group_id"`
+	Manifest  string `json:"manifest"`
+	Command   string `json:"command"`
+	Attempt   int    `json:"attempt"`
+	ExitCode  int    `json:"exit_code"`
+	Stderr    string `json:"stderr"`
+	Truncated bool   `json:"truncated"`
 }
 
 // ApplyMaterializeStartedPayload is the payload of apply.materialize.started.

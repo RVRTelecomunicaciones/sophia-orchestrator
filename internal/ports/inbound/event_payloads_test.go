@@ -61,6 +61,17 @@ func TestPayload_WireShape_PreservesKeys(t *testing.T) {
 			[]string{"task_id", "err"}},
 		{"RuntimeDispatchFailed", inbound.RuntimeDispatchFailedPayload{TaskID: "t1", Err: "x"},
 			[]string{"task_id", "err"}},
+		// Build-gate payloads (Slice 2).
+		{"ApplyBuildStarted", inbound.ApplyBuildStartedPayload{
+			GroupID: "g1", Manifest: "go.mod", Command: "go", Args: []string{"build", "./..."}, Attempt: 1,
+		}, []string{"group_id", "manifest", "command", "args", "attempt"}},
+		{"ApplyBuildPassed", inbound.ApplyBuildPassedPayload{
+			GroupID: "g1", Manifest: "go.mod", Command: "go", Attempt: 1, DurationMS: 200,
+		}, []string{"group_id", "manifest", "command", "attempt", "duration_ms"}},
+		{"ApplyBuildFailed", inbound.ApplyBuildFailedPayload{
+			GroupID: "g1", Manifest: "go.mod", Command: "go", Attempt: 1, ExitCode: 1,
+			Stderr: "error: undefined", Truncated: false,
+		}, []string{"group_id", "manifest", "command", "attempt", "exit_code", "stderr", "truncated"}},
 
 		// phase pipeline + governance + agent
 		{"PhaseStarted", inbound.PhaseStartedPayload{PhaseID: "p1", PhaseType: "spec", ChangeID: "c1", StartedAt: now},
