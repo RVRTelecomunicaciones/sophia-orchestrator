@@ -38,21 +38,25 @@ ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`
 	return wrapErr("BoardRepo.SaveBoard", err)
 }
 
-// SaveGroup upserts a groups row.
+// SaveGroup upserts a groups row, including the new build-gate columns
+// (build_status, build_attempts) added in migration 008.
 func (r *BoardRepo) SaveGroup(ctx context.Context, g *apply.Group) error {
 	depsOn := make([]string, 0, len(g.DependsOn()))
 	for _, d := range g.DependsOn() {
 		depsOn = append(depsOn, d.String())
 	}
 	const q = `
-INSERT INTO groups (id, board_id, name, depends_on, status, worktree_path, branch_name)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO groups (id, board_id, name, depends_on, status, worktree_path, branch_name, build_status, build_attempts)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (id) DO UPDATE SET
-  status        = EXCLUDED.status,
-  worktree_path = EXCLUDED.worktree_path,
-  branch_name   = EXCLUDED.branch_name`
+  status         = EXCLUDED.status,
+  worktree_path  = EXCLUDED.worktree_path,
+  branch_name    = EXCLUDED.branch_name,
+  build_status   = EXCLUDED.build_status,
+  build_attempts = EXCLUDED.build_attempts`
 	_, err := r.pool.Exec(ctx, q, g.ID().String(), g.BoardID().String(),
-		g.Name(), depsOn, string(g.Status()), g.WorktreePath(), g.BranchName())
+		g.Name(), depsOn, string(g.Status()), g.WorktreePath(), g.BranchName(),
+		string(g.BuildStatus()), g.BuildAttempts())
 	return wrapErr("BoardRepo.SaveGroup", err)
 }
 
@@ -111,7 +115,8 @@ func (r *BoardRepo) FindBoardByPhaseID(ctx context.Context, phaseID ids.PhaseID)
 
 func (r *BoardRepo) findGroupsByBoard(ctx context.Context, boardID ids.BoardID) ([]*apply.Group, error) {
 	const q = `
-SELECT id, board_id, name, depends_on, status, worktree_path, branch_name
+SELECT id, board_id, name, depends_on, status, worktree_path, branch_name,
+       build_status, build_attempts
 FROM groups WHERE board_id = $1`
 	rows, err := r.pool.Query(ctx, q, boardID.String())
 	if err != nil {
@@ -124,8 +129,11 @@ FROM groups WHERE board_id = $1`
 			gid, bid, name, status string
 			deps                   []string
 			worktreePath, branch   string
+			buildStatus            string
+			buildAttempts          int
 		)
-		if err := rows.Scan(&gid, &bid, &name, &deps, &status, &worktreePath, &branch); err != nil {
+		if err := rows.Scan(&gid, &bid, &name, &deps, &status, &worktreePath, &branch,
+			&buildStatus, &buildAttempts); err != nil {
 			return nil, wrapErr("BoardRepo.scanGroup", err)
 		}
 		groupID, _ := ids.ParseGroupID(gid)
@@ -135,19 +143,40 @@ FROM groups WHERE board_id = $1`
 			id, _ := ids.ParseGroupID(d)
 			depIDs = append(depIDs, id)
 		}
-		g := apply.NewGroup(groupID, bidParsed, name, depIDs)
-		// Hydrate its tasks.
+
+		// Hydrate tasks first so they can be attached to the group.
 		tasks, err := r.findTasksByGroup(ctx, groupID)
 		if err != nil {
 			return nil, err
 		}
+
+		// Use HydrateGroup so all persisted fields (status, build state) are
+		// restored without replaying transitions. AddTask is not available once
+		// a group is beyond Pending, so we pass tasks to the board builder
+		// below via a small two-step that avoids the transition guard.
+		g := apply.HydrateGroup(
+			groupID, bidParsed, name, depIDs,
+			apply.GroupStatus(status),
+			worktreePath, branch,
+			apply.GroupBuildStatus(buildStatus), buildAttempts,
+		)
+
+		// Attach tasks: HydrateGroup does not receive tasks; we inject them via
+		// the board's AddGroup + the group's own task list. Because HydrateGroup
+		// produces a group in an arbitrary status, AddTask would reject non-Pending
+		// groups. We therefore inject tasks through the Board's HydrateBoard path
+		// where the full slice is passed directly.
+		//
+		// Workaround: re-hydrate via a helper that passes tasks through the
+		// group struct directly (groups are passed into HydrateBoard as-is).
+		// The simplest approach that avoids reflection is to build a fresh group
+		// with all hydrated tasks and then apply HydrateGroup again — but that
+		// duplicates construction. Instead we expose the task list attachment via
+		// a package-level helper that is only callable by the persistence adapter.
 		for _, t := range tasks {
-			_ = g.AddTask(t)
+			apply.AttachTaskToGroup(g, t)
 		}
-		g.AssignWorktree(worktreePath, branch)
-		// Status set via reflection-free bypass: not supported on aggregate;
-		// callers know the persisted status separately. We expose it via a
-		// helper if needed in V2.
+
 		out = append(out, g)
 	}
 	return out, rows.Err()
@@ -176,28 +205,44 @@ FROM tasks WHERE group_id = $1`
 		}
 		taskID, _ := ids.ParseTaskID(tid)
 		groupIDParsed, _ := ids.ParseGroupID(gid)
-		t, _ := apply.NewTask(taskID, groupIDParsed, description, files)
-		_ = status
-		_ = claimedBy
-		_ = attempts
-		_ = envBytes
-		// Hydrating internal fields (status, claimedBy, attempts, envelope)
-		// requires aggregate-level support. For V1 we emit a fresh Task and
-		// the application layer re-applies state via Claim/RecordAttempt as
-		// it does in-process. Full hydration is a V2 ergonomics improvement.
+
+		var sid *ids.SessionID
+		if claimedBy != nil {
+			parsed, _ := ids.ParseSessionID(*claimedBy)
+			sid = &parsed
+		}
+
+		var env *envelope.Envelope
+		if len(envBytes) > 0 {
+			var e envelope.Envelope
+			if jsonErr := json.Unmarshal(envBytes, &e); jsonErr == nil {
+				env = &e
+			}
+		}
+
+		t, err := apply.HydrateTask(
+			taskID, groupIDParsed, description, files,
+			apply.TaskStatus(status), sid, attempts, env,
+		)
+		if err != nil {
+			return nil, wrapErr("BoardRepo.hydrateTask", err)
+		}
 		out = append(out, t)
 	}
 	return out, rows.Err()
 }
 
-// FindTaskByID returns a Task by id.
+// FindTaskByID returns a Task by id, fully hydrated from the persisted row.
 func (r *BoardRepo) FindTaskByID(ctx context.Context, id ids.TaskID) (*apply.Task, error) {
 	const q = `
-SELECT id, group_id, description, files_pattern
+SELECT id, group_id, description, files_pattern, status, claimed_by, attempts, envelope
 FROM tasks WHERE id = $1`
-	var tid, gid, description string
+	var tid, gid, description, status string
 	var files []string
-	err := r.pool.QueryRow(ctx, q, id.String()).Scan(&tid, &gid, &description, &files)
+	var claimedBy *string
+	var attempts int
+	var envBytes []byte
+	err := r.pool.QueryRow(ctx, q, id.String()).Scan(&tid, &gid, &description, &files, &status, &claimedBy, &attempts, &envBytes)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, outbound.ErrNotFound
@@ -206,7 +251,22 @@ FROM tasks WHERE id = $1`
 	}
 	taskID, _ := ids.ParseTaskID(tid)
 	groupID, _ := ids.ParseGroupID(gid)
-	return apply.NewTask(taskID, groupID, description, files)
+
+	var sid *ids.SessionID
+	if claimedBy != nil {
+		parsed, _ := ids.ParseSessionID(*claimedBy)
+		sid = &parsed
+	}
+
+	var env *envelope.Envelope
+	if len(envBytes) > 0 {
+		var e envelope.Envelope
+		if jsonErr := json.Unmarshal(envBytes, &e); jsonErr == nil {
+			env = &e
+		}
+	}
+
+	return apply.HydrateTask(taskID, groupID, description, files, apply.TaskStatus(status), sid, attempts, env)
 }
 
 // ClaimTask atomically claims a task for a session. Returns claimed=true
@@ -226,10 +286,6 @@ RETURNING id`
 	}
 	return true, nil
 }
-
-// Avoid unused import linter warnings for envelope when only used within
-// json.Unmarshal-protected helpers.
-var _ = envelope.SchemaVersionV1
 
 // Compile-time interface check.
 var _ outbound.BoardRepository = (*BoardRepo)(nil)

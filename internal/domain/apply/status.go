@@ -26,6 +26,26 @@ const (
 	GroupStatusFailed    GroupStatus = "failed"
 )
 
+// GroupBuildStatus is the build-gate lifecycle of a Group. It is orthogonal to
+// GroupStatus: a group may be Running while its build gate has passed, failed,
+// or been skipped (no recognized manifest). The zero value "" is treated as
+// GroupBuildStatusPending (not yet evaluated).
+type GroupBuildStatus string
+
+// Group build-gate statuses.
+const (
+	// GroupBuildStatusPending is the default — the build gate has not yet run.
+	GroupBuildStatusPending GroupBuildStatus = "pending"
+	// GroupBuildStatusSkipped means no recognized build manifest was found;
+	// the build gate is bypassed and group completion proceeds immediately.
+	GroupBuildStatusSkipped GroupBuildStatus = "skipped"
+	// GroupBuildStatusPassed means the build exited with code 0.
+	GroupBuildStatusPassed GroupBuildStatus = "passed"
+	// GroupBuildStatusFailed means the build exhausted its attempt budget
+	// without a successful exit. The Group will be marked GroupStatusFailed.
+	GroupBuildStatusFailed GroupBuildStatus = "failed"
+)
+
 // TaskStatus is the lifecycle of a Task within a Group.
 type TaskStatus string
 

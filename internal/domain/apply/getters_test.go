@@ -48,6 +48,12 @@ func TestGroup_Fail_FromPending(t *testing.T) {
 	require.Equal(t, apply.GroupStatusFailed, g.Status())
 }
 
+func TestGroupBuildGetters_InitialState(t *testing.T) {
+	g := apply.NewGroup(mustGroupID(t, "01ARZ3NDEKTSV4RRFFQ69G5G01"), mustBoardID(t, "01ARZ3NDEKTSV4RRFFQ69G5B01"), "g", nil)
+	require.Equal(t, apply.GroupBuildStatusPending, g.BuildStatus())
+	require.Equal(t, 0, g.BuildAttempts())
+}
+
 func TestTaskGetters_AllExposed(t *testing.T) {
 	tid := mustTaskID(t, "01ARZ3NDEKTSV4RRFFQ69G5T01")
 	gid := mustGroupID(t, "01ARZ3NDEKTSV4RRFFQ69G5G01")
