@@ -39,6 +39,46 @@ func NewTask(id ids.TaskID, groupID ids.GroupID, description string, filesPatter
 	}, nil
 }
 
+// HydrateTask reconstructs a Task from persisted state without replaying
+// transitions. Used exclusively by repository adapters on resume.
+//
+// claimedBy may be nil when the task is not in a claimed/running state.
+// envelope may be nil when the task has not been completed.
+func HydrateTask(
+	id ids.TaskID,
+	groupID ids.GroupID,
+	description string,
+	filesPattern []string,
+	status TaskStatus,
+	claimedBy *ids.SessionID,
+	attempts int,
+	env *envelope.Envelope,
+) (*Task, error) {
+	if description == "" {
+		return nil, ErrEmptyDescription
+	}
+	if len(filesPattern) == 0 {
+		return nil, ErrEmptyFilesPattern
+	}
+	patterns := make([]string, len(filesPattern))
+	copy(patterns, filesPattern)
+	var sid *ids.SessionID
+	if claimedBy != nil {
+		cp := *claimedBy
+		sid = &cp
+	}
+	return &Task{
+		id:           id,
+		groupID:      groupID,
+		description:  description,
+		filesPattern: patterns,
+		status:       status,
+		claimedBy:    sid,
+		attempts:     attempts,
+		envelope:     env,
+	}, nil
+}
+
 // ID returns the task id.
 func (t *Task) ID() ids.TaskID { return t.id }
 
