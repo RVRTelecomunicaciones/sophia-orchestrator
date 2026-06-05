@@ -38,6 +38,10 @@ func TestIsKnownEventType_DocumentedConstants(t *testing.T) {
 		inbound.EventApplyDispatchError,
 		inbound.EventApplyEnvelopeValidationFailed,
 		inbound.EventRuntimeDispatchFailed,
+		// Build-gate events (Slice 2).
+		inbound.EventApplyBuildStarted,
+		inbound.EventApplyBuildPassed,
+		inbound.EventApplyBuildFailed,
 	}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -88,6 +92,10 @@ func TestEventConstantUniqueness(t *testing.T) {
 		inbound.EventApplyTaskEscalated, inbound.EventApplyTaskRetry,
 		inbound.EventApplyDispatchError, inbound.EventApplyEnvelopeValidationFailed,
 		inbound.EventRuntimeDispatchFailed,
+		// Build-gate events (Slice 2).
+		inbound.EventApplyBuildStarted,
+		inbound.EventApplyBuildPassed,
+		inbound.EventApplyBuildFailed,
 	}
 	seen := map[string]bool{}
 	for _, name := range all {

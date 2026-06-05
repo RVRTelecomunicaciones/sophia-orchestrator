@@ -111,6 +111,18 @@ const (
 	// timeout, etc.). See dispatcher M-E0 #3 hardening.
 	EventRuntimeDispatchFailed = "runtime.dispatch_failed"
 
+	// EventApplyBuildStarted is published immediately before the build
+	// command is executed for a group. Carries the resolved manifest,
+	// command, args, and attempt number so the operator can correlate
+	// with the subsequent pass/fail event.
+	EventApplyBuildStarted = "apply.build.started"
+	// EventApplyBuildPassed is published when the build exits with code 0.
+	EventApplyBuildPassed = "apply.build.passed"
+	// EventApplyBuildFailed is published when the build exits with a
+	// non-zero exit code. The payload carries the (truncated) stderr so
+	// the operator can inspect compiler errors without DB access.
+	EventApplyBuildFailed = "apply.build.failed"
+
 	// EventApplyMaterializeStarted (BUG-29) is published when the apply
 	// phase begins copying successful group worktrees into the
 	// operator-facing TargetPath.
@@ -166,6 +178,9 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},
 	EventMemoryArtifactPersistFailed:      {},
+	EventApplyBuildStarted:                {},
+	EventApplyBuildPassed:                 {},
+	EventApplyBuildFailed:                 {},
 	EventApplyMaterializeStarted:          {},
 	EventApplyMaterializeCompleted:        {},
 	EventApplyMaterializeError:            {},
