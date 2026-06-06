@@ -127,6 +127,25 @@ type ApplyTaskRetryPayload struct {
 	Attempts int    `json:"attempts"`
 }
 
+// ApplyProviderQuotaExceededPayload is the payload of
+// apply.provider.quota_exceeded. Emitted when the dispatcher returns
+// ErrProviderQuotaExceeded for an implement attempt.
+//
+// The task is NOT recorded as a burned Iron-Law-5 attempt — a quota
+// exhaustion is a provider-side constraint, not an agent failure. The
+// task is released to a resume-safe state so a later resume can retry
+// it against a replenished or fallback provider. RetryAfterSeconds is
+// zero when the provider did not supply a Retry-After header.
+// Evidence is a ≤200-char snippet from the combined stdout+stderr that
+// triggered detection (useful for operator dashboards without DB access).
+type ApplyProviderQuotaExceededPayload struct {
+	TaskID            string `json:"task_id"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+	Evidence          string `json:"evidence"`
+}
+
 // ApplyDispatchErrorPayload is the payload of apply.dispatch.error.
 // Distinct from RuntimeDispatchFailedPayload: this signals the
 // dispatcher returned a transport-level error (HTTP/ctx), NOT that

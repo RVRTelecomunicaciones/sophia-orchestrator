@@ -97,6 +97,14 @@ const (
 	// attempts.
 	EventApplyTaskRetry = "apply.task.retry"
 
+	// EventApplyProviderQuotaExceeded is published when the agent dispatcher
+	// returns ErrProviderQuotaExceeded (HTTP 429 with quota signals).
+	// The task is short-circuited out of the MaxAttempts loop immediately —
+	// a quota exhaustion MUST NOT burn the remaining Iron-Law-5 attempts.
+	// The task is released to a resume-safe failed state so a later resume
+	// can retry it against a non-exhausted provider. See ADR-0010, Slice 2.
+	EventApplyProviderQuotaExceeded = "apply.provider.quota_exceeded"
+
 	// EventApplyDispatchError is published when the agent dispatcher
 	// returns a transport-level error (HTTP, ctx cancellation) — distinct
 	// from EventRuntimeDispatchFailed which signals the agent CLI
@@ -174,6 +182,7 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyTaskClaimSkipped:            {},
 	EventApplyTaskEscalated:               {},
 	EventApplyTaskRetry:                   {},
+	EventApplyProviderQuotaExceeded:       {},
 	EventApplyDispatchError:               {},
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},
