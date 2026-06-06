@@ -61,6 +61,11 @@ func TestPayload_WireShape_PreservesKeys(t *testing.T) {
 			[]string{"task_id", "err"}},
 		{"RuntimeDispatchFailed", inbound.RuntimeDispatchFailedPayload{TaskID: "t1", Err: "x"},
 			[]string{"task_id", "err"}},
+		// Quota fail-fast payload (Slice 2 — ADR-0010).
+		{"ApplyProviderQuotaExceeded", inbound.ApplyProviderQuotaExceededPayload{
+			TaskID: "t1", Provider: "opencode", Model: "copilot/gpt-4o",
+			RetryAfterSeconds: 86400, Evidence: "maxRetriesExceeded",
+		}, []string{"task_id", "provider", "model", "retry_after_seconds", "evidence"}},
 		// Build-gate payloads (Slice 2).
 		{"ApplyBuildStarted", inbound.ApplyBuildStartedPayload{
 			GroupID: "g1", Manifest: "go.mod", Command: "go", Args: []string{"build", "./..."}, Attempt: 1,
