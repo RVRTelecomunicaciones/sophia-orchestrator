@@ -73,6 +73,17 @@ type ApplyConfig struct {
 	// behaviour of leaving worktrees isolated under WorktreeRoot.
 	// Loaded from SOPHIA_APPLY_TARGET_PATH.
 	TargetPath string
+	// DispatchTimeoutMS is the per-dispatch timeout in milliseconds
+	// forwarded to RunConfig.DispatchTimeoutMS. Zero leaves the
+	// apply.DefaultRunConfig default in effect (currently 180_000 = 3min).
+	// Must be > 0 when set; values ≤ 0 are treated as unset (default
+	// applies). Loaded from SOPHIA_DISPATCH_TIMEOUT_MS.
+	//
+	// ADR-0010 Slice 3: the 3min default is chosen so a doomed dispatch
+	// (quota exhaustion or silent hang) fails fast within the E2E runtime
+	// shell.exec cap of 600s, leaving margin for retries. Override this
+	// only when dispatching unusually long-running agents.
+	DispatchTimeoutMS int
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -360,6 +371,9 @@ func Load() (Config, error) {
 	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)
 	c.Apply.WorktreeInit = envStr("SOPHIA_APPLY_WORKTREE_INIT", c.Apply.WorktreeInit)
 	c.Apply.TargetPath = envStr("SOPHIA_APPLY_TARGET_PATH", c.Apply.TargetPath)
+	if v := envInt("SOPHIA_DISPATCH_TIMEOUT_MS", 0); v > 0 {
+		c.Apply.DispatchTimeoutMS = v
+	}
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)
