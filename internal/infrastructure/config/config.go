@@ -314,7 +314,12 @@ func Default() Config {
 			Version:         "v0.1.0",
 		},
 		Spawn: SpawnConfig{
-			Max:          4,
+			// 2026-06: raised 4→6 so the global slot ceiling exceeds the
+			// apply phase's max concurrent implement demand (was exactly 4
+			// = MaxParallelGroups×MaxParallelImplementsPerGroup, leaving
+			// zero margin and forcing saturation waits). Overridable via
+			// SOPHIA_SPAWN_MAX.
+			Max:          6,
 			StaggerMin:   200 * time.Millisecond,
 			StaggerMax:   500 * time.Millisecond,
 			WaitInterval: 250 * time.Millisecond,

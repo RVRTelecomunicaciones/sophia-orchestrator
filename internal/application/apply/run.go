@@ -130,6 +130,14 @@ const (
 // worktree root /tmp/sophia/worktrees.
 func DefaultRunConfig() RunConfig {
 	return RunConfig{
+		// 2026-06: kept at 2. An attempt to lower to 1 (sequential groups)
+		// BACKFIRED in an E2E rerun: opencode dispatches occasionally hang
+		// for the full 10min runtime timeout, and with sequential groups a
+		// single hung dispatch blocks ALL progress (0/11 in 25min). Parallel
+		// groups let healthy tasks advance while one hangs. The real
+		// bottleneck is dispatch hang/timeout variability, not group
+		// concurrency — Spawn.Max=6 (margin) + a larger saturation wait
+		// budget address saturation without serializing the phase.
 		MaxParallelGroups:             2,
 		MaxParallelImplementsPerGroup: 2,
 		DepWaitTimeout:                600,
