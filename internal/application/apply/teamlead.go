@@ -25,16 +25,23 @@ import (
 // in-flight tasks Release. Without this budget a single saturation hit
 // would fail the task with attempts=0 and cascade to a false group
 // failure (Spec / BUG-26).
-const saturationRetryBudget = 5
+const saturationRetryBudget = 9
 
 // saturationBackoff returns the sleep duration before the next Acquire
-// retry attempt. Starts at 500ms and doubles each retry, capping at 4s,
-// so total wait across the budget is ~10s — bounded but generous enough
-// to ride out typical contention bursts in a 3-group apply phase.
+// retry attempt. Starts at 500ms and doubles each retry, capping at 30s.
+//
+// Calibration (2026-06): a single implement-agent is a real LLM/opencode
+// subprocess that runs for ~30-90s (DispatchTimeoutMS allows up to 30min).
+// The previous ~10s total wait budget gave up LONG before any in-flight
+// slot could free, so a saturated Acquire failed the task with attempts=0
+// and cascaded to a false group failure — the dominant cause of the
+// observed task-completion ceiling. With budget=9 and a 30s cap, total
+// wait is ~2.5min (0.5+1+2+4+8+16+30+30+30s ≈ 121s), aligned to real task
+// duration so a waiting implement actually outlives an in-flight one.
 func saturationBackoff(attempt int) time.Duration {
 	const (
 		base       = 500 * time.Millisecond
-		maxBackoff = 4 * time.Second
+		maxBackoff = 30 * time.Second
 	)
 	d := base << attempt //nolint:gosec // attempt is bounded by saturationRetryBudget
 	if d > maxBackoff {
