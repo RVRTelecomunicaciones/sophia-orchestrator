@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 )
@@ -13,6 +14,49 @@ import (
 // In this case, no envelope extraction is attempted; the caller must NOT treat
 // this as a "bad envelope from the agent" — the agent never ran.
 var ErrDispatchFailed = errors.New("dispatcher: runtime execution did not succeed")
+
+// ErrProviderQuotaExceeded is returned by AgentDispatcher.Dispatch when the
+// combined stdout+stderr from the underlying runtime execution contains quota-
+// exhaustion signals from the LLM provider (e.g., HTTP 429 with quota tokens).
+// It is distinct from ErrDispatchFailed: the transport may have succeeded
+// (receipt.Status="success") while the LLM backend rejected the request
+// internally. Callers use errors.Is to distinguish quota outcomes from generic
+// dispatch failures and errors.As to extract typed fields such as RetryAfterSeconds.
+// See ADR-0010.
+var ErrProviderQuotaExceeded = errors.New("dispatcher: provider quota exceeded")
+
+// ProviderQuotaError is a typed error wrapping ErrProviderQuotaExceeded. It
+// carries the parsed retry-after hint (when the provider includes it) and a
+// short evidence snippet for observability. Use errors.As to retrieve it.
+type ProviderQuotaError struct {
+	// RetryAfterSeconds is the provider's retry-after hint in seconds.
+	// Zero means the provider did not supply a value.
+	RetryAfterSeconds int
+
+	// Provider is the dispatcher provider name (e.g. "opencode"). May be
+	// empty for adapters that do not opt-in to self-identification.
+	Provider string
+
+	// Model is the model string that triggered the quota error, when known.
+	// May be empty.
+	Model string
+
+	// Evidence is a short snippet (≤200 chars) from the combined
+	// stdout+stderr that matched the quota signal. Useful for logging and
+	// SSE payloads without transmitting the full output.
+	Evidence string
+}
+
+// Error implements the error interface.
+func (e *ProviderQuotaError) Error() string {
+	if e.RetryAfterSeconds > 0 {
+		return fmt.Sprintf("dispatcher: provider quota exceeded (retry-after %ds): %s", e.RetryAfterSeconds, e.Evidence)
+	}
+	return fmt.Sprintf("dispatcher: provider quota exceeded: %s", e.Evidence)
+}
+
+// Unwrap returns ErrProviderQuotaExceeded, making errors.Is work transparently.
+func (e *ProviderQuotaError) Unwrap() error { return ErrProviderQuotaExceeded }
 
 // AgentDispatcher launches an AI CLI subprocess (V1: OpenCode) inside the
 // orchestrator-managed worktree, captures stdout, and extracts the JSON
@@ -51,6 +95,15 @@ type DispatchRequest struct {
 	// Config.Model. Pre-existing callers that omit this still work
 	// unchanged — they get the global default.
 	PhaseType string
+
+	// ModelOverride, when non-empty, overrides any per-phase or global
+	// model config for this single request. Intended for the apply-phase
+	// fallback dispatch path (Slice 4): the apply layer sets this to the
+	// configured fallback model after a primary-model quota failure.
+	// Pre-existing callers that do not set this field are unaffected —
+	// the dispatcher falls back to PhaseType → Config.Model resolution as
+	// before. See ADR-0010.
+	ModelOverride string
 }
 
 // DispatchResult is the output of AgentDispatcher.Dispatch.
