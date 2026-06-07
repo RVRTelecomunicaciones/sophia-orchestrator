@@ -1676,6 +1676,359 @@ func TestHealthyRun_NoQuotaEvent_MaxAttemptsUnchanged(t *testing.T) {
 		"apply.task.escalated MUST still fire after MaxAttempts non-quota failures")
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0010 Slice 4: model fallback on quota
+// ---------------------------------------------------------------------------
+
+// fakeDispatcherQuotaThenFallback returns *ProviderQuotaError for the FIRST
+// call and a successful DONE envelope for all subsequent calls. This models
+// the apply-fallback path: primary model hits quota, fallback model succeeds.
+type fakeDispatcherQuotaThenFallback struct {
+	calls        atomic.Int32
+	quotaErr     *outbound.ProviderQuotaError
+	capturedReqs []outbound.DispatchRequest
+	mu           sync.Mutex
+}
+
+func (d *fakeDispatcherQuotaThenFallback) Provider() session.Provider {
+	return session.ProviderOpenCode
+}
+func (d *fakeDispatcherQuotaThenFallback) SuggestedMaxConcurrent() int         { return 4 }
+func (d *fakeDispatcherQuotaThenFallback) HealthCheck(_ context.Context) error { return nil }
+
+func (d *fakeDispatcherQuotaThenFallback) Dispatch(_ context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	n := d.calls.Add(1)
+	d.mu.Lock()
+	d.capturedReqs = append(d.capturedReqs, req)
+	d.mu.Unlock()
+	if n == 1 {
+		// First call: primary model returns quota error.
+		return nil, d.quotaErr
+	}
+	// Subsequent calls (fallback dispatch): return DONE envelope.
+	env := mustEnvelopeBytes(req.Prompt, envelope.StatusDone)
+	return &outbound.DispatchResult{
+		ExitCode:    0,
+		EnvelopeRaw: env,
+	}, nil
+}
+
+// fakeDispatcherQuotaAlways always returns *ProviderQuotaError — used to
+// model the "primary quota + fallback also quota" path (both return 429).
+type fakeDispatcherQuotaAlways struct {
+	calls    atomic.Int32
+	quotaErr *outbound.ProviderQuotaError
+}
+
+func (d *fakeDispatcherQuotaAlways) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *fakeDispatcherQuotaAlways) SuggestedMaxConcurrent() int         { return 4 }
+func (d *fakeDispatcherQuotaAlways) HealthCheck(_ context.Context) error { return nil }
+
+func (d *fakeDispatcherQuotaAlways) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	d.calls.Add(1)
+	return nil, d.quotaErr
+}
+
+// TestFallback_PrimaryQuota_FallbackSucceeds is the primary Slice 4 contract
+// test. When:
+//   - the primary model returns *ProviderQuotaError, AND
+//   - RunConfig.FallbackModel is set, AND
+//   - the fallback dispatch returns envelope.StatusDone
+//
+// then:
+//  1. Exactly ONE apply.provider.fallback_used event is emitted.
+//  2. apply.provider.quota_exceeded is NOT emitted (fallback succeeded).
+//  3. apply.task.escalated is NOT emitted.
+//  4. apply.task.retry is NOT emitted.
+//  5. The task reaches TaskStatusDone (completed normally).
+//  6. The task attempt counter is 1 (one successful attempt recorded).
+//  7. The fallback dispatch carried the configured ModelOverride.
+//  8. The overall phase envelope is StatusDone.
+func TestFallback_PrimaryQuota_FallbackSucceeds(t *testing.T) {
+	primaryQuotaErr := &outbound.ProviderQuotaError{
+		RetryAfterSeconds: 3600,
+		Provider:          "opencode",
+		Model:             "anthropic/claude-opus-4-7",
+		Evidence:          `"maxRetriesExceeded":true`,
+	}
+	disp := &fakeDispatcherQuotaThenFallback{quotaErr: primaryQuotaErr}
+	const fallbackModel = "google/gemini-2.5-flash"
+
+	svc, board, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Config.FallbackModel = fallbackModel
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	// (8) Phase-level outcome must be DONE.
+	require.NotNil(t, env)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"fallback succeeded — phase MUST be StatusDone")
+
+	types := events.types()
+
+	// (1) Exactly ONE fallback_used event.
+	fallbackCount := 0
+	for _, et := range types {
+		if et == inbound.EventApplyProviderFallbackUsed {
+			fallbackCount++
+		}
+	}
+	require.Equal(t, 1, fallbackCount,
+		"exactly ONE apply.provider.fallback_used must be emitted when fallback succeeds")
+
+	// (2) No quota_exceeded event — fallback shadowed it.
+	require.NotContains(t, types, inbound.EventApplyProviderQuotaExceeded,
+		"apply.provider.quota_exceeded MUST NOT be emitted when the fallback dispatch succeeded")
+
+	// (3) No escalation.
+	require.NotContains(t, types, inbound.EventApplyTaskEscalated,
+		"apply.task.escalated MUST NOT be emitted when fallback succeeds")
+
+	// (4) No retry event.
+	require.NotContains(t, types, inbound.EventApplyTaskRetry,
+		"apply.task.retry MUST NOT be emitted when fallback succeeds")
+
+	// (5+6) Task state: Done with exactly 1 attempt.
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	for _, t2 := range board.tasks {
+		require.Equal(t, domainapply.TaskStatusDone, t2.Status(),
+			"task MUST be Done after fallback succeeded")
+		require.Equal(t, 1, t2.Attempts(),
+			"task.Attempts() MUST be 1 (one successful attempt via fallback)")
+	}
+
+	// (7) The fallback dispatch must have carried ModelOverride.
+	disp.mu.Lock()
+	reqs := disp.capturedReqs
+	disp.mu.Unlock()
+	require.GreaterOrEqual(t, len(reqs), 2,
+		"at least 2 Dispatch calls: primary (quota) + fallback")
+	// The second request (fallback) must carry ModelOverride.
+	require.Equal(t, fallbackModel, reqs[1].ModelOverride,
+		"fallback dispatch MUST set DispatchRequest.ModelOverride = FallbackModel")
+}
+
+// TestFallback_PrimaryQuota_FallbackPayloadFields verifies the
+// apply.provider.fallback_used SSE payload carries the correct fields:
+// task_id, fallback_model, primary_provider, primary_model,
+// retry_after_seconds, evidence.
+func TestFallback_PrimaryQuota_FallbackPayloadFields(t *testing.T) {
+	primaryQuotaErr := &outbound.ProviderQuotaError{
+		RetryAfterSeconds: 7200,
+		Provider:          "opencode",
+		Model:             "anthropic/claude-haiku-4-5",
+		Evidence:          `"x-ratelimit-exceeded":"quota"`,
+	}
+	disp := &fakeDispatcherQuotaThenFallback{quotaErr: primaryQuotaErr}
+	const fallbackModel = "google/gemini-2.5-flash"
+
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Config.FallbackModel = fallbackModel
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	var payload *inbound.ApplyProviderFallbackUsedPayload
+	for _, ev := range events.events {
+		if ev.Type == inbound.EventApplyProviderFallbackUsed {
+			raw, err := json.Marshal(ev.Payload)
+			require.NoError(t, err)
+			var pl inbound.ApplyProviderFallbackUsedPayload
+			require.NoError(t, json.Unmarshal(raw, &pl))
+			payload = &pl
+			break
+		}
+	}
+	require.NotNil(t, payload, "apply.provider.fallback_used event must be present")
+	require.NotEmpty(t, payload.TaskID)
+	require.Equal(t, fallbackModel, payload.FallbackModel)
+	require.Equal(t, "opencode", payload.PrimaryProvider)
+	require.Equal(t, "anthropic/claude-haiku-4-5", payload.PrimaryModel)
+	require.Equal(t, 7200, payload.RetryAfterSeconds)
+	require.Contains(t, payload.Evidence, "x-ratelimit-exceeded")
+}
+
+// TestFallback_PrimaryQuota_FallbackAlsoQuota_FailFast verifies that when
+// both the primary model AND the fallback model return quota errors, the
+// Slice-2 fail-fast path applies:
+//  1. apply.provider.quota_exceeded IS emitted.
+//  2. apply.provider.fallback_used is NOT emitted.
+//  3. Task is released to Pending (resume-safe, no attempts burned).
+func TestFallback_PrimaryQuota_FallbackAlsoQuota_FailFast(t *testing.T) {
+	quotaErr := &outbound.ProviderQuotaError{
+		RetryAfterSeconds: 86400,
+		Provider:          "opencode",
+		Model:             "anthropic/claude-opus-4-7",
+		Evidence:          `"maxRetriesExceeded":true`,
+	}
+	disp := &fakeDispatcherQuotaAlways{quotaErr: quotaErr}
+	const fallbackModel = "google/gemini-2.5-flash"
+
+	svc, board, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Config.FallbackModel = fallbackModel
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+
+	// (1) Quota exceeded IS emitted.
+	require.Contains(t, types, inbound.EventApplyProviderQuotaExceeded,
+		"apply.provider.quota_exceeded MUST be emitted when fallback also returns quota")
+
+	// (2) Fallback_used NOT emitted.
+	require.NotContains(t, types, inbound.EventApplyProviderFallbackUsed,
+		"apply.provider.fallback_used MUST NOT be emitted when fallback also returns quota")
+
+	// (3) Task released to Pending, no attempts burned.
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	for _, t2 := range board.tasks {
+		require.Equal(t, domainapply.TaskStatusPending, t2.Status(),
+			"task MUST be Pending after primary+fallback quota (resume-safe)")
+		require.Equal(t, 0, t2.Attempts(),
+			"task.Attempts() MUST remain 0 — no attempts burned by quota path")
+	}
+}
+
+// TestFallback_NoFallbackConfigured_QuotaFailsFast verifies backward compat:
+// when RunConfig.FallbackModel is empty (not configured), a quota error from
+// the primary MUST immediately trigger the Slice-2 fail-fast path with no
+// additional dispatch attempts. Behavior is identical to Slice 3.
+func TestFallback_NoFallbackConfigured_QuotaFailsFast(t *testing.T) {
+	disp := newQuotaDispatcher()
+	// FallbackModel deliberately left empty — default Slice-3 behavior.
+	svc, board, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+
+	// quota_exceeded fires as before.
+	require.Contains(t, types, inbound.EventApplyProviderQuotaExceeded,
+		"quota_exceeded must still fire when no fallback is configured")
+
+	// fallback_used must NOT fire.
+	require.NotContains(t, types, inbound.EventApplyProviderFallbackUsed,
+		"fallback_used MUST NOT fire when FallbackModel is empty")
+
+	// Exactly ONE Dispatch call (no fallback attempt made).
+	require.EqualValues(t, 1, disp.calls.Load(),
+		"with no fallback configured, exactly one Dispatch call must be made")
+
+	// Task released to Pending.
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	for _, t2 := range board.tasks {
+		require.Equal(t, domainapply.TaskStatusPending, t2.Status())
+		require.Equal(t, 0, t2.Attempts())
+	}
+}
+
+// TestFallback_HealthyRun_NoFallbackEvent verifies that a healthy
+// dispatch (no quota error at all) emits NO apply.provider.fallback_used
+// event, even when FallbackModel is configured. The fallback is ONLY
+// triggered by an explicit *ProviderQuotaError.
+func TestFallback_HealthyRun_NoFallbackEvent(t *testing.T) {
+	// Default fakeDispatcher returns DONE — healthy run.
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Config.FallbackModel = "google/gemini-2.5-flash"
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status)
+
+	types := events.types()
+	require.NotContains(t, types, inbound.EventApplyProviderFallbackUsed,
+		"apply.provider.fallback_used MUST NOT be emitted on a healthy run (no quota)")
+	require.NotContains(t, types, inbound.EventApplyProviderQuotaExceeded,
+		"apply.provider.quota_exceeded MUST NOT be emitted on a healthy run")
+}
+
+// TestFallback_NonQuotaFailure_NoFallback verifies that non-quota failures
+// (bad envelope, dispatch error) do NOT trigger the fallback path. Only
+// *ProviderQuotaError unlocks the fallback — other failures burn attempts.
+func TestFallback_NonQuotaFailure_NoFallback(t *testing.T) {
+	disp := &fakeDispatcherBadEnvelope{}
+	svc, board, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Config.FallbackModel = "google/gemini-2.5-flash"
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+
+	// fallback_used must NOT fire on non-quota failures.
+	require.NotContains(t, types, inbound.EventApplyProviderFallbackUsed,
+		"apply.provider.fallback_used MUST NOT fire on non-quota failure (bad envelope)")
+
+	// Iron Law #5 still applies: bad envelope burns attempts and escalates.
+	require.Contains(t, types, inbound.EventApplyTaskEscalated,
+		"apply.task.escalated MUST still fire after MaxAttempts non-quota failures")
+
+	// Attempts burned (normal failure path).
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	for _, t2 := range board.tasks {
+		require.Equal(t, domainapply.TaskStatusBlocked, t2.Status(),
+			"non-quota failure MUST reach Blocked after MaxAttempts (Iron Law #5)")
+		require.Equal(t, domainapply.MaxAttempts, t2.Attempts(),
+			"non-quota failure MUST burn all MaxAttempts — fallback does not interfere")
+	}
+}
+
 // TestNormalTaskFailure_BurnsAttempts_NoQuotaEvent is a direct regression
 // guard: a task that fails via the normal path (bad envelope, dispatch error)
 // MUST increment attempt count (Iron Law #5) and MUST NOT emit a quota event.

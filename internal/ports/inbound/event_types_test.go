@@ -36,6 +36,7 @@ func TestIsKnownEventType_DocumentedConstants(t *testing.T) {
 		inbound.EventApplyTaskEscalated,
 		inbound.EventApplyTaskRetry,
 		inbound.EventApplyProviderQuotaExceeded,
+		inbound.EventApplyProviderFallbackUsed,
 		inbound.EventApplyDispatchError,
 		inbound.EventApplyEnvelopeValidationFailed,
 		inbound.EventRuntimeDispatchFailed,
@@ -92,6 +93,7 @@ func TestEventConstantUniqueness(t *testing.T) {
 		inbound.EventApplyTaskClaimed, inbound.EventApplyTaskClaimSkipped,
 		inbound.EventApplyTaskEscalated, inbound.EventApplyTaskRetry,
 		inbound.EventApplyProviderQuotaExceeded,
+		inbound.EventApplyProviderFallbackUsed,
 		inbound.EventApplyDispatchError, inbound.EventApplyEnvelopeValidationFailed,
 		inbound.EventRuntimeDispatchFailed,
 		// Build-gate events (Slice 2).
