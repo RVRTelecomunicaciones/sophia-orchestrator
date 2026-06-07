@@ -357,6 +357,17 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		// WriteTimeout intentionally 0 — SSE long-poll incompatible with it.
 	}
 
+	// Skill seeder — inserts the 9 canonical phase skills when absent.
+	// Runs after migrations, before HTTP serve, so the first prompt
+	// hydration always finds seeded rows. InsertIfAbsent guarantees
+	// operator-edited rows are NEVER clobbered on restart.
+	if cfg.SkillsEnabled {
+		if err := SeedSkills(ctx, skillRepo, logger); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("bootstrap: skill seeder: %w", err)
+		}
+	}
+
 	// Spec #68 (BUG-23): boot-time recovery scan. Mark every phase
 	// left at PhaseStatusRunning by a previous crashed process as
 	// PhaseStatusInterrupted so the operator's status polls show a

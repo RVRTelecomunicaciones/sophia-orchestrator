@@ -43,7 +43,7 @@ Chain strategy: feature-branch-chain
 
 ## Phase 3: Slice 3 — Content
 
-- [ ] 3.1 Add boot seeder in `internal/bootstrap/seed_skills.go` (not migration data) for 9 named hybrid skills, adapted content, and `InsertIfAbsent` by `name` only.
-- [ ] 3.2 Add MIT attribution in `NOTICE`; keep inline-why inside persisted `content`, not schema.
-- [ ] 3.3 Add seeder tests covering empty-table seed, idempotent restart, and edited-row no-clobber behavior; reuse integration-tag PG tests when DB assertions are required.
-- [ ] 3.4 Verify slice 3: `gofmt ./... && go test ./... && go test -tags=integration ./... && golangci-lint config verify && golangci-lint run`.
+- [x] 3.1 Add boot seeder in `internal/bootstrap/seed_skills.go` (not migration data) for 9 named hybrid skills, adapted content, and `InsertIfAbsent` by `name` only.
+- [x] 3.2 Add MIT attribution in `NOTICE`; keep inline-why inside persisted `content`, not schema.
+- [x] 3.3 Add seeder tests covering empty-table seed, idempotent restart, and edited-row no-clobber behavior; reuse integration-tag PG tests when DB assertions are required.
+- [x] 3.4 Verify slice 3: `gofmt ./... && go test ./... && go test -tags=integration ./... && golangci-lint config verify && golangci-lint run`.
