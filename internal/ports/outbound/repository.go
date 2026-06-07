@@ -9,6 +9,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/worktree"
 )
 
@@ -80,4 +81,23 @@ type WorktreeRepository interface {
 	Save(ctx context.Context, w *worktree.Worktree) error
 	FindByID(ctx context.Context, id ids.WorktreeID) (*worktree.Worktree, error)
 	FindBySessionID(ctx context.Context, sessionID ids.SessionID) (*worktree.Worktree, error)
+}
+
+// SkillRepository persists Skill aggregates.
+//
+// FindByPhase returns every Skill whose phases array contains pt. The result
+// slice is empty (not ErrNotFound) when no Skill matches.
+//
+// Upsert inserts or fully replaces a Skill row by id.
+//
+// InsertIfAbsent inserts the Skill only when no row with the same name exists.
+// It is a no-op (returns nil) when a matching name is already present — the
+// caller MUST NOT treat a no-op as an error. This is the safe seeder operation.
+//
+// List returns all persisted Skills in no guaranteed order.
+type SkillRepository interface {
+	FindByPhase(ctx context.Context, pt phase.PhaseType) ([]*skill.Skill, error)
+	Upsert(ctx context.Context, s *skill.Skill) error
+	InsertIfAbsent(ctx context.Context, s *skill.Skill) error
+	List(ctx context.Context) ([]*skill.Skill, error)
 }
