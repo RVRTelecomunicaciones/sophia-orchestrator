@@ -97,6 +97,31 @@ const (
 	// attempts.
 	EventApplyTaskRetry = "apply.task.retry"
 
+	// EventApplyProviderQuotaExceeded is published when the agent dispatcher
+	// returns ErrProviderQuotaExceeded (HTTP 429 with quota signals).
+	// The task is short-circuited out of the MaxAttempts loop immediately —
+	// a quota exhaustion MUST NOT burn the remaining Iron-Law-5 attempts.
+	// The task is released to a resume-safe failed state so a later resume
+	// can retry it against a non-exhausted provider. See ADR-0010, Slice 2.
+	EventApplyProviderQuotaExceeded = "apply.provider.quota_exceeded"
+
+	// EventApplyProviderFallbackUsed is published when the apply phase
+	// successfully completes a task via the configured fallback model after
+	// the primary model returned ErrProviderQuotaExceeded. The fallback
+	// dispatch is a SINGLE extra try — it does NOT consume an Iron-Law-5
+	// attempt. When this event fires, the task was completed normally
+	// (envelope.StatusDone). See ADR-0010, Slice 4.
+	EventApplyProviderFallbackUsed = "apply.provider.fallback_used"
+
+	// EventApplyPhaseQuotaAborted is published ONCE when the per-Execute
+	// quota circuit breaker trips: N consecutive task outcomes were quota
+	// outcomes (primary AND fallback exhausted or absent) without an
+	// intervening successful task. The phase is cancelled immediately and
+	// a BLOCKED envelope naming the remedy is returned. N is controlled by
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD (default 3). See ADR-0010,
+	// Slice 5.
+	EventApplyPhaseQuotaAborted = "apply.phase.quota_aborted"
+
 	// EventApplyDispatchError is published when the agent dispatcher
 	// returns a transport-level error (HTTP, ctx cancellation) — distinct
 	// from EventRuntimeDispatchFailed which signals the agent CLI
@@ -174,6 +199,9 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyTaskClaimSkipped:            {},
 	EventApplyTaskEscalated:               {},
 	EventApplyTaskRetry:                   {},
+	EventApplyProviderQuotaExceeded:       {},
+	EventApplyProviderFallbackUsed:        {},
+	EventApplyPhaseQuotaAborted:           {},
 	EventApplyDispatchError:               {},
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},

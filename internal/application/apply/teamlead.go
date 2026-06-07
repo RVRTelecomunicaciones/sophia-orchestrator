@@ -31,7 +31,8 @@ const saturationRetryBudget = 9
 // retry attempt. Starts at 500ms and doubles each retry, capping at 30s.
 //
 // Calibration (2026-06): a single implement-agent is a real LLM/opencode
-// subprocess that runs for ~30-90s (DispatchTimeoutMS allows up to 30min).
+// subprocess that runs for ~30-90s (DispatchTimeoutMS default: 3min per
+// ADR-0010 Slice 3; operators may override via SOPHIA_DISPATCH_TIMEOUT_MS).
 // The previous ~10s total wait budget gave up LONG before any in-flight
 // slot could free, so a saturated Acquire failed the task with attempts=0
 // and cascaded to a false group failure — the dominant cause of the
@@ -82,7 +83,12 @@ func acquireWithSaturationRetries(ctx context.Context, gov SpawnGovernor) error 
 // Iron Law #5 enforcement: each implement-agent retries up to MaxAttempts
 // times (apply.MaxAttempts = 3); on the third failure the task is marked
 // BLOCKED and ErrEscalationRequired propagates to the group outcome.
-func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, priorContext string) groupOutcome {
+//
+// The quota circuit breaker (ADR-0010 Slice 5) is passed through to
+// runImplementWithRetry so each task goroutine can record outcomes. When
+// the breaker trips the Execute-scoped context is cancelled, causing
+// in-flight goroutines to exit at their next ctx.Done() check.
+func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, priorContext string, breaker *quotaBreaker) groupOutcome {
 	// Mark group running.
 	if err := group.Start(); err != nil {
 		return groupOutcome{failed: true, err: fmt.Errorf("group start: %w", err)}
@@ -119,7 +125,7 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 			}
 			defer func() { <-implSem }()
 
-			ok := s.runImplementWithRetry(ctx, c, p, b, group, task, priorContext)
+			ok := s.runImplementWithRetry(ctx, c, p, b, group, task, priorContext, breaker)
 			mu.Lock()
 			taskOutcomes[task.ID()] = ok
 			mu.Unlock()
@@ -189,7 +195,24 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 // agent invocations, with SpawnGovernor gating per attempt and Iron Law #5
 // escalation on the 3rd consecutive failure. Returns true iff the task
 // reached envelope.StatusDone.
-func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task, priorContext string) bool {
+//
+// Quota fail-fast (ADR-0010 Slice 2): if dispatchImplement detects a
+// provider quota exhaustion (ErrProviderQuotaExceeded), the MaxAttempts
+// loop is short-circuited immediately. The remaining attempts are NOT
+// consumed — quota exhaustion is a provider-side constraint, not an agent
+// failure, so burning attempts would poison a resume cycle with a false
+// escalation count. The task is released back to Pending (resume-safe) and
+// apply.provider.quota_exceeded is emitted so the operator can observe the
+// quota hit without DB access.
+//
+// Circuit breaker (ADR-0010 Slice 5): a quota outcome (primary quota +
+// fallback exhausted/absent) increments the shared per-Execute streak via
+// breaker.recordQuotaOutcome. A successful task completion resets it via
+// breaker.recordSuccess. When the streak reaches the threshold,
+// recordQuotaOutcome returns true; the Execute-scoped context is already
+// cancelled at that point (the breaker did it). The caller's goroutine
+// sees the cancellation on its next ctx.Done() check.
+func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task, priorContext string, breaker *quotaBreaker) bool {
 	// BUG-28: skip tasks that already completed in a previous Execute
 	// attempt. The board was reused via FindBoardByPhaseID, so the task
 	// status carries forward. Skipping here avoids re-claiming (which
@@ -241,13 +264,80 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 			})
 			return false
 		}
-		ok := s.dispatchImplement(ctx, c, p, b, group, task, implSession, priorContext)
+		ok, quotaErr := s.dispatchImplement(ctx, c, p, b, group, task, implSession, priorContext)
 		_ = s.d.SpawnGov.Release(ctx)
+
+		// Quota fallback (ADR-0010 Slice 4): when the primary model hits quota
+		// AND a fallback model is configured, attempt ONE extra dispatch with
+		// ModelOverride = FallbackModel. This try does NOT consume an Iron-Law-5
+		// attempt — quota exhaustion is a provider-side constraint, not an agent
+		// failure. On fallback success, emit apply.provider.fallback_used and
+		// return true. On fallback quota (or no fallback configured), fall
+		// through to the Slice-2 fail-fast path below.
+		if quotaErr != nil {
+			if fallback := s.d.Config.FallbackModel; fallback != "" {
+				fallbackOk, fallbackQuotaErr := s.dispatchImplementWithOverride(ctx, c, p, b, group, task, implSession, priorContext, fallback)
+				if fallbackQuotaErr == nil && fallbackOk {
+					// Fallback succeeded — emit the fallback_used event and
+					// complete the normal post-dispatch path (RecordAttempt).
+					s.publishEvent(ctx, p.ID(), inbound.EventApplyProviderFallbackUsed, inbound.ApplyProviderFallbackUsedPayload{
+						TaskID:            task.ID().String(),
+						FallbackModel:     fallback,
+						PrimaryProvider:   quotaErr.Provider,
+						PrimaryModel:      quotaErr.Model,
+						RetryAfterSeconds: quotaErr.RetryAfterSeconds,
+						Evidence:          quotaErr.Evidence,
+					})
+					recordErr := task.RecordAttempt(true)
+					_ = s.d.BoardRepo.SaveTask(ctx, task)
+					if recordErr != nil {
+						// Should not happen on a success record, but be safe.
+						return false
+					}
+					// ADR-0010 Slice 5: fallback success resets the streak so
+					// sporadic quota across a long healthy run does not trip.
+					breaker.recordSuccess()
+					return true
+				}
+				// Fallback also hit quota (or returned non-quota error treated as
+				// failure) — fall through to the Slice-2 fail-fast path.
+				// Use the original primary quotaErr for the quota_exceeded event
+				// payload so operators see the primary model that triggered this.
+			}
+
+			// Quota fail-fast (ADR-0010 Slice 2): short-circuit immediately on
+			// provider quota exhaustion. Do NOT call task.RecordAttempt — the
+			// attempt counter must remain unchanged so a resume cycle starts
+			// fresh. Release the task back to Pending so ClaimTask succeeds on
+			// resume (Release only works from Claimed or Running; at this point
+			// the task is still Claimed because dispatchImplement returned
+			// before the agent produced an outcome that would transition it).
+			_ = task.Release()
+			_ = s.d.BoardRepo.SaveTask(ctx, task)
+			s.publishEvent(ctx, p.ID(), inbound.EventApplyProviderQuotaExceeded, inbound.ApplyProviderQuotaExceededPayload{
+				TaskID:            task.ID().String(),
+				Provider:          quotaErr.Provider,
+				Model:             quotaErr.Model,
+				RetryAfterSeconds: quotaErr.RetryAfterSeconds,
+				Evidence:          quotaErr.Evidence,
+			})
+			// ADR-0010 Slice 5: record this as a quota outcome in the phase
+			// circuit breaker. If the streak crosses the threshold,
+			// recordQuotaOutcome cancels the Execute-scoped context — in-flight
+			// work sees ctx.Done() and stops. We do not branch on the return
+			// value here; the breaker's cancel already handles propagation. The
+			// tripped flag is read back in Execute after wg.Wait().
+			breaker.recordQuotaOutcome(quotaErr) //nolint:errcheck
+			return false
+		}
 
 		// Iron Law #5: record attempt; escalation triggers BLOCKED on 3rd fail.
 		recordErr := task.RecordAttempt(ok)
 		_ = s.d.BoardRepo.SaveTask(ctx, task)
 		if ok {
+			// ADR-0010 Slice 5: successful task resets the quota streak so
+			// sporadic quota errors across a long run never accumulate.
+			breaker.recordSuccess()
 			return true
 		}
 		if recordErr != nil {
@@ -279,19 +369,13 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 	return false
 }
 
-// dispatchImplement runs ONE implement attempt: build prompt, dispatch via
-// AgentDispatcher, validate envelope. Returns true on envelope.StatusDone.
-//
-// V1 simplifications:
-//   - File reservation (lock.acquire@v1) is replaced by the atomic ClaimTask
-//     above. Per-file locking is V1.5 once runtime ships Phase 2.
-//   - priorContext (spec + design) is loaded once in RunService.Execute
-//     and stays stable for the duration of the apply phase. Per-implement
-//     enrichment with apply-progress happens here via refreshApplyProgress,
-//     so every attempt sees the freshest snapshot of sibling tasks'
-//     outcomes. Fail-soft: a memory failure on the refresh leaves the
-//     base context intact rather than blocking the attempt.
-func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) bool {
+// dispatchImplementWithOverride is identical to dispatchImplement except it
+// forces ModelOverride on the DispatchRequest. Used exclusively by the
+// Slice-4 fallback path: when the primary model hits quota, the caller
+// re-dispatches the same task with the configured fallback model without
+// going through the full runImplementWithRetry loop (which would consume
+// an Iron-Law-5 attempt). Returns (true, nil) on envelope.StatusDone.
+func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext, modelOverride string) (bool, *outbound.ProviderQuotaError) {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
@@ -302,7 +386,101 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		PriorPhasesStatus: s.priorPhasesStatus,
 	})
 	if err != nil {
-		return false
+		return false, nil
+	}
+
+	_ = sess.MarkRunning()
+
+	res, err := s.d.Dispatcher.Dispatch(ctx, outbound.DispatchRequest{
+		Prompt:        prompt,
+		WorktreePath:  group.WorktreePath(),
+		TimeoutMS:     s.d.Config.DispatchTimeoutMS,
+		EnvelopeOut:   "stdout-fenced-json",
+		PhaseType:     string(p.Type()),
+		ModelOverride: modelOverride,
+	})
+	if err != nil {
+		var quotaErr *outbound.ProviderQuotaError
+		if errors.As(err, &quotaErr) {
+			return false, quotaErr
+		}
+		if errors.Is(err, outbound.ErrDispatchFailed) {
+			s.publishEvent(ctx, p.ID(), inbound.EventRuntimeDispatchFailed, inbound.RuntimeDispatchFailedPayload{
+				TaskID: task.ID().String(),
+				Err:    err.Error(),
+			})
+			return false, nil
+		}
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyDispatchError, inbound.ApplyDispatchErrorPayload{
+			TaskID: task.ID().String(),
+			Err:    err.Error(),
+		})
+		return false, nil
+	}
+
+	if res.EnvelopeRaw == nil && res.AdapterID == "aider" {
+		synth, synthErr := synthesizeEnvelopeFromGit(ctx, s.d.Runtime, group.WorktreePath())
+		if synthErr == nil {
+			res.EnvelopeRaw = synth
+		}
+	}
+
+	if res.EnvelopeRaw == nil {
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
+			TaskID: task.ID().String(),
+			Err:    "agent produced no fenced JSON envelope",
+		})
+		return false, nil
+	}
+
+	env, err := s.d.Validator.Validate(res.EnvelopeRaw, phase.PhaseApply)
+	if err != nil {
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
+			TaskID: task.ID().String(),
+			Err:    err.Error(),
+		})
+		return false, nil
+	}
+
+	_ = sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now())
+	_ = s.d.SessionRepo.Save(ctx, sess)
+	_ = task.Complete(env)
+	_ = s.d.BoardRepo.SaveTask(ctx, task)
+
+	return env.Status == envelope.StatusDone || env.Status == envelope.StatusDoneWithConcerns, nil
+}
+
+// dispatchImplement runs ONE implement attempt: build prompt, dispatch via
+// AgentDispatcher, validate envelope. Returns (true, nil) on
+// envelope.StatusDone.
+//
+// Quota return (ADR-0010 Slice 2): when the dispatcher returns
+// ErrProviderQuotaExceeded, dispatchImplement returns (false, *ProviderQuotaError)
+// so the caller (runImplementWithRetry) can distinguish a quota hit from a
+// normal task failure and short-circuit the MaxAttempts loop without burning
+// the remaining Iron-Law-5 attempts.
+//
+// V1 simplifications:
+//   - File reservation (lock.acquire@v1) is replaced by the atomic ClaimTask
+//     above. Per-file locking is V1.5 once runtime ships Phase 2.
+//   - priorContext (spec + design) is loaded once in RunService.Execute
+//     and stays stable for the duration of the apply phase. Per-implement
+//     enrichment with apply-progress happens here via refreshApplyProgress,
+//     so every attempt sees the freshest snapshot of sibling tasks'
+//     outcomes. Fail-soft: a memory failure on the refresh leaves the
+//     base context intact rather than blocking the attempt.
+func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) (bool, *outbound.ProviderQuotaError) {
+	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
+	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
+		Phase:             phase.PhaseApply,
+		ChangeName:        c.Name(),
+		Project:           c.Project(),
+		PriorContext:      enrichedContext,
+		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
+		PriorPhasesStatus: s.priorPhasesStatus,
+	})
+	if err != nil {
+		return false, nil
 	}
 
 	// MarkRunning is idempotent — a non-nil error means "already running"
@@ -318,6 +496,16 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		PhaseType:    string(p.Type()),
 	})
 	if err != nil {
+		// Quota fail-fast (ADR-0010 Slice 2): ErrProviderQuotaExceeded is
+		// distinct from both ErrDispatchFailed and generic transport errors.
+		// Extract the typed ProviderQuotaError via errors.As so the caller
+		// gets the RetryAfterSeconds / Provider / Evidence fields for the
+		// SSE payload. Return it as the second value; the caller will
+		// short-circuit the MaxAttempts loop without burning an attempt.
+		var quotaErr *outbound.ProviderQuotaError
+		if errors.As(err, &quotaErr) {
+			return false, quotaErr
+		}
 		// M-E0 #3: distinguish runtime-level dispatch failure from transport errors.
 		// ErrDispatchFailed means the agent CLI never ran (e.g. binary not found,
 		// shell.exec timeout). This is NOT an envelope validation failure.
@@ -326,14 +514,14 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 				TaskID: task.ID().String(),
 				Err:    err.Error(),
 			})
-			return false
+			return false, nil
 		}
 		// Transport-level failure (HTTP error, context cancellation, etc.).
 		s.publishEvent(ctx, p.ID(), inbound.EventApplyDispatchError, inbound.ApplyDispatchErrorPayload{
 			TaskID: task.ID().String(),
 			Err:    err.Error(),
 		})
-		return false
+		return false, nil
 	}
 
 	// Aider (and any future in-place adapter) sets AdapterID == "aider"
@@ -359,7 +547,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 			TaskID: task.ID().String(),
 			Err:    "agent produced no fenced JSON envelope",
 		})
-		return false
+		return false, nil
 	}
 
 	env, err := s.d.Validator.Validate(res.EnvelopeRaw, phase.PhaseApply)
@@ -370,7 +558,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 			TaskID: task.ID().String(),
 			Err:    err.Error(),
 		})
-		return false
+		return false, nil
 	}
 
 	_ = sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now())
@@ -382,7 +570,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	_ = hashPrompt(prompt)
 	_ = roleForApply // keep helper referenced
 
-	return env.Status == envelope.StatusDone || env.Status == envelope.StatusDoneWithConcerns
+	return env.Status == envelope.StatusDone || env.Status == envelope.StatusDoneWithConcerns, nil
 }
 
 func (s *RunService) makeSession(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Group, role session.AgentRole, command string) (*session.Session, error) {

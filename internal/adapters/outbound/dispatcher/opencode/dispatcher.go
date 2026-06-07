@@ -79,14 +79,22 @@ func New(runtime outbound.RuntimeClient, cfg Config) *Dispatcher {
 // Provider reports session.ProviderOpenCode.
 func (d *Dispatcher) Provider() session.Provider { return session.ProviderOpenCode }
 
-// modelFor returns the dispatcher model to invoke for the given phase.
-// Lookup order: ModelByPhase[phaseType] → cfg.Model (global default) →
-// "" (let opencode choose). An empty phaseType skips the per-phase
-// lookup; pre-existing callers that don't set DispatchRequest.PhaseType
+// modelFor returns the dispatcher model to invoke for the given request.
+// Lookup order:
+//  1. req.ModelOverride (when non-empty, wins unconditionally — used by the
+//     apply fallback dispatch path, Slice 4, see ADR-0010 §Decision 6).
+//  2. ModelByPhase[req.PhaseType] (per-phase override).
+//  3. cfg.Model (global default).
+//  4. "" (let opencode choose its own default from its config).
+//
+// Pre-existing callers that omit both ModelOverride and PhaseType
 // transparently keep the global-default behavior.
-func (d *Dispatcher) modelFor(phaseType string) string {
-	if phaseType != "" {
-		if m, ok := d.cfg.ModelByPhase[phaseType]; ok && m != "" {
+func (d *Dispatcher) modelFor(req outbound.DispatchRequest) string {
+	if req.ModelOverride != "" {
+		return req.ModelOverride
+	}
+	if req.PhaseType != "" {
+		if m, ok := d.cfg.ModelByPhase[req.PhaseType]; ok && m != "" {
 			return m
 		}
 	}
@@ -120,6 +128,14 @@ func (d *Dispatcher) HealthCheck(ctx context.Context) error {
 // Dispatch invokes OpenCode under WorktreePath with the given Prompt.
 // Captures stdout, extracts the LAST fenced ```json``` block as
 // EnvelopeRaw, and returns the structured result.
+//
+// Quota detection (ADR-0010): before returning, Dispatch scans the combined
+// stdout+stderr for quota-exhaustion signals using a co-occurrence guard
+// (transport token + quota token). This check runs regardless of
+// receipt.Status, covering both the observed success-hiding-429 case and
+// explicit failure receipts. When quota is detected, a *ProviderQuotaError
+// (which errors.Is(ErrProviderQuotaExceeded)) is returned instead of a
+// DispatchResult or ErrDispatchFailed.
 func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
 	// Flags aligned with current opencode CLI (v0.x):
 	//   opencode run [options] <message>     ← message is POSITIONAL
@@ -133,7 +149,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	// working_dir on the runtime payload below (8th wire-alignment gap,
 	// discovered during M-E0 Validation Gap #5).
 	args := []string{"run"}
-	if model := d.modelFor(req.PhaseType); model != "" {
+	if model := d.modelFor(req); model != "" {
 		args = append(args, "-m", model)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
@@ -179,6 +195,23 @@ func (d *Dispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opencode Dispatch: %w", err)
+	}
+
+	// ADR-0010: quota detection runs BEFORE the receipt.Status gate and
+	// covers ALL receipt statuses, including the observed
+	// status="success" case where opencode exits 0 but the LLM backend
+	// returned HTTP 429 internally (the AI_RetryError / maxRetriesExceeded
+	// path). The co-occurrence guard (transport token + quota token) keeps
+	// false-positive rate low for benign log lines containing "429".
+	stdout := string(receipt.Stdout)
+	stderr := string(receipt.Stderr)
+	if retryAfter, evidence, isQuota := detectProviderQuota(stdout, stderr); isQuota {
+		return nil, &outbound.ProviderQuotaError{
+			RetryAfterSeconds: retryAfter,
+			Provider:          "opencode",
+			Model:             d.modelFor(req),
+			Evidence:          evidence,
+		}
 	}
 
 	// M-E0 #3: check receipt.Status BEFORE attempting envelope extraction.
@@ -261,8 +294,8 @@ func opencodeWorktreeConfigJSON(worktreePath string) string {
 		"$schema": "https://opencode.ai/config.json",
 		"permission": map[string]any{
 			"external_directory": map[string]string{
-				worktreePath:          "allow",
-				worktreePath + "/**":  "allow",
+				worktreePath:         "allow",
+				worktreePath + "/**": "allow",
 			},
 		},
 	}

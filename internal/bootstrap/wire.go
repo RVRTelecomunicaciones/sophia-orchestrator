@@ -225,6 +225,24 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// end of apply. Empty preserves the legacy behaviour of leaving
 	// worktrees isolated under WorktreeRoot.
 	applyRunCfg.TargetPath = cfg.Apply.TargetPath
+	// ADR-0010 Slice 3: configurable short dispatch timeout. When
+	// SOPHIA_DISPATCH_TIMEOUT_MS is set (> 0), forward it to RunConfig
+	// so operators can tune the per-dispatch deadline. Zero keeps the
+	// apply.DefaultRunConfig default (180_000 ms = 3min).
+	if cfg.Apply.DispatchTimeoutMS > 0 {
+		applyRunCfg.DispatchTimeoutMS = cfg.Apply.DispatchTimeoutMS
+	}
+	// ADR-0010 Slice 4: fallback model for quota exhaustion. When
+	// SOPHIA_DISPATCHER_FALLBACK_MODEL is set, the apply phase will
+	// re-dispatch a quota-failed task once with ModelOverride = FallbackModel
+	// before triggering the Slice-2 fail-fast. Empty = no fallback.
+	applyRunCfg.FallbackModel = cfg.Apply.FallbackModel
+	// ADR-0010 Slice 5: phase quota circuit breaker threshold. When
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD is set (> 0), override the
+	// package default (3). Zero or unset keeps the default.
+	if cfg.Apply.QuotaBreakerThreshold > 0 {
+		applyRunCfg.QuotaBreakerThreshold = cfg.Apply.QuotaBreakerThreshold
+	}
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,

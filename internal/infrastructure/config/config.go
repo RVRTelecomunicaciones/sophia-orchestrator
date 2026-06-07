@@ -73,6 +73,37 @@ type ApplyConfig struct {
 	// behaviour of leaving worktrees isolated under WorktreeRoot.
 	// Loaded from SOPHIA_APPLY_TARGET_PATH.
 	TargetPath string
+	// DispatchTimeoutMS is the per-dispatch timeout in milliseconds
+	// forwarded to RunConfig.DispatchTimeoutMS. Zero leaves the
+	// apply.DefaultRunConfig default in effect (currently 180_000 = 3min).
+	// Must be > 0 when set; values ≤ 0 are treated as unset (default
+	// applies). Loaded from SOPHIA_DISPATCH_TIMEOUT_MS.
+	//
+	// ADR-0010 Slice 3: the 3min default is chosen so a doomed dispatch
+	// (quota exhaustion or silent hang) fails fast within the E2E runtime
+	// shell.exec cap of 600s, leaving margin for retries. Override this
+	// only when dispatching unusually long-running agents.
+	DispatchTimeoutMS int
+	// FallbackModel is the model string used when the primary dispatch
+	// returns ErrProviderQuotaExceeded (ADR-0010 Slice 4). When non-empty,
+	// the apply phase re-dispatches the same task once with
+	// DispatchRequest.ModelOverride = FallbackModel before triggering the
+	// Slice-2 fail-fast path. The fallback try does NOT consume an Iron-
+	// Law-5 attempt. Empty = no fallback (Slice-3 behavior unchanged).
+	// Loaded from SOPHIA_DISPATCHER_FALLBACK_MODEL. Apply-phase override
+	// only — the global env var applies to all phases via the dispatcher
+	// config, but the apply layer reads its own field so it can be wired
+	// independently from the dispatcher's per-phase model routing.
+	FallbackModel string
+	// QuotaBreakerThreshold is the number of consecutive quota outcomes
+	// (primary + fallback both exhausted or absent, with no intervening
+	// successful task) within a single Execute call that triggers the
+	// phase circuit breaker. When the streak reaches this value the phase
+	// is aborted with a BLOCKED envelope naming the remedy and one
+	// apply.phase.quota_aborted SSE event is emitted. Zero or negative
+	// falls back to the apply-level default (3). Loaded from
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD. See ADR-0010, Slice 5.
+	QuotaBreakerThreshold int
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -360,6 +391,13 @@ func Load() (Config, error) {
 	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)
 	c.Apply.WorktreeInit = envStr("SOPHIA_APPLY_WORKTREE_INIT", c.Apply.WorktreeInit)
 	c.Apply.TargetPath = envStr("SOPHIA_APPLY_TARGET_PATH", c.Apply.TargetPath)
+	if v := envInt("SOPHIA_DISPATCH_TIMEOUT_MS", 0); v > 0 {
+		c.Apply.DispatchTimeoutMS = v
+	}
+	c.Apply.FallbackModel = envStr("SOPHIA_DISPATCHER_FALLBACK_MODEL", "")
+	if v := envInt("SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD", 0); v > 0 {
+		c.Apply.QuotaBreakerThreshold = v
+	}
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)

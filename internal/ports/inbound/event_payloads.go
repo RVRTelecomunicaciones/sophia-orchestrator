@@ -127,6 +127,63 @@ type ApplyTaskRetryPayload struct {
 	Attempts int    `json:"attempts"`
 }
 
+// ApplyProviderQuotaExceededPayload is the payload of
+// apply.provider.quota_exceeded. Emitted when the dispatcher returns
+// ErrProviderQuotaExceeded for an implement attempt.
+//
+// The task is NOT recorded as a burned Iron-Law-5 attempt — a quota
+// exhaustion is a provider-side constraint, not an agent failure. The
+// task is released to a resume-safe state so a later resume can retry
+// it against a replenished or fallback provider. RetryAfterSeconds is
+// zero when the provider did not supply a Retry-After header.
+// Evidence is a ≤200-char snippet from the combined stdout+stderr that
+// triggered detection (useful for operator dashboards without DB access).
+type ApplyProviderQuotaExceededPayload struct {
+	TaskID            string `json:"task_id"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+	Evidence          string `json:"evidence"`
+}
+
+// ApplyProviderFallbackUsedPayload is the payload of
+// apply.provider.fallback_used. Emitted when the primary model hit quota
+// (ErrProviderQuotaExceeded) and the apply phase successfully completed
+// the task by re-dispatching with the configured fallback model.
+//
+// The fallback dispatch is a SINGLE extra try — it does NOT consume an
+// Iron-Law-5 attempt. PrimaryQuotaErr carries the evidence snippet from
+// the primary's *ProviderQuotaError so operators can correlate the
+// fallback event with the quota signal without querying the DB.
+type ApplyProviderFallbackUsedPayload struct {
+	TaskID            string `json:"task_id"`
+	FallbackModel     string `json:"fallback_model"`
+	PrimaryProvider   string `json:"primary_provider"`
+	PrimaryModel      string `json:"primary_model"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+	Evidence          string `json:"evidence"`
+}
+
+// ApplyPhaseQuotaAbortedPayload is the payload of apply.phase.quota_aborted.
+// Emitted ONCE when the per-Execute quota circuit breaker trips: Streak
+// consecutive task outcomes were quota outcomes (primary + fallback both
+// exhausted or absent) with no intervening successful task. The phase is
+// cancelled and a BLOCKED envelope naming the remedy is returned.
+//
+// Threshold is the configured N (SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD).
+// Streak is the final consecutive-quota count that crossed the threshold
+// (equal to Threshold on a clean trip). LastProvider and LastModel are
+// the provider/model strings from the most recent quota outcome, useful
+// for correlating with the provider's own quota dashboard. RetryAfter is
+// the retry_after_seconds from the last quota outcome (zero when absent).
+type ApplyPhaseQuotaAbortedPayload struct {
+	Threshold    int    `json:"threshold"`
+	Streak       int    `json:"streak"`
+	LastProvider string `json:"last_provider"`
+	LastModel    string `json:"last_model"`
+	RetryAfter   int    `json:"retry_after_seconds"`
+}
+
 // ApplyDispatchErrorPayload is the payload of apply.dispatch.error.
 // Distinct from RuntimeDispatchFailedPayload: this signals the
 // dispatcher returned a transport-level error (HTTP/ctx), NOT that

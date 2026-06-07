@@ -1,0 +1,15 @@
+ToolError [Error: AI_RetryError: Too many requests
+  maxRetriesExceeded: true
+  statusCode: 429
+  responseHeaders: {
+    "x-ratelimit-exceeded": "requests",
+    "x-ratelimit-limit-requests": "50",
+    "x-ratelimit-remaining-requests": "0",
+    "x-ratelimit-reset-requests": "1m0s",
+    "x-ratelimit-quota-exceeded-retry-after": "86400",
+    "x-ratelimit-exceeded-reason": "quota_exceeded",
+    "retry-after": "86400"
+  }
+  responseBody: {"type":"error","error":{"type":"rate_limit_error","message":"Rate limit exceeded: quota_exceeded. Your account has reached its monthly quota. Please upgrade your plan or wait for your quota to reset."}}]
+  at callWithRetry (.../node_modules/@ai-sdk/provider-utils/dist/index.js:120:11)
+  at async generateText (.../node_modules/ai/dist/index.js:2840:24)

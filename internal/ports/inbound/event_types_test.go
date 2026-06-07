@@ -35,6 +35,8 @@ func TestIsKnownEventType_DocumentedConstants(t *testing.T) {
 		inbound.EventApplyTaskClaimSkipped,
 		inbound.EventApplyTaskEscalated,
 		inbound.EventApplyTaskRetry,
+		inbound.EventApplyProviderQuotaExceeded,
+		inbound.EventApplyProviderFallbackUsed,
 		inbound.EventApplyDispatchError,
 		inbound.EventApplyEnvelopeValidationFailed,
 		inbound.EventRuntimeDispatchFailed,
@@ -58,13 +60,13 @@ func TestIsKnownEventType_DocumentedConstants(t *testing.T) {
 func TestIsKnownEventType_RejectsUnknown(t *testing.T) {
 	for _, typo := range []string{
 		"",
-		"apply.task.escalat",        // truncated
-		"apply.task.escalateddd",    // suffix garbage
-		"apply.tasks.escalated",     // wrong segment plural
-		"governance.decisions",      // wrong segment plural
-		"agent.envelope.recieved",   // common misspelling
-		"phase.startd",              // missing 'e'
-		"unknown.event",             // wholly invented
+		"apply.task.escalat",      // truncated
+		"apply.task.escalateddd",  // suffix garbage
+		"apply.tasks.escalated",   // wrong segment plural
+		"governance.decisions",    // wrong segment plural
+		"agent.envelope.recieved", // common misspelling
+		"phase.startd",            // missing 'e'
+		"unknown.event",           // wholly invented
 	} {
 		t.Run(typo, func(t *testing.T) {
 			require.False(t, inbound.IsKnownEventType(typo),
@@ -90,6 +92,8 @@ func TestEventConstantUniqueness(t *testing.T) {
 		inbound.EventApplyImplementSpawnGovernorError,
 		inbound.EventApplyTaskClaimed, inbound.EventApplyTaskClaimSkipped,
 		inbound.EventApplyTaskEscalated, inbound.EventApplyTaskRetry,
+		inbound.EventApplyProviderQuotaExceeded,
+		inbound.EventApplyProviderFallbackUsed,
 		inbound.EventApplyDispatchError, inbound.EventApplyEnvelopeValidationFailed,
 		inbound.EventRuntimeDispatchFailed,
 		// Build-gate events (Slice 2).
