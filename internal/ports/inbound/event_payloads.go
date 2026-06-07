@@ -146,6 +146,24 @@ type ApplyProviderQuotaExceededPayload struct {
 	Evidence          string `json:"evidence"`
 }
 
+// ApplyProviderFallbackUsedPayload is the payload of
+// apply.provider.fallback_used. Emitted when the primary model hit quota
+// (ErrProviderQuotaExceeded) and the apply phase successfully completed
+// the task by re-dispatching with the configured fallback model.
+//
+// The fallback dispatch is a SINGLE extra try — it does NOT consume an
+// Iron-Law-5 attempt. PrimaryQuotaErr carries the evidence snippet from
+// the primary's *ProviderQuotaError so operators can correlate the
+// fallback event with the quota signal without querying the DB.
+type ApplyProviderFallbackUsedPayload struct {
+	TaskID            string `json:"task_id"`
+	FallbackModel     string `json:"fallback_model"`
+	PrimaryProvider   string `json:"primary_provider"`
+	PrimaryModel      string `json:"primary_model"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+	Evidence          string `json:"evidence"`
+}
+
 // ApplyDispatchErrorPayload is the payload of apply.dispatch.error.
 // Distinct from RuntimeDispatchFailedPayload: this signals the
 // dispatcher returned a transport-level error (HTTP/ctx), NOT that
