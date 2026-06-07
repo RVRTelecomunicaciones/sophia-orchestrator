@@ -18,6 +18,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/worktree"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
@@ -1384,6 +1385,98 @@ func TestRun_RetryAfterNeedsContextBumpsAttempts(t *testing.T) {
 	require.NotEqual(t, out1.PhaseID, out2.PhaseID,
 		"retry must yield a fresh phase_id — collapsing them hides the "+
 			"prior attempt from history")
+}
+
+// ---------------------------------------------------------------------------
+// Skill hydration fail-soft tests (Slice 2, task 2.4b)
+// ---------------------------------------------------------------------------
+
+// fakeSkillProvider is a programmable SkillProvider for service_test.go.
+// A nil err returns the configured skills; a non-nil err simulates DB failure.
+type fakeSkillProvider struct {
+	skills []*skdomain.Skill
+	err    error
+}
+
+func (f *fakeSkillProvider) SkillsForPhase(_ context.Context, _ phase.PhaseType) ([]*skdomain.Skill, error) {
+	return f.skills, f.err
+}
+
+// newHarnessWithSkills creates a harness wired with the given SkillProvider.
+func newHarnessWithSkills(t *testing.T, sp discipline.SkillProvider) *harness {
+	t.Helper()
+	h := newHarness(t)
+	cr := h.changeRepo
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+
+	h.svc = appphase.New(appphase.Deps{
+		ChangeRepo:  cr,
+		PhaseRepo:   h.phaseRepo,
+		SessionRepo: h.sessRepo,
+		Governance:  h.governance,
+		Memory:      h.memory,
+		Dispatcher:  h.dispatcher,
+		SpawnGov:    h.spawn,
+		Validator:   discipline.NewValidator(),
+		IronLaw:     discipline.NewIronLawChecker(),
+		Prompts:     discipline.NewPromptBuilder(),
+		Audit:       h.audit,
+		Events:      h.events,
+		Clock:       h.clock,
+		IDGen: shared.FixedIDGenerator([]string{
+			"01ARZ3NDEKTSV4RRFFQ69G5P01",
+			"01ARZ3NDEKTSV4RRFFQ69G5S01",
+		}),
+		Scheduler: appphase.SyncScheduler,
+		Skills:    sp,
+	})
+	_ = cid
+	return h
+}
+
+// TestRun_Skills_NilProvider_PhaseRunsNormally verifies that when the Skills
+// field on Deps is nil (flag=off or not wired), the phase still runs
+// successfully and no "# Skill" section appears in the dispatched prompt.
+func TestRun_Skills_NilProvider_PhaseRunsNormally(t *testing.T) {
+	h := newHarnessWithSkills(t, nil) // nil → flag off
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
+	require.Equal(t, phase.PhaseStatusDone, stored.Status(),
+		"phase must complete normally when Skills is nil")
+}
+
+// TestRun_Skills_ProviderError_FailSoft verifies that when the SkillProvider
+// returns an error, the phase still runs (fail-soft) and "# Skill" is absent.
+func TestRun_Skills_ProviderError_FailSoft(t *testing.T) {
+	sp := &fakeSkillProvider{err: errors.New("db timeout")}
+	h := newHarnessWithSkills(t, sp)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
+	require.Equal(t, phase.PhaseStatusDone, stored.Status(),
+		"phase must complete normally even when SkillProvider errors (fail-soft)")
+}
+
+// TestRun_Skills_ProviderEmpty_FailSoft verifies that when the SkillProvider
+// returns an empty slice, the phase still runs (fail-soft) and "# Skill" is absent.
+func TestRun_Skills_ProviderEmpty_FailSoft(t *testing.T) {
+	sp := &fakeSkillProvider{skills: []*skdomain.Skill{}} // empty, no error
+	h := newHarnessWithSkills(t, sp)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
+	require.Equal(t, phase.PhaseStatusDone, stored.Status(),
+		"phase must complete normally when SkillProvider returns empty (fail-soft)")
 }
 
 // --- Spec #46 tests_required from ContextOverrides ---

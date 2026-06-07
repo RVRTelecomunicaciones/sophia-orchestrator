@@ -1,0 +1,42 @@
+# SDD Phase: apply
+Change: test-change
+Project: test-proj
+
+# IRON LAWS (enforced server-side by the orchestrator)
+These invariants are validated BEFORE this prompt fires. Your job is to produce a valid envelope for THIS phase — do NOT re-verify prior phases or look for their evidence locally.
+- [IL1_PERSIST_BEFORE_TRANSITION] No phase transition without persisted envelope.
+- [IL2_NO_APPLY_WITHOUT_TASKS_DONE] No apply without tasks phase DONE.
+- [IL3_NO_ARCHIVE_WITHOUT_VERIFY] No archive without verify DONE at confidence ≥ 0.9.
+- [IL4_NO_RUNTIME_WITHOUT_GOVERNANCE] No runtime call without governance decision.
+- [IL5_NO_FIX_4_WITHOUT_ESCALATION] No fix #4 without architectural escalation.
+
+# HARD-GATE Markers
+<HARD-GATE>DO NOT modify files outside your assigned files_pattern.</HARD-GATE>
+<HARD-GATE>DO NOT attempt fix #4 — escalate after 3 failures.</HARD-GATE>
+
+# Prior Context
+prior ctx text
+
+# Task
+do the apply task
+
+# Required Output
+Wrap the final JSON envelope in a ```json fenced markdown block. The orchestrator extracts the LAST fenced block; everything before it can be free-form reasoning. Do NOT emit a bare JSON object as your only output.
+
+```json
+{
+  "schema_version": "v1",
+  "phase": "apply",
+  "change_name": "test-change",
+  "project": "test-proj",
+  "status": "DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT",
+  "confidence": 0.0,
+  "executive_summary": "...",
+  "artifacts_saved": [{"topic_key": "sdd/test-change/apply", "type": "apply"}],
+  "next_recommended": ["short string suggestion 1", "short string suggestion 2"],
+  "risks": [{"description": "...", "level": "low|medium|high"}],
+  "data": {}
+}
+```
+
+Confidence threshold for this phase: 0.70. Status MUST be one of the four enum values. CRITICAL: regardless of how long your reasoning is, the LAST thing in your stdout MUST be the ```json fenced envelope shown above. The orchestrator's extractor scans for the LAST fenced JSON block; if you end with prose, code, or any other content after the envelope, the entire phase fails with `envelope_raw is absent` and your work is discarded. Reserve your final lines for the envelope and nothing else. next_recommended MUST be a JSON array of plain strings, not objects.

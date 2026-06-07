@@ -20,6 +20,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 	"github.com/stretchr/testify/require"
@@ -2570,4 +2571,67 @@ func TestBreaker_DefaultThreshold_IsThree(t *testing.T) {
 		require.NotEqual(t, inbound.EventApplyPhaseQuotaAborted, et,
 			"2 quota tasks must NOT trip the default-threshold-3 breaker")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Skill hydration fail-soft tests in apply.RunService (Slice 2, task 2.4b)
+// ---------------------------------------------------------------------------
+
+// fakeApplySkillProvider is a simple SkillProvider fake for apply run_test.go.
+type fakeApplySkillProvider struct {
+	skills []*skdomain.Skill
+	err    error
+}
+
+func (f *fakeApplySkillProvider) SkillsForPhase(_ context.Context, _ phase.PhaseType) ([]*skdomain.Skill, error) {
+	return f.skills, f.err
+}
+
+// TestExecute_Skills_NilProvider_PhaseRunsNormally verifies that when the Skills
+// dep on RunDeps is nil, the apply phase still runs successfully (fail-soft).
+func TestExecute_Skills_NilProvider_PhaseRunsNormally(t *testing.T) {
+	// default newRunService has nil Skills — just confirm everything works.
+	svc, _, _, _, _, _ := newRunService(t)
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"nil SkillProvider must not affect the apply phase outcome")
+}
+
+// TestExecute_Skills_ProviderError_FailSoft verifies that when the SkillProvider
+// returns an error, the apply phase continues normally (fail-soft).
+func TestExecute_Skills_ProviderError_FailSoft(t *testing.T) {
+	sp := &fakeApplySkillProvider{err: errors.New("db timeout")}
+	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Skills = sp
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"SkillProvider error must not block the apply phase (fail-soft)")
+}
+
+// TestExecute_Skills_ProviderEmpty_FailSoft verifies that when the SkillProvider
+// returns an empty slice, the apply phase continues normally (fail-soft).
+func TestExecute_Skills_ProviderEmpty_FailSoft(t *testing.T) {
+	sp := &fakeApplySkillProvider{skills: []*skdomain.Skill{}} // empty, no error
+	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Skills = sp
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID: c.ID(), PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"empty SkillProvider result must not block the apply phase (fail-soft)")
 }

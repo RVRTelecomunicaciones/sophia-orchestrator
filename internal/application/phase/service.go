@@ -32,6 +32,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
@@ -113,6 +114,13 @@ type Deps struct {
 	// single-agent flow. nil ⇒ apply phases run as single-agent (V1
 	// fallback).
 	ApplyExecutor ApplyExecutor
+
+	// Skills is the optional SkillProvider used to hydrate phase prompts
+	// with runtime skill-guidance units. nil or a no-op provider is
+	// safe: the prompt is left unchanged (byte-identical to pre-change
+	// baseline). When SOPHIA_SKILLS_ENABLED=false or the provider errors,
+	// the service passes nil Skills to PromptBuilder (fail-soft).
+	Skills discipline.SkillProvider
 
 	// Metrics is the optional Prometheus instrument set. When nil, all
 	// metric record calls are no-ops.
@@ -345,6 +353,17 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	// the LLM sees factual evidence instead of having to search for it.
 	testsRequired := parseScopeTestsRequired(in.ContextOverrides)
 	priorCtx := s.buildPriorContext(ctx, c)
+
+	// Hydrate skills fail-soft: if provider is nil, flag off, returns empty,
+	// or errors → pass nil Skills so the prompt is unchanged (byte-identical).
+	var phaseSkills []*skdomain.Skill
+	if s.d.Skills != nil {
+		if sk, skErr := s.d.Skills.SkillsForPhase(ctx, p.Type()); skErr == nil && len(sk) > 0 {
+			phaseSkills = sk
+		}
+		// skErr != nil or empty slice → phaseSkills stays nil (fail-soft)
+	}
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             p.Type(),
 		ChangeName:        c.Name(),
@@ -353,6 +372,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		TaskDescription:   in.TaskDescription,
 		TestsRequired:     testsRequired,
 		PriorPhasesStatus: phasesPredicateToStatusMap(prior),
+		Skills:            phaseSkills,
 	})
 	if err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("prompt build: %v", err))

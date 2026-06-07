@@ -35,11 +35,11 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: Slice 2 — Integration
 
-- [ ] 2.1 Update `internal/application/discipline/prompt_builder.go` to accept `PromptInput.Skills` and render one `# Skill` block after HARD-GATE and before Prior Context; keep `Build` pure/deterministic.
-- [ ] 2.2 Update `internal/application/phase/service.go`, `internal/application/apply/{run.go,teamlead.go}` to hydrate via `SkillProvider` before `Prompts.Build`; fail-soft on flag off, empty result, or provider error.
-- [ ] 2.3 Add `SOPHIA_SKILLS_ENABLED` default `true` in `internal/infrastructure/config/config.go`; wire repo/provider in `internal/bootstrap/wire.go` without new SSE events or CLI mirror.
-- [ ] 2.4 Add/refresh golden + app tests in `internal/application/discipline/testdata/`, `prompt_builder_test.go`, `phase/service_test.go`, `apply/*test.go` proving flag-off/empty/error are byte-identical to pre-change prompts.
-- [ ] 2.5 Verify slice 2: `gofmt ./... && go test ./... -cover ./internal/application/... && golangci-lint config verify && golangci-lint run`.
+- [x] 2.1 Update `internal/application/discipline/prompt_builder.go` to accept `PromptInput.Skills` and render one `# Skill` block after HARD-GATE and before Prior Context; keep `Build` pure/deterministic.
+- [x] 2.2 Update `internal/application/phase/service.go`, `internal/application/apply/{run.go,teamlead.go}` to hydrate via `SkillProvider` before `Prompts.Build`; fail-soft on flag off, empty result, or provider error.
+- [x] 2.3 Add `SOPHIA_SKILLS_ENABLED` default `true` in `internal/infrastructure/config/config.go`; wire repo/provider in `internal/bootstrap/wire.go` without new SSE events or CLI mirror.
+- [x] 2.4 Add/refresh golden + app tests in `internal/application/discipline/testdata/`, `prompt_builder_test.go`, `phase/service_test.go`, `apply/*test.go` proving flag-off/empty/error are byte-identical to pre-change prompts.
+- [x] 2.5 Verify slice 2: `gofmt ./... && go test ./... -cover ./internal/application/... && golangci-lint config verify && golangci-lint run`.
 
 ## Phase 3: Slice 3 — Content
 
