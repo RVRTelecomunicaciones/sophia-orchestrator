@@ -97,6 +97,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	sessionRepo := pg.NewSessionRepo(pool)
 	auditLog := pg.NewAuditLog(pool)
 	spawnRepo := pg.NewSpawnGovernorRepo(pool)
+	skillRepo := pg.NewSkillRepo(pool)
 	_ = boardRepo // used by ApplyService below
 
 	// Outbound HTTP clients.
@@ -189,6 +190,15 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
 	}
 
+	// Skill provider — wraps the PG SkillRepository with the SkillProvider port.
+	// When SOPHIA_SKILLS_ENABLED=false (or false at default), a nil provider is
+	// passed to all services so prompts remain byte-identical to the pre-change
+	// baseline (fail-soft). When true, the PG repo is used.
+	var skillProvider discipline.SkillProvider
+	if cfg.SkillsEnabled {
+		skillProvider = pg.NewSkillProvider(skillRepo)
+	}
+
 	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE
 	// application services so metrics can be injected into them.
 	var metrics *obs.Metrics
@@ -258,6 +268,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		IDGen:       idGen,
 		Config:      applyRunCfg,
 		Metrics:     metrics,
+		Skills:      skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
 	})
 
 	phaseSvc := phase.New(phase.Deps{
@@ -287,6 +298,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		}(),
 		ApplyExecutor: applyExecutor,
 		Metrics:       metrics,
+		Skills:        skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
 	})
 
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
@@ -343,6 +355,17 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Handler:     router,
 		ReadTimeout: cfg.HTTP.ReadTimeout,
 		// WriteTimeout intentionally 0 — SSE long-poll incompatible with it.
+	}
+
+	// Skill seeder — inserts the 9 canonical phase skills when absent.
+	// Runs after migrations, before HTTP serve, so the first prompt
+	// hydration always finds seeded rows. InsertIfAbsent guarantees
+	// operator-edited rows are NEVER clobbered on restart.
+	if cfg.SkillsEnabled {
+		if err := SeedSkills(ctx, skillRepo, logger); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("bootstrap: skill seeder: %w", err)
+		}
 	}
 
 	// Spec #68 (BUG-23): boot-time recovery scan. Mark every phase

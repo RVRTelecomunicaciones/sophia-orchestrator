@@ -13,17 +13,18 @@ import (
 
 // Config aggregates all runtime configuration.
 type Config struct {
-	HTTP        HTTPConfig
-	DB          DBConfig
-	Governance  ServiceConfig
-	Memory      ServiceConfig
-	Runtime     ServiceConfig
-	Dispatcher  DispatcherConfig
-	Spawn       SpawnConfig
-	Apply       ApplyConfig
-	Obs         ObsConfig
-	Environment string // dev | staging | prod
-	LogLevel    string // debug | info | warn | error
+	HTTP          HTTPConfig
+	DB            DBConfig
+	Governance    ServiceConfig
+	Memory        ServiceConfig
+	Runtime       ServiceConfig
+	Dispatcher    DispatcherConfig
+	Spawn         SpawnConfig
+	Apply         ApplyConfig
+	Obs           ObsConfig
+	Environment   string // dev | staging | prod
+	LogLevel      string // debug | info | warn | error
+	SkillsEnabled bool   // SOPHIA_SKILLS_ENABLED (default true)
 }
 
 // ApplyConfig configures the apply-phase coordinator. Loaded from
@@ -356,8 +357,9 @@ func Default() Config {
 			WaitInterval: 250 * time.Millisecond,
 			MaxWait:      30 * time.Second,
 		},
-		Environment: "dev",
-		LogLevel:    "info",
+		Environment:   "dev",
+		LogLevel:      "info",
+		SkillsEnabled: true, // default ON
 	}
 }
 
@@ -443,6 +445,7 @@ func Load() (Config, error) {
 
 	c.Environment = envStr("SOPHIA_ENV", c.Environment)
 	c.LogLevel = strings.ToLower(envStr("SOPHIA_LOG_LEVEL", c.LogLevel))
+	c.SkillsEnabled = envBool("SOPHIA_SKILLS_ENABLED", c.SkillsEnabled)
 
 	if err := c.Validate(); err != nil {
 		return Config{}, err

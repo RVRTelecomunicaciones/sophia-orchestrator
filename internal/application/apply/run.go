@@ -66,6 +66,12 @@ type RunDeps struct {
 
 	// Metrics is the optional Prometheus instrument set. nil ⇒ no-op.
 	Metrics *obs.Metrics
+
+	// Skills is the optional SkillProvider used to hydrate implement-agent
+	// prompts with runtime skill-guidance units. nil → prompts unchanged
+	// (byte-identical to pre-change baseline). Fail-soft: provider error or
+	// empty result → nil Skills passed to PromptBuilder, phase continues.
+	Skills discipline.SkillProvider
 }
 
 // RunConfig parameterizes RunService.

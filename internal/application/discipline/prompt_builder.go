@@ -6,6 +6,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ironlaw"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 )
 
 // PromptInput captures everything PromptBuilder.Build needs to produce a
@@ -31,6 +32,18 @@ type PromptInput struct {
 	// as "I must verify tasks are done" and returned BLOCKED with
 	// confidence=0.98 because no local DONE evidence was provided.
 	PriorPhasesStatus map[phase.PhaseType]string
+
+	// Skills is the set of runtime skill-guidance units applicable to this
+	// phase. Populated by the caller (phase/service.go, apply/run.go,
+	// apply/teamlead.go) via SkillProvider.SkillsForPhase BEFORE calling
+	// Build. Build remains pure/deterministic — it only reads this field,
+	// never accesses a DB or context.
+	//
+	// nil or empty → NO "# Skill" section is rendered (byte-identical to
+	// pre-change prompts). This is the fail-soft contract: if the flag is
+	// OFF, the provider returns empty, or the provider errors, the caller
+	// passes nil and the prompt is unchanged.
+	Skills []*skill.Skill
 }
 
 // PromptBuilder produces phase-specific agent prompts with Iron Laws,
@@ -79,6 +92,13 @@ func (pb *PromptBuilder) Build(in PromptInput) (string, error) {
 			sb.WriteString("</HARD-GATE>\n")
 		}
 		sb.WriteString("\n")
+	}
+
+	// Render the # Skill section AFTER HARD-GATE Markers and BEFORE Prior Context.
+	// When Skills is nil or empty this whole block is skipped, keeping the prompt
+	// byte-identical to the pre-change baseline (fail-soft / backward-compat).
+	if skillSection := renderSkillSection(in.Skills); skillSection != "" {
+		sb.WriteString(skillSection)
 	}
 
 	if in.PriorContext != "" {
@@ -221,6 +241,43 @@ func renderPhaseStatusSnapshot(statuses map[phase.PhaseType]string) string {
 		}
 	}
 	sb.WriteString("\n")
+	return sb.String()
+}
+
+// renderSkillSection renders the "# Skill" block for the given skills.
+// Returns "" when skills is nil or empty so the caller can skip the write
+// and the prompt stays byte-identical to the pre-change baseline.
+//
+// Render format (per design.md):
+//
+//	# Skill
+//	Use the following runtime skill guidance for this phase. It augments Iron Laws
+//	and HARD-GATE markers; it does not override them.
+//
+//	## <name>
+//	Techniques: tag-a, tag-b
+//	<content verbatim>
+//
+// technique tags are rendered on ONE line; content is verbatim (inline-why
+// lives inside content as authored, not as a separate column).
+func renderSkillSection(skills []*skill.Skill) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("# Skill\n")
+	sb.WriteString("Use the following runtime skill guidance for this phase. It augments Iron Laws and HARD-GATE markers; it does not override them.\n\n")
+	for _, s := range skills {
+		fmt.Fprintf(&sb, "## %s\n", s.Name())
+		// Technique tags on one line.
+		tags := s.TechniqueStrings()
+		sb.WriteString("Techniques: ")
+		sb.WriteString(strings.Join(tags, ", "))
+		sb.WriteString("\n")
+		// Content verbatim.
+		sb.WriteString(s.Content())
+		sb.WriteString("\n\n")
+	}
 	return sb.String()
 }
 

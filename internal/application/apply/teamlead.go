@@ -14,6 +14,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
+	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -377,6 +378,10 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 // an Iron-Law-5 attempt). Returns (true, nil) on envelope.StatusDone.
 func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext, modelOverride string) (bool, *outbound.ProviderQuotaError) {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
+
+	// Hydrate skills fail-soft: nil provider, empty result, or error → nil Skills.
+	phaseSkills := s.hydrateSkills(ctx, phase.PhaseApply)
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
 		ChangeName:        c.Name(),
@@ -384,6 +389,7 @@ func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *chang
 		PriorContext:      enrichedContext,
 		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
 		PriorPhasesStatus: s.priorPhasesStatus,
+		Skills:            phaseSkills,
 	})
 	if err != nil {
 		return false, nil
@@ -471,6 +477,10 @@ func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *chang
 //     base context intact rather than blocking the attempt.
 func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) (bool, *outbound.ProviderQuotaError) {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
+
+	// Hydrate skills fail-soft: nil provider, empty result, or error → nil Skills.
+	phaseSkills := s.hydrateSkills(ctx, phase.PhaseApply)
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
 		ChangeName:        c.Name(),
@@ -478,6 +488,7 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		PriorContext:      enrichedContext,
 		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
 		PriorPhasesStatus: s.priorPhasesStatus,
+		Skills:            phaseSkills,
 	})
 	if err != nil {
 		return false, nil
@@ -571,6 +582,20 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	_ = roleForApply // keep helper referenced
 
 	return env.Status == envelope.StatusDone || env.Status == envelope.StatusDoneWithConcerns, nil
+}
+
+// hydrateSkills returns the skills applicable to pt, or nil on any failure.
+// Fail-soft contract: a nil provider, empty result, or provider error all
+// return nil so the prompt stays byte-identical to the pre-change baseline.
+func (s *RunService) hydrateSkills(ctx context.Context, pt phase.PhaseType) []*skdomain.Skill {
+	if s.d.Skills == nil {
+		return nil
+	}
+	sk, err := s.d.Skills.SkillsForPhase(ctx, pt)
+	if err != nil || len(sk) == 0 {
+		return nil
+	}
+	return sk
 }
 
 func (s *RunService) makeSession(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Group, role session.AgentRole, command string) (*session.Session, error) {
