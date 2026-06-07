@@ -84,6 +84,17 @@ type ApplyConfig struct {
 	// shell.exec cap of 600s, leaving margin for retries. Override this
 	// only when dispatching unusually long-running agents.
 	DispatchTimeoutMS int
+	// FallbackModel is the model string used when the primary dispatch
+	// returns ErrProviderQuotaExceeded (ADR-0010 Slice 4). When non-empty,
+	// the apply phase re-dispatches the same task once with
+	// DispatchRequest.ModelOverride = FallbackModel before triggering the
+	// Slice-2 fail-fast path. The fallback try does NOT consume an Iron-
+	// Law-5 attempt. Empty = no fallback (Slice-3 behavior unchanged).
+	// Loaded from SOPHIA_DISPATCHER_FALLBACK_MODEL. Apply-phase override
+	// only — the global env var applies to all phases via the dispatcher
+	// config, but the apply layer reads its own field so it can be wired
+	// independently from the dispatcher's per-phase model routing.
+	FallbackModel string
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -374,6 +385,7 @@ func Load() (Config, error) {
 	if v := envInt("SOPHIA_DISPATCH_TIMEOUT_MS", 0); v > 0 {
 		c.Apply.DispatchTimeoutMS = v
 	}
+	c.Apply.FallbackModel = envStr("SOPHIA_DISPATCHER_FALLBACK_MODEL", "")
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)
