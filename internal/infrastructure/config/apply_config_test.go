@@ -99,3 +99,33 @@ func TestApplyConfig_DispatchTimeoutMS_ZeroValueIgnored(t *testing.T) {
 		"SOPHIA_DISPATCH_TIMEOUT_MS=0 must be treated as unset — "+
 			"zero is not a valid timeout value")
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0010 Slice 4: SOPHIA_DISPATCHER_FALLBACK_MODEL — fallback model config
+// ---------------------------------------------------------------------------
+
+// TestApplyConfig_FallbackModel_LoadsFromEnv verifies that
+// SOPHIA_DISPATCHER_FALLBACK_MODEL is loaded into ApplyConfig.FallbackModel.
+func TestApplyConfig_FallbackModel_LoadsFromEnv(t *testing.T) {
+	want := "google/gemini-2.5-flash"
+	minimalEnv(t, "SOPHIA_DISPATCHER_FALLBACK_MODEL", want)
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, want, cfg.Apply.FallbackModel,
+		"FallbackModel must load from SOPHIA_DISPATCHER_FALLBACK_MODEL")
+}
+
+// TestApplyConfig_FallbackModel_EmptyWhenUnset verifies that when
+// SOPHIA_DISPATCHER_FALLBACK_MODEL is not set, FallbackModel is empty
+// (no fallback configured = Slice-3 behavior preserved).
+func TestApplyConfig_FallbackModel_EmptyWhenUnset(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("SOPHIA_DISPATCHER_FALLBACK_MODEL", "") // guard against parent-env pollution
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.Apply.FallbackModel,
+		"unset SOPHIA_DISPATCHER_FALLBACK_MODEL must leave FallbackModel empty "+
+			"(backward-compat: Slice-3 quota fail-fast applies, no extra dispatch)")
+}
