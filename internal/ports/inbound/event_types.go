@@ -105,6 +105,14 @@ const (
 	// can retry it against a non-exhausted provider. See ADR-0010, Slice 2.
 	EventApplyProviderQuotaExceeded = "apply.provider.quota_exceeded"
 
+	// EventApplyProviderFallbackUsed is published when the apply phase
+	// successfully completes a task via the configured fallback model after
+	// the primary model returned ErrProviderQuotaExceeded. The fallback
+	// dispatch is a SINGLE extra try — it does NOT consume an Iron-Law-5
+	// attempt. When this event fires, the task was completed normally
+	// (envelope.StatusDone). See ADR-0010, Slice 4.
+	EventApplyProviderFallbackUsed = "apply.provider.fallback_used"
+
 	// EventApplyDispatchError is published when the agent dispatcher
 	// returns a transport-level error (HTTP, ctx cancellation) — distinct
 	// from EventRuntimeDispatchFailed which signals the agent CLI
@@ -183,6 +191,7 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyTaskEscalated:               {},
 	EventApplyTaskRetry:                   {},
 	EventApplyProviderQuotaExceeded:       {},
+	EventApplyProviderFallbackUsed:        {},
 	EventApplyDispatchError:               {},
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},
