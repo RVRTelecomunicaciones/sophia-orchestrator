@@ -113,6 +113,15 @@ const (
 	// (envelope.StatusDone). See ADR-0010, Slice 4.
 	EventApplyProviderFallbackUsed = "apply.provider.fallback_used"
 
+	// EventApplyPhaseQuotaAborted is published ONCE when the per-Execute
+	// quota circuit breaker trips: N consecutive task outcomes were quota
+	// outcomes (primary AND fallback exhausted or absent) without an
+	// intervening successful task. The phase is cancelled immediately and
+	// a BLOCKED envelope naming the remedy is returned. N is controlled by
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD (default 3). See ADR-0010,
+	// Slice 5.
+	EventApplyPhaseQuotaAborted = "apply.phase.quota_aborted"
+
 	// EventApplyDispatchError is published when the agent dispatcher
 	// returns a transport-level error (HTTP, ctx cancellation) — distinct
 	// from EventRuntimeDispatchFailed which signals the agent CLI
@@ -192,6 +201,7 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyTaskRetry:                   {},
 	EventApplyProviderQuotaExceeded:       {},
 	EventApplyProviderFallbackUsed:        {},
+	EventApplyPhaseQuotaAborted:           {},
 	EventApplyDispatchError:               {},
 	EventApplyEnvelopeValidationFailed:    {},
 	EventRuntimeDispatchFailed:            {},

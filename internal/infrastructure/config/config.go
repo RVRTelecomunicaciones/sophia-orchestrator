@@ -95,6 +95,15 @@ type ApplyConfig struct {
 	// config, but the apply layer reads its own field so it can be wired
 	// independently from the dispatcher's per-phase model routing.
 	FallbackModel string
+	// QuotaBreakerThreshold is the number of consecutive quota outcomes
+	// (primary + fallback both exhausted or absent, with no intervening
+	// successful task) within a single Execute call that triggers the
+	// phase circuit breaker. When the streak reaches this value the phase
+	// is aborted with a BLOCKED envelope naming the remedy and one
+	// apply.phase.quota_aborted SSE event is emitted. Zero or negative
+	// falls back to the apply-level default (3). Loaded from
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD. See ADR-0010, Slice 5.
+	QuotaBreakerThreshold int
 }
 
 // ObsConfig tunes observability (Prometheus metrics + OTEL traces).
@@ -386,6 +395,9 @@ func Load() (Config, error) {
 		c.Apply.DispatchTimeoutMS = v
 	}
 	c.Apply.FallbackModel = envStr("SOPHIA_DISPATCHER_FALLBACK_MODEL", "")
+	if v := envInt("SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD", 0); v > 0 {
+		c.Apply.QuotaBreakerThreshold = v
+	}
 
 	c.Dispatcher.Cmd = envStr("SOPHIA_DISPATCHER_CMD", c.Dispatcher.Cmd)
 	c.Dispatcher.SuggestedConcurrent = envInt("SOPHIA_DISPATCHER_CONCURRENT", c.Dispatcher.SuggestedConcurrent)

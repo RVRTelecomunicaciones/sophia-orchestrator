@@ -164,6 +164,26 @@ type ApplyProviderFallbackUsedPayload struct {
 	Evidence          string `json:"evidence"`
 }
 
+// ApplyPhaseQuotaAbortedPayload is the payload of apply.phase.quota_aborted.
+// Emitted ONCE when the per-Execute quota circuit breaker trips: Streak
+// consecutive task outcomes were quota outcomes (primary + fallback both
+// exhausted or absent) with no intervening successful task. The phase is
+// cancelled and a BLOCKED envelope naming the remedy is returned.
+//
+// Threshold is the configured N (SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD).
+// Streak is the final consecutive-quota count that crossed the threshold
+// (equal to Threshold on a clean trip). LastProvider and LastModel are
+// the provider/model strings from the most recent quota outcome, useful
+// for correlating with the provider's own quota dashboard. RetryAfter is
+// the retry_after_seconds from the last quota outcome (zero when absent).
+type ApplyPhaseQuotaAbortedPayload struct {
+	Threshold    int    `json:"threshold"`
+	Streak       int    `json:"streak"`
+	LastProvider string `json:"last_provider"`
+	LastModel    string `json:"last_model"`
+	RetryAfter   int    `json:"retry_after_seconds"`
+}
+
 // ApplyDispatchErrorPayload is the payload of apply.dispatch.error.
 // Distinct from RuntimeDispatchFailedPayload: this signals the
 // dispatcher returned a transport-level error (HTTP/ctx), NOT that

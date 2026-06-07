@@ -237,6 +237,12 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// re-dispatch a quota-failed task once with ModelOverride = FallbackModel
 	// before triggering the Slice-2 fail-fast. Empty = no fallback.
 	applyRunCfg.FallbackModel = cfg.Apply.FallbackModel
+	// ADR-0010 Slice 5: phase quota circuit breaker threshold. When
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD is set (> 0), override the
+	// package default (3). Zero or unset keeps the default.
+	if cfg.Apply.QuotaBreakerThreshold > 0 {
+		applyRunCfg.QuotaBreakerThreshold = cfg.Apply.QuotaBreakerThreshold
+	}
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,

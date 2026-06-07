@@ -83,7 +83,12 @@ func acquireWithSaturationRetries(ctx context.Context, gov SpawnGovernor) error 
 // Iron Law #5 enforcement: each implement-agent retries up to MaxAttempts
 // times (apply.MaxAttempts = 3); on the third failure the task is marked
 // BLOCKED and ErrEscalationRequired propagates to the group outcome.
-func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, priorContext string) groupOutcome {
+//
+// The quota circuit breaker (ADR-0010 Slice 5) is passed through to
+// runImplementWithRetry so each task goroutine can record outcomes. When
+// the breaker trips the Execute-scoped context is cancelled, causing
+// in-flight goroutines to exit at their next ctx.Done() check.
+func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, priorContext string, breaker *quotaBreaker) groupOutcome {
 	// Mark group running.
 	if err := group.Start(); err != nil {
 		return groupOutcome{failed: true, err: fmt.Errorf("group start: %w", err)}
@@ -120,7 +125,7 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 			}
 			defer func() { <-implSem }()
 
-			ok := s.runImplementWithRetry(ctx, c, p, b, group, task, priorContext)
+			ok := s.runImplementWithRetry(ctx, c, p, b, group, task, priorContext, breaker)
 			mu.Lock()
 			taskOutcomes[task.ID()] = ok
 			mu.Unlock()
@@ -199,7 +204,15 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 // escalation count. The task is released back to Pending (resume-safe) and
 // apply.provider.quota_exceeded is emitted so the operator can observe the
 // quota hit without DB access.
-func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task, priorContext string) bool {
+//
+// Circuit breaker (ADR-0010 Slice 5): a quota outcome (primary quota +
+// fallback exhausted/absent) increments the shared per-Execute streak via
+// breaker.recordQuotaOutcome. A successful task completion resets it via
+// breaker.recordSuccess. When the streak reaches the threshold,
+// recordQuotaOutcome returns true; the Execute-scoped context is already
+// cancelled at that point (the breaker did it). The caller's goroutine
+// sees the cancellation on its next ctx.Done() check.
+func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, group *apply.Group, task *apply.Task, priorContext string, breaker *quotaBreaker) bool {
 	// BUG-28: skip tasks that already completed in a previous Execute
 	// attempt. The board was reused via FindBoardByPhaseID, so the task
 	// status carries forward. Skipping here avoids re-claiming (which
@@ -281,6 +294,9 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 						// Should not happen on a success record, but be safe.
 						return false
 					}
+					// ADR-0010 Slice 5: fallback success resets the streak so
+					// sporadic quota across a long healthy run does not trip.
+					breaker.recordSuccess()
 					return true
 				}
 				// Fallback also hit quota (or returned non-quota error treated as
@@ -305,6 +321,13 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 				RetryAfterSeconds: quotaErr.RetryAfterSeconds,
 				Evidence:          quotaErr.Evidence,
 			})
+			// ADR-0010 Slice 5: record this as a quota outcome in the phase
+			// circuit breaker. If the streak crosses the threshold,
+			// recordQuotaOutcome cancels the Execute-scoped context — in-flight
+			// work sees ctx.Done() and stops. We do not branch on the return
+			// value here; the breaker's cancel already handles propagation. The
+			// tripped flag is read back in Execute after wg.Wait().
+			breaker.recordQuotaOutcome(quotaErr) //nolint:errcheck
 			return false
 		}
 
@@ -312,6 +335,9 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		recordErr := task.RecordAttempt(ok)
 		_ = s.d.BoardRepo.SaveTask(ctx, task)
 		if ok {
+			// ADR-0010 Slice 5: successful task resets the quota streak so
+			// sporadic quota errors across a long run never accumulate.
+			breaker.recordSuccess()
 			return true
 		}
 		if recordErr != nil {

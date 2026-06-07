@@ -128,6 +128,16 @@ type RunConfig struct {
 	// behaviour. Loaded from SOPHIA_DISPATCHER_FALLBACK_MODEL (global) with
 	// an optional apply-phase override. Empty = no fallback configured.
 	FallbackModel string
+	// QuotaBreakerThreshold is the number of consecutive quota outcomes
+	// (primary + fallback both exhausted/absent, no intervening success)
+	// within a single Execute invocation that trips the phase circuit
+	// breaker. When the streak reaches this value the phase is aborted with
+	// a BLOCKED envelope and one apply.phase.quota_aborted SSE event is
+	// emitted. In-flight work is cancelled via the Execute-scoped context.
+	//
+	// Zero or negative falls back to the package default (3). Loaded from
+	// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD. See ADR-0010, Slice 5.
+	QuotaBreakerThreshold int
 }
 
 // WorktreeInitMode constants for RunConfig.WorktreeInit.
@@ -135,6 +145,75 @@ const (
 	WorktreeInitSourceClone = "source_clone"
 	WorktreeInitEmpty       = "empty"
 )
+
+// defaultBreakerThreshold is the number of consecutive quota outcomes
+// that trip the phase circuit breaker when no explicit threshold is
+// configured via SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD. See ADR-0010 § 5.
+const defaultBreakerThreshold = 3
+
+// quotaBreaker is a concurrent-safe per-Execute circuit breaker that
+// counts consecutive quota outcomes across all parallel task goroutines
+// within a single RunService.Execute call.
+//
+// "Consecutive" is defined by completion order: whenever a task outcome
+// is recorded the streak increments (quota) or resets to zero (success).
+// Non-quota failures leave the streak unchanged.
+//
+// The breaker guards single-trip semantics with `tripped` (atomic bool):
+// once tripped the cancel function is called exactly once and any
+// subsequent trip attempts are no-ops. This is safe under concurrent
+// groups because sync/atomic.CompareAndSwap provides the once-only
+// guarantee without an additional sync.Once or mutex.
+type quotaBreaker struct {
+	mu        sync.Mutex
+	streak    int
+	threshold int
+	tripped   bool
+	cancel    context.CancelFunc // cancels the Execute-scoped context
+
+	// lastQuotaErr holds the most recent quota outcome for the SSE payload.
+	// Protected by mu — written under the same lock as streak.
+	lastQuotaErr *outbound.ProviderQuotaError
+}
+
+// recordQuotaOutcome increments the streak and checks whether the threshold
+// is now met. Returns true ONCE (exactly) when the breaker just tripped.
+// On a trip it calls cancel() to abort the Execute-scoped context and
+// marks the breaker so subsequent calls return false. Thread-safe.
+func (b *quotaBreaker) recordQuotaOutcome(qErr *outbound.ProviderQuotaError) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.tripped {
+		// Already tripped — no-op; avoid duplicate cancel/event.
+		return false
+	}
+	b.streak++
+	b.lastQuotaErr = qErr
+	if b.streak >= b.threshold {
+		b.tripped = true
+		b.cancel()
+		return true
+	}
+	return false
+}
+
+// recordSuccess resets the consecutive-quota streak. Called on any task
+// outcome where the task completed successfully (primary or fallback).
+// Thread-safe.
+func (b *quotaBreaker) recordSuccess() {
+	b.mu.Lock()
+	b.streak = 0
+	b.mu.Unlock()
+}
+
+// snapshot returns a point-in-time read of breaker fields for SSE payload
+// construction. Must be called AFTER the trip (i.e. from the same goroutine
+// that received true from recordQuotaOutcome).
+func (b *quotaBreaker) snapshot() (streak int, qErr *outbound.ProviderQuotaError) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.streak, b.lastQuotaErr
+}
 
 // DefaultRunConfig returns V1 defaults aligned with spec § 5.2:
 // 2x2 = 4 max concurrent agents, 10min dep wait, 3min dispatch, V1
@@ -218,8 +297,25 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	// dispatchImplement when building each implement-agent prompt.
 	s.priorPhasesStatus = in.PriorPhasesStatus
 
+	// ADR-0010 Slice 5: create an Execute-scoped child context whose cancel
+	// function is owned exclusively by the quota circuit breaker. When the
+	// breaker trips it calls cancel() once, which propagates cancellation to
+	// every in-flight task goroutine through the shared ctx.
+	execCtx, execCancel := context.WithCancel(ctx)
+	defer execCancel() // always clean up even on normal exit
+
+	// Resolve the breaker threshold: config wins over default.
+	breakerThreshold := s.d.Config.QuotaBreakerThreshold
+	if breakerThreshold <= 0 {
+		breakerThreshold = defaultBreakerThreshold
+	}
+	breaker := &quotaBreaker{
+		threshold: breakerThreshold,
+		cancel:    execCancel,
+	}
+
 	// Step 1: pre-flight — load tasks list from memory-engine.
-	tasksList, err := s.loadTasksList(ctx, c)
+	tasksList, err := s.loadTasksList(execCtx, c)
 	if err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("load tasks: %v", err)), err
 	}
@@ -231,19 +327,19 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 	// gets architectural background alongside its per-task description.
 	// Non-fatal if either phase is absent (ErrNotFound is silently dropped
 	// inside loadPriorContext); other errors propagate.
-	priorContext, err := s.loadPriorContext(ctx, c)
+	priorContext, err := s.loadPriorContext(execCtx, c)
 	if err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("load prior context: %v", err)), err
 	}
 
 	// Step 2: build the board (groups + tasks + dependency edges).
-	board, err := s.buildBoard(ctx, p, tasksList)
+	board, err := s.buildBoard(execCtx, p, tasksList)
 	if err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("build board: %v", err)), err
 	}
 
 	// Step 3: create one git worktree per group via runtime shell.exec.
-	if err := s.createWorktrees(ctx, c, board); err != nil {
+	if err := s.createWorktrees(execCtx, c, board); err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("create worktrees: %v", err)), err
 	}
 
@@ -261,20 +357,41 @@ func (s *RunService) Execute(ctx context.Context, c *change.Change, p *phase.Pha
 		if err := board.Start(); err != nil {
 			return s.failEnv(c, p, fmt.Sprintf("board start: %v", err)), err
 		}
-		if err := s.d.BoardRepo.SaveBoard(ctx, board); err != nil {
+		if err := s.d.BoardRepo.SaveBoard(execCtx, board); err != nil {
 			return s.failEnv(c, p, fmt.Sprintf("save board: %v", err)), err
 		}
 	}
-	s.publishEvent(ctx, p.ID(), inbound.EventApplyBoardCreated, inbound.ApplyBoardCreatedPayload{
+	s.publishEvent(execCtx, p.ID(), inbound.EventApplyBoardCreated, inbound.ApplyBoardCreatedPayload{
 		BoardID: board.ID().String(),
 		Groups:  len(board.Groups()),
 	})
 
 	// Steps 5-17: dispatch all team-leads in parallel + DAG-aware wait.
 	completion := NewDAGCoordinator(board.Groups())
-	groupResults, err := s.runAllGroups(ctx, c, p, board, completion, priorContext)
+	groupResults, breakerTripped, err := s.runAllGroups(execCtx, c, p, board, completion, priorContext, breaker)
 	if err != nil {
 		return s.failEnv(c, p, fmt.Sprintf("group coordination: %v", err)), err
+	}
+
+	// ADR-0010 Slice 5: if the quota breaker tripped, emit the event and
+	// return a BLOCKED envelope naming the remedy. We use the original ctx
+	// (not execCtx which is already cancelled) for publishEvent so the
+	// event reaches the SSE stream.
+	if breakerTripped {
+		streak, lastQErr := breaker.snapshot()
+		payload := inbound.ApplyPhaseQuotaAbortedPayload{
+			Threshold: breakerThreshold,
+			Streak:    streak,
+		}
+		if lastQErr != nil {
+			payload.LastProvider = lastQErr.Provider
+			payload.LastModel = lastQErr.Model
+			payload.RetryAfter = lastQErr.RetryAfterSeconds
+		}
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyPhaseQuotaAborted, payload)
+		return s.failEnv(c, p,
+			"provider quota exhausted; resets 1st of month 00:00 UTC, "+
+				"or set SOPHIA_DISPATCHER_FALLBACK_MODEL to a model with quota"), nil
 	}
 
 	// Step 18: aggregate, finalize.
@@ -354,7 +471,12 @@ func (s *RunService) materializeWorktrees(ctx context.Context, p *phase.Phase, b
 // dependencies, then runs the team-lead flow. Returns once every group
 // has signaled completion. priorContext is forwarded to every team-lead
 // and eventually injected into the implement-agent prompts.
-func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, dag *DAGCoordinator, priorContext string) (map[ids.GroupID]groupOutcome, error) {
+//
+// The quota circuit breaker is passed through to runTeamLead so task
+// goroutines can record quota outcomes and trip the phase cancel when
+// the threshold is crossed. breakerTripped is true when the breaker fired
+// during this invocation.
+func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phase.Phase, b *apply.Board, dag *DAGCoordinator, priorContext string, breaker *quotaBreaker) (map[ids.GroupID]groupOutcome, bool, error) {
 	results := make(map[ids.GroupID]groupOutcome, len(b.Groups()))
 	var resultsMu sync.Mutex
 
@@ -433,7 +555,7 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 				resultsMu.Unlock()
 				return
 			}
-			outcome := s.runTeamLead(ctx, c, p, b, group, priorContext)
+			outcome := s.runTeamLead(ctx, c, p, b, group, priorContext, breaker)
 			_ = s.d.SpawnGov.Release(ctx)
 
 			resultsMu.Lock()
@@ -455,7 +577,12 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 		}(g)
 	}
 	wg.Wait()
-	return results, nil
+
+	breaker.mu.Lock()
+	tripped := breaker.tripped
+	breaker.mu.Unlock()
+
+	return results, tripped, nil
 }
 
 // finalize builds the final envelope summarising group outcomes. Marks
