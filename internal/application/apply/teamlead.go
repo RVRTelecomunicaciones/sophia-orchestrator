@@ -254,14 +254,48 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		ok, quotaErr := s.dispatchImplement(ctx, c, p, b, group, task, implSession, priorContext)
 		_ = s.d.SpawnGov.Release(ctx)
 
-		// Quota fail-fast (ADR-0010 Slice 2): short-circuit immediately on
-		// provider quota exhaustion. Do NOT call task.RecordAttempt — the
-		// attempt counter must remain unchanged so a resume cycle starts
-		// fresh. Release the task back to Pending so ClaimTask succeeds on
-		// resume (Release only works from Claimed or Running; at this point
-		// the task is still Claimed because dispatchImplement returned
-		// before the agent produced an outcome that would transition it).
+		// Quota fallback (ADR-0010 Slice 4): when the primary model hits quota
+		// AND a fallback model is configured, attempt ONE extra dispatch with
+		// ModelOverride = FallbackModel. This try does NOT consume an Iron-Law-5
+		// attempt — quota exhaustion is a provider-side constraint, not an agent
+		// failure. On fallback success, emit apply.provider.fallback_used and
+		// return true. On fallback quota (or no fallback configured), fall
+		// through to the Slice-2 fail-fast path below.
 		if quotaErr != nil {
+			if fallback := s.d.Config.FallbackModel; fallback != "" {
+				fallbackOk, fallbackQuotaErr := s.dispatchImplementWithOverride(ctx, c, p, b, group, task, implSession, priorContext, fallback)
+				if fallbackQuotaErr == nil && fallbackOk {
+					// Fallback succeeded — emit the fallback_used event and
+					// complete the normal post-dispatch path (RecordAttempt).
+					s.publishEvent(ctx, p.ID(), inbound.EventApplyProviderFallbackUsed, inbound.ApplyProviderFallbackUsedPayload{
+						TaskID:            task.ID().String(),
+						FallbackModel:     fallback,
+						PrimaryProvider:   quotaErr.Provider,
+						PrimaryModel:      quotaErr.Model,
+						RetryAfterSeconds: quotaErr.RetryAfterSeconds,
+						Evidence:          quotaErr.Evidence,
+					})
+					recordErr := task.RecordAttempt(true)
+					_ = s.d.BoardRepo.SaveTask(ctx, task)
+					if recordErr != nil {
+						// Should not happen on a success record, but be safe.
+						return false
+					}
+					return true
+				}
+				// Fallback also hit quota (or returned non-quota error treated as
+				// failure) — fall through to the Slice-2 fail-fast path.
+				// Use the original primary quotaErr for the quota_exceeded event
+				// payload so operators see the primary model that triggered this.
+			}
+
+			// Quota fail-fast (ADR-0010 Slice 2): short-circuit immediately on
+			// provider quota exhaustion. Do NOT call task.RecordAttempt — the
+			// attempt counter must remain unchanged so a resume cycle starts
+			// fresh. Release the task back to Pending so ClaimTask succeeds on
+			// resume (Release only works from Claimed or Running; at this point
+			// the task is still Claimed because dispatchImplement returned
+			// before the agent produced an outcome that would transition it).
 			_ = task.Release()
 			_ = s.d.BoardRepo.SaveTask(ctx, task)
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyProviderQuotaExceeded, inbound.ApplyProviderQuotaExceededPayload{
@@ -307,6 +341,87 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		})
 	}
 	return false
+}
+
+// dispatchImplementWithOverride is identical to dispatchImplement except it
+// forces ModelOverride on the DispatchRequest. Used exclusively by the
+// Slice-4 fallback path: when the primary model hits quota, the caller
+// re-dispatches the same task with the configured fallback model without
+// going through the full runImplementWithRetry loop (which would consume
+// an Iron-Law-5 attempt). Returns (true, nil) on envelope.StatusDone.
+func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext, modelOverride string) (bool, *outbound.ProviderQuotaError) {
+	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
+	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
+		Phase:             phase.PhaseApply,
+		ChangeName:        c.Name(),
+		Project:           c.Project(),
+		PriorContext:      enrichedContext,
+		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
+		PriorPhasesStatus: s.priorPhasesStatus,
+	})
+	if err != nil {
+		return false, nil
+	}
+
+	_ = sess.MarkRunning()
+
+	res, err := s.d.Dispatcher.Dispatch(ctx, outbound.DispatchRequest{
+		Prompt:        prompt,
+		WorktreePath:  group.WorktreePath(),
+		TimeoutMS:     s.d.Config.DispatchTimeoutMS,
+		EnvelopeOut:   "stdout-fenced-json",
+		PhaseType:     string(p.Type()),
+		ModelOverride: modelOverride,
+	})
+	if err != nil {
+		var quotaErr *outbound.ProviderQuotaError
+		if errors.As(err, &quotaErr) {
+			return false, quotaErr
+		}
+		if errors.Is(err, outbound.ErrDispatchFailed) {
+			s.publishEvent(ctx, p.ID(), inbound.EventRuntimeDispatchFailed, inbound.RuntimeDispatchFailedPayload{
+				TaskID: task.ID().String(),
+				Err:    err.Error(),
+			})
+			return false, nil
+		}
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyDispatchError, inbound.ApplyDispatchErrorPayload{
+			TaskID: task.ID().String(),
+			Err:    err.Error(),
+		})
+		return false, nil
+	}
+
+	if res.EnvelopeRaw == nil && res.AdapterID == "aider" {
+		synth, synthErr := synthesizeEnvelopeFromGit(ctx, s.d.Runtime, group.WorktreePath())
+		if synthErr == nil {
+			res.EnvelopeRaw = synth
+		}
+	}
+
+	if res.EnvelopeRaw == nil {
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
+			TaskID: task.ID().String(),
+			Err:    "agent produced no fenced JSON envelope",
+		})
+		return false, nil
+	}
+
+	env, err := s.d.Validator.Validate(res.EnvelopeRaw, phase.PhaseApply)
+	if err != nil {
+		s.publishEvent(ctx, p.ID(), inbound.EventApplyEnvelopeValidationFailed, inbound.ApplyEnvelopeValidationFailedPayload{
+			TaskID: task.ID().String(),
+			Err:    err.Error(),
+		})
+		return false, nil
+	}
+
+	_ = sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now())
+	_ = s.d.SessionRepo.Save(ctx, sess)
+	_ = task.Complete(env)
+	_ = s.d.BoardRepo.SaveTask(ctx, task)
+
+	return env.Status == envelope.StatusDone || env.Status == envelope.StatusDoneWithConcerns, nil
 }
 
 // dispatchImplement runs ONE implement attempt: build prompt, dispatch via

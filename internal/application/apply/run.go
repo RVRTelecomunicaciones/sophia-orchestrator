@@ -117,6 +117,17 @@ type RunConfig struct {
 	// "prod"). Forwarded as a memory-engine scope filter on topic-key lookups
 	// so we read records saved within the same environment.
 	Environment string
+	// FallbackModel is the model string used when the primary dispatch returns
+	// ErrProviderQuotaExceeded (ADR-0010 Slice 4). When non-empty, the apply
+	// phase attempts a SINGLE re-dispatch of the same task with
+	// DispatchRequest.ModelOverride = FallbackModel. If that also returns quota
+	// (or no fallback is configured), the Slice-2 fail-fast path applies.
+	//
+	// The fallback try does NOT consume an Iron-Law-5 attempt — it is an
+	// out-of-band "grace try" triggered by provider exhaustion, not by agent
+	// behaviour. Loaded from SOPHIA_DISPATCHER_FALLBACK_MODEL (global) with
+	// an optional apply-phase override. Empty = no fallback configured.
+	FallbackModel string
 }
 
 // WorktreeInitMode constants for RunConfig.WorktreeInit.
