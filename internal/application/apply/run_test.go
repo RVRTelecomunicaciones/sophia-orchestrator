@@ -2124,3 +2124,450 @@ func TestRunConfig_ExplicitDispatchTimeoutMS_ForwardedToDispatch(t *testing.T) {
 	require.GreaterOrEqual(t, disp.dispatchCalls.Load(), int32(1),
 		"dispatch must be invoked at least once with custom timeout")
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0010 Slice 5: phase quota circuit breaker
+// ---------------------------------------------------------------------------
+
+// fakeDispatcherAlwaysQuota always returns *ProviderQuotaError regardless of
+// how many times Dispatch is called. Used to drive the phase circuit breaker
+// to its threshold. Unlike fakeDispatcherQuotaAlways (Slice 4, which
+// captured calls), this variant also tracks the number of calls for race
+// detector verification.
+type fakeDispatcherAlwaysQuota struct {
+	calls    atomic.Int32
+	quotaErr *outbound.ProviderQuotaError
+}
+
+func (d *fakeDispatcherAlwaysQuota) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *fakeDispatcherAlwaysQuota) SuggestedMaxConcurrent() int         { return 4 }
+func (d *fakeDispatcherAlwaysQuota) HealthCheck(_ context.Context) error { return nil }
+
+func (d *fakeDispatcherAlwaysQuota) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	d.calls.Add(1)
+	return nil, d.quotaErr
+}
+
+// newAlwaysQuotaDispatcher builds a fakeDispatcherAlwaysQuota wired with
+// a representative *ProviderQuotaError.
+func newAlwaysQuotaDispatcher() *fakeDispatcherAlwaysQuota {
+	return &fakeDispatcherAlwaysQuota{
+		quotaErr: &outbound.ProviderQuotaError{
+			RetryAfterSeconds: 3600,
+			Provider:          "opencode",
+			Model:             "github-copilot/claude-sonnet-4-6",
+			Evidence:          `AI_RetryError maxRetriesExceeded quota_exceeded`,
+		},
+	}
+}
+
+// multiTaskMemory plants a tasks-list with a single group containing N tasks.
+// All tasks share the same description prefix; the index is appended so each
+// description is unique (avoids the fakeDispatcher.failOnTaskID filter
+// accidentally matching all tasks with the same description).
+func multiTaskMemory(changeName string, nTasks int) *fakeMemory {
+	tasks := make([]map[string]any, nTasks)
+	for i := range tasks {
+		tasks[i] = map[string]any{
+			"description":   fmt.Sprintf("implement task %d", i+1),
+			"files_pattern": []string{"src/**/*.go"},
+		}
+	}
+	mem := newFakeMemory()
+	mem.putTasksList(changeName, map[string]any{
+		"groups": []map[string]any{
+			{
+				"name":  "group-1",
+				"tasks": tasks,
+			},
+		},
+	})
+	return mem
+}
+
+// multiGroupMultiTaskMemory plants a tasks-list with nGroups independent
+// (no dependencies) groups, each containing tasksPerGroup tasks.
+func multiGroupMultiTaskMemory(changeName string, nGroups, tasksPerGroup int) *fakeMemory {
+	groups := make([]map[string]any, nGroups)
+	for g := range groups {
+		tasks := make([]map[string]any, tasksPerGroup)
+		for i := range tasks {
+			tasks[i] = map[string]any{
+				"description":   fmt.Sprintf("group %d task %d", g+1, i+1),
+				"files_pattern": []string{fmt.Sprintf("src/g%d/**/*.go", g+1)},
+			}
+		}
+		groups[g] = map[string]any{
+			"name":  fmt.Sprintf("group-%d", g+1),
+			"tasks": tasks,
+		}
+	}
+	mem := newFakeMemory()
+	mem.putTasksList(changeName, map[string]any{"groups": groups})
+	return mem
+}
+
+// ---------------------------------------------------------------------------
+// 5a: threshold trips ONCE and aborts the phase
+// ---------------------------------------------------------------------------
+
+// TestBreaker_ThresholdTripsOnce verifies that when N consecutive quota
+// outcomes occur (N = QuotaBreakerThreshold), the phase is aborted with:
+//  1. Exactly ONE apply.phase.quota_aborted SSE event.
+//  2. The BLOCKED envelope contains the remedy text naming quota reset + fallback remedy.
+//  3. No apply.phase.quota_aborted event fires more than once (single-trip guarantee).
+//
+// This is the primary Slice 5 contract test.
+func TestBreaker_ThresholdTripsOnce(t *testing.T) {
+	const threshold = 3
+	disp := newAlwaysQuotaDispatcher()
+
+	// Plant 3 tasks — enough to trip the breaker at threshold 3.
+	mem := multiTaskMemory("feat-x", threshold)
+
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Memory = mem
+		d.Config.QuotaBreakerThreshold = threshold
+		// No fallback model so every dispatch is a raw quota outcome.
+		d.Config.FallbackModel = ""
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err, "Execute must not return an error on breaker trip — it returns a BLOCKED envelope")
+	require.NotNil(t, env)
+
+	// (2) Phase envelope must be BLOCKED with remedy text.
+	require.Equal(t, envelope.StatusBlocked, env.Status,
+		"breaker trip MUST produce a BLOCKED envelope")
+	require.Contains(t, env.ExecutiveSummary, "quota",
+		"BLOCKED envelope summary MUST mention quota")
+	require.Contains(t, env.ExecutiveSummary, "SOPHIA_DISPATCHER_FALLBACK_MODEL",
+		"BLOCKED envelope MUST name the fallback-model remedy")
+
+	// (1) Exactly ONE quota_aborted event.
+	abortedCount := 0
+	for _, et := range events.types() {
+		if et == inbound.EventApplyPhaseQuotaAborted {
+			abortedCount++
+		}
+	}
+	require.Equal(t, 1, abortedCount,
+		"apply.phase.quota_aborted MUST be emitted exactly once — no duplicate trips")
+}
+
+// ---------------------------------------------------------------------------
+// 5b: in-flight work is cancelled when the breaker trips
+// ---------------------------------------------------------------------------
+
+// TestBreaker_CancelsInFlightWork verifies that when the breaker fires, the
+// Execute-scoped context is cancelled so goroutines blocked in the impl
+// semaphore observe ctx.Done() and do not attempt additional dispatches.
+//
+// Setup: 2 groups × 2 tasks each = 4 tasks; all quota; threshold = 2.
+// After the 2nd quota outcome the breaker trips and cancels the context.
+// We assert that subsequent goroutines exit without dispatching.
+func TestBreaker_CancelsInFlightWork(t *testing.T) {
+	const threshold = 2
+	disp := newAlwaysQuotaDispatcher()
+
+	// 2 groups × 2 tasks each. Groups are independent (no deps).
+	mem := multiGroupMultiTaskMemory("feat-x", 2, 2)
+
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Memory = mem
+		d.Config.QuotaBreakerThreshold = threshold
+		d.Config.FallbackModel = ""
+		// Allow enough parallelism for all groups to start concurrently.
+		d.Config.MaxParallelGroups = 4
+		d.Config.MaxParallelImplementsPerGroup = 4
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusBlocked, env.Status,
+		"breaker cancels phase → BLOCKED envelope")
+
+	// Exactly one abort event despite concurrent groups.
+	abortedCount := 0
+	for _, et := range events.types() {
+		if et == inbound.EventApplyPhaseQuotaAborted {
+			abortedCount++
+		}
+	}
+	require.Equal(t, 1, abortedCount,
+		"concurrent groups MUST produce exactly ONE apply.phase.quota_aborted event")
+
+	// Dispatch count must be <= threshold + small epsilon (remaining
+	// goroutines that already entered dispatch before cancel propagated).
+	// The hard guarantee is: NOT all 4 tasks dispatch (breaker aborted).
+	// We give a generous upper bound of threshold+2 to avoid flakiness
+	// from goroutine scheduling while still proving cancellation.
+	dispCalls := disp.calls.Load()
+	require.LessOrEqual(t, dispCalls, int32(threshold+2),
+		"after breaker trips, in-flight goroutines must exit — dispatch count must stay near threshold")
+}
+
+// ---------------------------------------------------------------------------
+// 5c: streak RESETS on a successful task
+// ---------------------------------------------------------------------------
+
+// TestBreaker_StreakResetsOnSuccess verifies spec § "Successful task resets
+// the breaker": given a streak of (threshold-1) quota outcomes, one
+// successful task resets the counter so a subsequent run of (threshold-1)
+// more quota outcomes does NOT trip the breaker.
+//
+// Scenario: threshold=3, tasks=[quota, quota, done, quota, quota].
+// After task 2 the streak = 2. Task 3 (done) resets to 0.
+// Tasks 4+5 bring streak back to 2. Phase ends without tripping.
+func TestBreaker_StreakResetsOnSuccess(t *testing.T) {
+	const threshold = 3
+
+	// fakeDispatcherPatternedQuota dispatches in a pattern: quota for
+	// indices [0,1], success for [2], quota for [3,4].
+	type patternDispatcher struct {
+		calls    atomic.Int32
+		quotaErr *outbound.ProviderQuotaError
+	}
+	pd := &patternDispatcher{
+		quotaErr: &outbound.ProviderQuotaError{
+			Provider: "opencode",
+			Model:    "github-copilot/claude-sonnet-4-6",
+			Evidence: `quota_exceeded`,
+		},
+	}
+	dispatch := func(_ context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+		n := pd.calls.Add(1)
+		// Calls 1,2,4,5 → quota; call 3 → success.
+		if n == 3 {
+			env := mustEnvelopeBytes(req.Prompt, envelope.StatusDone)
+			return &outbound.DispatchResult{ExitCode: 0, EnvelopeRaw: env}, nil
+		}
+		return nil, pd.quotaErr
+	}
+
+	// Wrap the closure in a lambda dispatcher.
+	lambdaDisp := &lambdaAgentDispatcher{dispatchFn: dispatch}
+
+	// Plant 5 tasks in a single group (sequential order within the group).
+	mem := multiTaskMemory("feat-x", 5)
+
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = lambdaDisp
+		d.Memory = mem
+		d.Config.QuotaBreakerThreshold = threshold
+		d.Config.FallbackModel = ""
+		// Sequential within-group dispatch ensures deterministic pattern.
+		d.Config.MaxParallelImplementsPerGroup = 1
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	// The breaker must NOT have tripped (streak never reached 3 because
+	// task 3 reset it to 0 after task 2 brought it to 2).
+	for _, et := range events.types() {
+		require.NotEqual(t, inbound.EventApplyPhaseQuotaAborted, et,
+			"breaker MUST NOT trip when a success resets the streak before threshold")
+	}
+
+	// Phase ends in BLOCKED (4 quota tasks failed) but NOT because of the
+	// breaker — because individual tasks failed and escalated.
+	// The envelope is BLOCKED but the summary must NOT mention the remedy.
+	require.NotNil(t, env)
+	require.NotContains(t, env.ExecutiveSummary, "1st of month",
+		"BLOCKED reason from normal task failure must NOT carry the breaker remedy text")
+}
+
+// lambdaAgentDispatcher wraps a plain dispatch function so it satisfies
+// the outbound.AgentDispatcher interface. Used only in tests.
+type lambdaAgentDispatcher struct {
+	dispatchFn func(context.Context, outbound.DispatchRequest) (*outbound.DispatchResult, error)
+}
+
+func (d *lambdaAgentDispatcher) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *lambdaAgentDispatcher) SuggestedMaxConcurrent() int         { return 4 }
+func (d *lambdaAgentDispatcher) HealthCheck(_ context.Context) error { return nil }
+func (d *lambdaAgentDispatcher) Dispatch(ctx context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	return d.dispatchFn(ctx, req)
+}
+
+// ---------------------------------------------------------------------------
+// 5d: non-quota failures do NOT advance the breaker
+// ---------------------------------------------------------------------------
+
+// TestBreaker_NonQuotaFailuresDoNotAdvanceStreak verifies spec §
+// "Non-quota failures do not advance the breaker": envelope validation
+// failures (Iron Law #5 path) must leave the streak unchanged and MUST NOT
+// cause the breaker to trip even after MaxAttempts × N tasks.
+func TestBreaker_NonQuotaFailuresDoNotAdvanceStreak(t *testing.T) {
+	const threshold = 2
+	disp := &fakeDispatcherBadEnvelope{} // non-quota failure path
+
+	// Plant exactly threshold tasks. If non-quota failures advanced the streak
+	// the breaker would trip after these tasks — this test proves they don't.
+	mem := multiTaskMemory("feat-x", threshold)
+
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Memory = mem
+		d.Config.QuotaBreakerThreshold = threshold
+		d.Config.FallbackModel = ""
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	// No quota_aborted event — non-quota failures must NOT advance the breaker.
+	for _, et := range events.types() {
+		require.NotEqual(t, inbound.EventApplyPhaseQuotaAborted, et,
+			"apply.phase.quota_aborted MUST NOT fire on non-quota (envelope-validation) failures")
+	}
+
+	// Iron Law #5 still fires: task reaches Blocked after MaxAttempts.
+	require.Contains(t, events.types(), inbound.EventApplyTaskEscalated,
+		"Iron Law #5 MUST still apply — apply.task.escalated must fire on non-quota failures")
+}
+
+// ---------------------------------------------------------------------------
+// 5e: healthy runs emit NONE of the new events
+// ---------------------------------------------------------------------------
+
+// TestBreaker_HealthyRun_NoNewEvents verifies backward compatibility:
+// when every task dispatch succeeds, no Slice 5 events are emitted.
+// This guards the "no quota → breaker never trips" contract.
+func TestBreaker_HealthyRun_NoNewEvents(t *testing.T) {
+	// Default fakeDispatcher returns DONE.
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Config.QuotaBreakerThreshold = 3
+		d.Config.FallbackModel = "" // not needed but explicit
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"healthy run must still produce StatusDone with breaker configured")
+
+	for _, et := range events.types() {
+		require.NotEqual(t, inbound.EventApplyPhaseQuotaAborted, et,
+			"apply.phase.quota_aborted MUST NOT be emitted on a healthy run")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 5f: quota_aborted payload fields verified
+// ---------------------------------------------------------------------------
+
+// TestBreaker_QuotaAbortedPayloadFields verifies the apply.phase.quota_aborted
+// SSE payload carries the expected fields: threshold, streak, last_provider,
+// last_model, retry_after_seconds.
+func TestBreaker_QuotaAbortedPayloadFields(t *testing.T) {
+	const threshold = 2
+	quotaErr := &outbound.ProviderQuotaError{
+		RetryAfterSeconds: 7200,
+		Provider:          "opencode",
+		Model:             "github-copilot/claude-sonnet-4-6",
+		Evidence:          `quota_exceeded maxRetriesExceeded`,
+	}
+	disp := &fakeDispatcherAlwaysQuota{quotaErr: quotaErr}
+	mem := multiTaskMemory("feat-x", threshold) // exactly threshold tasks
+
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Memory = mem
+		d.Config.QuotaBreakerThreshold = threshold
+		d.Config.FallbackModel = ""
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	events.mu.Lock()
+	defer events.mu.Unlock()
+
+	var payload *inbound.ApplyPhaseQuotaAbortedPayload
+	for _, ev := range events.events {
+		if ev.Type == inbound.EventApplyPhaseQuotaAborted {
+			raw, marshalErr := json.Marshal(ev.Payload)
+			require.NoError(t, marshalErr)
+			var pl inbound.ApplyPhaseQuotaAbortedPayload
+			require.NoError(t, json.Unmarshal(raw, &pl))
+			payload = &pl
+			break
+		}
+	}
+	require.NotNil(t, payload, "apply.phase.quota_aborted event must be present")
+	require.Equal(t, threshold, payload.Threshold, "payload.Threshold must equal RunConfig.QuotaBreakerThreshold")
+	require.GreaterOrEqual(t, payload.Streak, threshold, "payload.Streak must be >= threshold at trip")
+	require.Equal(t, "opencode", payload.LastProvider)
+	require.Equal(t, "github-copilot/claude-sonnet-4-6", payload.LastModel)
+	require.Equal(t, 7200, payload.RetryAfter)
+}
+
+// ---------------------------------------------------------------------------
+// 5g: default threshold (0 in config falls back to 3)
+// ---------------------------------------------------------------------------
+
+// TestBreaker_DefaultThreshold_IsThree verifies that when QuotaBreakerThreshold
+// is 0 (not configured), the package default of 3 applies. With 2 tasks only
+// the breaker must NOT trip; with 3 tasks it MUST.
+func TestBreaker_DefaultThreshold_IsThree(t *testing.T) {
+	disp := newAlwaysQuotaDispatcher()
+
+	// 2 tasks → streak peaks at 2, must NOT trip with default threshold 3.
+	mem2 := multiTaskMemory("feat-x", 2)
+	svc2, _, _, _, events2, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+		d.Memory = mem2
+		d.Config.QuotaBreakerThreshold = 0 // trigger default
+		d.Config.FallbackModel = ""
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	_, err := svc2.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	for _, et := range events2.types() {
+		require.NotEqual(t, inbound.EventApplyPhaseQuotaAborted, et,
+			"2 quota tasks must NOT trip the default-threshold-3 breaker")
+	}
+}

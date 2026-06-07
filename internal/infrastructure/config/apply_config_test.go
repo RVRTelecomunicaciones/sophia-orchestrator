@@ -129,3 +129,33 @@ func TestApplyConfig_FallbackModel_EmptyWhenUnset(t *testing.T) {
 		"unset SOPHIA_DISPATCHER_FALLBACK_MODEL must leave FallbackModel empty "+
 			"(backward-compat: Slice-3 quota fail-fast applies, no extra dispatch)")
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0010 Slice 5: SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD — breaker config
+// ---------------------------------------------------------------------------
+
+// TestApplyConfig_QuotaBreakerThreshold_ParsedFromEnv verifies that a valid
+// positive integer in SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD is loaded into
+// ApplyConfig.QuotaBreakerThreshold.
+func TestApplyConfig_QuotaBreakerThreshold_ParsedFromEnv(t *testing.T) {
+	minimalEnv(t, "SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD", "5")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, 5, cfg.Apply.QuotaBreakerThreshold,
+		"SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD=5 must parse to 5")
+}
+
+// TestApplyConfig_QuotaBreakerThreshold_ZeroWhenUnset verifies that when
+// SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD is not set, QuotaBreakerThreshold is
+// zero — the bootstrap and RunService then apply the package default (3).
+func TestApplyConfig_QuotaBreakerThreshold_ZeroWhenUnset(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD", "") // guard parent-env pollution
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Zero(t, cfg.Apply.QuotaBreakerThreshold,
+		"unset SOPHIA_APPLY_QUOTA_BREAKER_THRESHOLD must leave field zero "+
+			"so bootstrap falls back to apply defaultBreakerThreshold (3)")
+}
