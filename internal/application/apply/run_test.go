@@ -1506,3 +1506,207 @@ func TestExecute_RefreshTransportError_FailSoft(t *testing.T) {
 	require.NotContains(t, prompt, "## Recent progress",
 		"Recent progress section must be absent when refresh fails")
 }
+
+// ---------------------------------------------------------------------------
+// Slice 2 (ADR-0010): provider quota fail-fast tests
+// ---------------------------------------------------------------------------
+
+// fakeDispatcherQuota returns *outbound.ProviderQuotaError for every Dispatch
+// call, simulating a provider that returns HTTP 429 with quota signals.
+// NO real LLM run — operator Copilot quota exhausted.
+type fakeDispatcherQuota struct {
+	calls    atomic.Int32
+	quotaErr *outbound.ProviderQuotaError
+}
+
+func (d *fakeDispatcherQuota) Provider() session.Provider          { return session.ProviderOpenCode }
+func (d *fakeDispatcherQuota) SuggestedMaxConcurrent() int         { return 4 }
+func (d *fakeDispatcherQuota) HealthCheck(_ context.Context) error { return nil }
+
+func (d *fakeDispatcherQuota) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	d.calls.Add(1)
+	return nil, d.quotaErr
+}
+
+// newQuotaDispatcher builds a fakeDispatcherQuota with a canonical
+// *outbound.ProviderQuotaError that exercises the RetryAfterSeconds /
+// Provider / Model / Evidence fields used by the SSE payload.
+func newQuotaDispatcher() *fakeDispatcherQuota {
+	return &fakeDispatcherQuota{
+		quotaErr: &outbound.ProviderQuotaError{
+			RetryAfterSeconds: 86400,
+			Provider:          "opencode",
+			Model:             "copilot/gpt-4o",
+			Evidence:          `"maxRetriesExceeded":true,"x-ratelimit-exceeded":"quota"`,
+		},
+	}
+}
+
+// TestQuotaFailFast_EmitsEventAndDoesNotBurnAttempts is the primary Slice 2
+// contract test. When the dispatcher returns *ProviderQuotaError:
+//
+//  1. Exactly ONE apply.provider.quota_exceeded event is emitted.
+//  2. The task attempt counter is NOT incremented (quota does NOT burn
+//     Iron-Law-5 attempts).
+//  3. The dispatcher is called exactly ONCE (no retry loop).
+//  4. apply.task.escalated is NOT emitted (no false escalation).
+//  5. apply.task.retry is NOT emitted.
+//
+// This is the KEY behavioral invariant: a 429 must short-circuit the
+// MaxAttempts loop immediately without leaving the task in a burnt state
+// that would prevent a clean resume.
+func TestQuotaFailFast_EmitsEventAndDoesNotBurnAttempts(t *testing.T) {
+	disp := newQuotaDispatcher()
+	svc, board, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+
+	// (1) Exactly ONE quota event emitted.
+	quotaCount := 0
+	for _, et := range types {
+		if et == inbound.EventApplyProviderQuotaExceeded {
+			quotaCount++
+		}
+	}
+	require.Equal(t, 1, quotaCount,
+		"exactly ONE apply.provider.quota_exceeded must be emitted — not one per MaxAttempts")
+
+	// (2) Dispatcher called exactly once — loop short-circuited.
+	require.EqualValues(t, 1, disp.calls.Load(),
+		"dispatcher MUST be called exactly once on quota hit — remaining attempts must NOT be consumed")
+
+	// (3) No escalation event — quota does not burn attempts.
+	require.NotContains(t, types, inbound.EventApplyTaskEscalated,
+		"apply.task.escalated MUST NOT be emitted on quota hit — escalation is for genuine agent failures")
+
+	// (4) No retry event — quota exits immediately.
+	require.NotContains(t, types, inbound.EventApplyTaskRetry,
+		"apply.task.retry MUST NOT be emitted on quota hit")
+
+	// (5) Task released back to Pending (resume-safe): verify by checking
+	// the saved task state after Execute. The board repo's tasks map holds
+	// the latest SaveTask state.
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	for _, t2 := range board.tasks {
+		require.Equal(t, domainapply.TaskStatusPending, t2.Status(),
+			"task MUST be in Pending after quota fail-fast so a resume can re-claim it")
+		require.Equal(t, 0, t2.Attempts(),
+			"task.Attempts() MUST remain 0 after quota hit — no attempt was burned")
+	}
+}
+
+// TestQuotaFailFast_PayloadFields verifies the apply.provider.quota_exceeded
+// SSE event carries the correct typed fields (provider, model,
+// retry_after_seconds, evidence) from the ProviderQuotaError.
+func TestQuotaFailFast_PayloadFields(t *testing.T) {
+	disp := newQuotaDispatcher()
+	svc, _, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	// Find the quota event and decode its payload.
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	var quotaPayload *inbound.ApplyProviderQuotaExceededPayload
+	for _, ev := range events.events {
+		if ev.Type == inbound.EventApplyProviderQuotaExceeded {
+			raw, marshalErr := json.Marshal(ev.Payload)
+			require.NoError(t, marshalErr)
+			var p inbound.ApplyProviderQuotaExceededPayload
+			require.NoError(t, json.Unmarshal(raw, &p))
+			quotaPayload = &p
+			break
+		}
+	}
+	require.NotNil(t, quotaPayload, "apply.provider.quota_exceeded event must be present")
+	require.NotEmpty(t, quotaPayload.TaskID)
+	require.Equal(t, "opencode", quotaPayload.Provider)
+	require.Equal(t, "copilot/gpt-4o", quotaPayload.Model)
+	require.Equal(t, 86400, quotaPayload.RetryAfterSeconds)
+	require.Contains(t, quotaPayload.Evidence, "maxRetriesExceeded")
+}
+
+// TestHealthyRun_NoQuotaEvent_MaxAttemptsUnchanged pins the regression guard:
+// a healthy dispatch path (no quota error) MUST emit ZERO quota events and
+// MUST still consume MaxAttempts on repeated failures (Iron Law #5 unchanged).
+func TestHealthyRun_NoQuotaEvent_MaxAttemptsUnchanged(t *testing.T) {
+	// Standard blocked dispatcher — no quota error.
+	svc, _, disp, _, events, _ := newRunService(t)
+	disp.envelopeStatus = envelope.StatusBlocked
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+
+	// No quota event emitted on a normal failure path.
+	require.NotContains(t, types, inbound.EventApplyProviderQuotaExceeded,
+		"apply.provider.quota_exceeded MUST NOT be emitted on a normal (non-quota) dispatch failure")
+
+	// Iron Law #5 still fires: 3 blocked dispatches → escalation.
+	require.GreaterOrEqual(t, disp.dispatchCalls.Load(), int32(domainapply.MaxAttempts),
+		"non-quota failures MUST still consume MaxAttempts (Iron Law #5 unchanged)")
+	require.Contains(t, types, inbound.EventApplyTaskEscalated,
+		"apply.task.escalated MUST still fire after MaxAttempts non-quota failures")
+}
+
+// TestNormalTaskFailure_BurnsAttempts_NoQuotaEvent is a direct regression
+// guard: a task that fails via the normal path (bad envelope, dispatch error)
+// MUST increment attempt count (Iron Law #5) and MUST NOT emit a quota event.
+func TestNormalTaskFailure_BurnsAttempts_NoQuotaEvent(t *testing.T) {
+	disp := &fakeDispatcherBadEnvelope{}
+	svc, board, _, _, events, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Dispatcher = disp
+	})
+
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+
+	_, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+
+	types := events.types()
+
+	// No quota event on a normal failure.
+	require.NotContains(t, types, inbound.EventApplyProviderQuotaExceeded,
+		"apply.provider.quota_exceeded MUST NOT fire on envelope-validation failure")
+
+	// Attempts burned: task ends Blocked with MaxAttempts consumed.
+	board.mu.Lock()
+	defer board.mu.Unlock()
+	for _, t2 := range board.tasks {
+		require.Equal(t, domainapply.TaskStatusBlocked, t2.Status(),
+			"normal failure path MUST reach Blocked after MaxAttempts")
+		require.Equal(t, domainapply.MaxAttempts, t2.Attempts(),
+			"normal failure path MUST burn all MaxAttempts (Iron Law #5)")
+	}
+}
