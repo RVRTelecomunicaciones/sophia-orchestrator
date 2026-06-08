@@ -30,6 +30,12 @@ const (
 	// EventPhaseNeedsContext is published when the phase status is
 	// NEEDS_CONTEXT — caller must supply more input via /resume.
 	EventPhaseNeedsContext = "phase.needs_context"
+	// EventPhaseArchived is published exactly once when a Change's archive phase
+	// reaches DONE and the Change transitions to Completed. Distinct from
+	// EventPhaseCompleted (which fires on every phase's DONE) because the
+	// consolidation worker subscribes specifically to archive-completion
+	// (V4.1 D13 — filtering phase.completed by phase_type is rejected by design).
+	EventPhaseArchived = "phase.archived"
 
 	// EventApprovalRequired is published when a sensitive phase pauses
 	// pending human approval.
@@ -212,6 +218,7 @@ var knownEventTypes = map[string]struct{}{
 	EventApplyMaterializeStarted:          {},
 	EventApplyMaterializeCompleted:        {},
 	EventApplyMaterializeError:            {},
+	EventPhaseArchived:                    {},
 }
 
 // IsKnownEventType reports whether the given type string is one of the
