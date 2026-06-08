@@ -26,6 +26,7 @@ import (
 // include_globs default = ["**/*"] when .sophia.yaml is absent; the default
 // is normalised here so the hash is stable regardless of how the default was
 // produced.
+//nolint:revive // CacheKey is intentionally named for clarity at call sites (cache.CacheKey)
 type CacheKey struct {
 	GraphifyVersion   string
 	RepoRoot          string

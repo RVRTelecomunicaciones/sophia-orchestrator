@@ -97,7 +97,7 @@ func NewOSFileReader() *OSFileReader { return &OSFileReader{} }
 
 // ReadIfExists returns file contents or nil if the file does not exist.
 func (r *OSFileReader) ReadIfExists(path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- caller passes a configured path under repo root
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

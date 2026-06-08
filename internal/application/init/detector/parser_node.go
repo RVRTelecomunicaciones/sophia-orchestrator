@@ -22,6 +22,7 @@ type packageJSON struct {
 //     @ngrx/store absent → signals variant.
 //   - @angular/core present AND @ngrx/store present → NgRx variant.
 //   - Only one of signals or NgRx is noted; never both.
+//nolint:unparam // third return reserved for future package-manager hints
 func parseNodeManifest(content []byte, repoRoot string) ([]FrameworkInfo, []string, []string) {
 	var pkg packageJSON
 	if err := json.Unmarshal(content, &pkg); err != nil {

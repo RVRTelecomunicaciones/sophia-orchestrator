@@ -5,6 +5,7 @@ package gitrunner
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -23,7 +24,7 @@ func (r *ExecGitRunner) RevParseHead(ctx context.Context, repoRoot string) (stri
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -35,7 +36,7 @@ func (r *ExecGitRunner) StatusPorcelain(ctx context.Context, repoRoot string) ([
 	cmd.Dir = repoRoot
 	cmd.Stdout = &buf
 	if err := cmd.Run(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git status --porcelain: %w", err)
 	}
 	return buf.Bytes(), nil
 }

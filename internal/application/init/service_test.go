@@ -54,7 +54,6 @@ func (f *fakeSpawnerF) Build(_ context.Context, _ string) (*detector.GraphSummar
 }
 
 type fakePersisterF struct {
-	mu    sync.Mutex
 	calls int32 // atomic for concurrent access
 	err   error
 }

@@ -2,6 +2,7 @@ package detector
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -125,11 +126,14 @@ func (d *Detector) Detect(_ context.Context, repoRoot string) (StructuralContext
 
 // readIfExists reads a file and returns (nil, nil) if it does not exist.
 func readIfExists(path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path is built from repoRoot + known manifest name
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
-	return b, err
+	if err != nil {
+		return nil, fmt.Errorf("detector readfile: %w", err)
+	}
+	return b, nil
 }
 
 func appendUniq(slice []string, s string) []string {

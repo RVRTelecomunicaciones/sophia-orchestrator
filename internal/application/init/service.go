@@ -121,7 +121,7 @@ func (s *Service) Run(ctx context.Context, c *change.Change) (detector.Structura
 
 	if err := eg.Wait(); err != nil {
 		// Only detector hard errors surface here.
-		return detector.StructuralContext{SchemaVersion: detector.StructuralContextSchemaV1}, nil, err
+		return detector.StructuralContext{SchemaVersion: detector.StructuralContextSchemaV1}, nil, fmt.Errorf("init detect+spawn errgroup: %w", err)
 	}
 
 	// Step 4: merge StructuralContext.

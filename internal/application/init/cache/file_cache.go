@@ -42,7 +42,7 @@ func NewFileCache(dir string, clock shared.Clock, ttl time.Duration) *FileCache 
 // is within TTL. Returns (nil, false, ErrCacheMiss) on any miss condition.
 func (c *FileCache) Lookup(_ context.Context, cacheKey string) (*detector.StructuralContext, bool, error) {
 	path := c.filePath(cacheKey)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is under the configured cache dir
 	if os.IsNotExist(err) {
 		return nil, false, initphase.ErrCacheMiss
 	}
@@ -74,7 +74,7 @@ func (c *FileCache) Lookup(_ context.Context, cacheKey string) (*detector.Struct
 // Write persists sc to the cache atomically. The directory is auto-created.
 // Overwrites existing entries — callers do not need to delete first.
 func (c *FileCache) Write(_ context.Context, cacheKey string, sc detector.StructuralContext) error {
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
+	if err := os.MkdirAll(c.dir, 0o750); err != nil {
 		return fmt.Errorf("filecache: mkdir: %w", err)
 	}
 

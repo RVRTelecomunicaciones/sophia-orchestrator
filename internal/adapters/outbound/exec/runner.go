@@ -26,7 +26,8 @@ func (r *RealRunner) Run(ctx context.Context, name string, args []string, opts i
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:forbidigo // production-only adapter
+	//nolint:forbidigo // production-only adapter
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- name+args come from injected interface, callers validate
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}

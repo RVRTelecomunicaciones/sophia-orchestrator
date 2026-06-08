@@ -36,7 +36,7 @@ func NewSpawner(runner initphase.ExecRunner, logger *slog.Logger, timeoutMS int)
 		timeoutMS = 30_000
 	}
 	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(nil_writer{}, nil))
+		logger = slog.New(slog.NewTextHandler(nilWriter{}, nil))
 	}
 	return &Spawner{runner: runner, logger: logger, timeoutMS: timeoutMS}
 }
@@ -84,15 +84,15 @@ func (s *Spawner) Build(ctx context.Context, repoRoot string) (*detector.GraphSu
 
 	// Step 3: read graph.json.
 	graphPath := filepath.Join(repoRoot, "graphify-out", "graph.json")
-	data, err := os.ReadFile(graphPath)
+	data, err := os.ReadFile(graphPath) // #nosec G304 -- path is under the caller-provided repoRoot
 	if err != nil {
-		return nil, version, fmt.Errorf("%w: read graph.json: %v", initphase.ErrGraphifyDegraded, err)
+		return nil, version, fmt.Errorf("%w: read graph.json: %w", initphase.ErrGraphifyDegraded, err)
 	}
 
 	// Step 4: parse graph.json.
 	summary, err := parseGraphJSON(data)
 	if err != nil {
-		return nil, version, fmt.Errorf("%w: parse graph.json: %v", initphase.ErrGraphifyDegraded, err)
+		return nil, version, fmt.Errorf("%w: parse graph.json: %w", initphase.ErrGraphifyDegraded, err)
 	}
 	return summary, version, nil
 }
@@ -126,7 +126,7 @@ type graphJSON struct {
 func parseGraphJSON(data []byte) (*detector.GraphSummary, error) {
 	var g graphJSON
 	if err := json.Unmarshal(data, &g); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal graph.json: %w", err)
 	}
 
 	// Sort nodes by out_degree descending for GodNodes.
@@ -153,10 +153,10 @@ func parseGraphJSON(data []byte) (*detector.GraphSummary, error) {
 	}, nil
 }
 
-// nil_writer discards log output.
-type nil_writer struct{}
+// nilWriter discards log output.
+type nilWriter struct{}
 
-func (nil_writer) Write(p []byte) (n int, err error) { return len(p), nil }
+func (nilWriter) Write(p []byte) (n int, err error) { return len(p), nil }
 
 // Ensure ErrGraphifyDegraded is not wrapped away when using errors.Is.
 var _ = errors.Is
