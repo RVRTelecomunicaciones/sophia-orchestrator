@@ -154,6 +154,11 @@ type ServiceConfig struct {
 	// set it via SOPHIA_<SERVICE>_TENANT_ID so memory-engine's auth
 	// scope check passes.
 	TenantID string
+	// TimeoutMS is an optional per-request HTTP timeout override in
+	// milliseconds. 0 means use the adapter's built-in default.
+	// Set via SOPHIA_MEMORY_TIMEOUT_MS for the memory-engine client
+	// (INIT phase p95 budget < 30s; default is 15s which fits).
+	TimeoutMS int
 }
 
 // DispatcherConfig configures the OpenCode dispatcher AND the multi-LLM
@@ -386,6 +391,9 @@ func Load() (Config, error) {
 	c.Memory.BaseURL = envStr("SOPHIA_MEMORY_URL", "")
 	c.Memory.APIKey = envStr("SOPHIA_MEMORY_API_KEY", "")
 	c.Memory.TenantID = envStr("SOPHIA_MEMORY_TENANT_ID", "")
+	if v := envInt("SOPHIA_MEMORY_TIMEOUT_MS", 0); v > 0 {
+		c.Memory.TimeoutMS = v
+	}
 	c.Runtime.BaseURL = envStr("SOPHIA_RUNTIME_URL", "")
 	c.Runtime.APIKey = envStr("SOPHIA_RUNTIME_API_KEY", "")
 
