@@ -272,6 +272,22 @@ type MemoryArtifactPersistFailedPayload struct {
 
 // --- phase pipeline + governance + agent lifecycle -------------------
 
+// PhaseArchivedPayload is the payload of phase.archived. Emitted by
+// application/phase/service.go inside advanceChange when the just-completed
+// phase is PhaseArchive AND the Change has been marked Completed AND
+// ChangeRepo.Save has returned without error (Iron Law D1.2 satisfied).
+//
+// Carries enough identifying data for the memory-engine consolidation worker
+// to fetch the full change context without subscribing to upstream
+// phase.completed events. ArchivedAt is sourced from the injectable Clock
+// (never time.Now() directly — V4.1 D13 / CLAUDE.md Iron Law #5).
+type PhaseArchivedPayload struct {
+	ChangeID   string    `json:"change_id"`
+	ChangeName string    `json:"change_name"`
+	PhaseType  string    `json:"phase_type"`  // always "archive"
+	ArchivedAt time.Time `json:"archived_at"` // s.d.Clock.Now() at emission
+}
+
 // PhaseStartedPayload is the payload of phase.started.
 type PhaseStartedPayload struct {
 	PhaseID   string    `json:"phase_id"`

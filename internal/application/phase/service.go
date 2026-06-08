@@ -907,10 +907,27 @@ func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed
 	if err := c.AdvancePhase(completed, s.d.Clock.Now()); err == nil {
 		_ = s.d.ChangeRepo.Save(ctx, c)
 	}
-	// Archive is terminal — once it completes, mark the Change Completed.
+	// Archive is terminal — once it completes, mark the Change Completed and
+	// emit the phase.archived event (Iron Law D1.2: envelope already persisted
+	// upstream by runPhaseCompletion; terminal state durable after Save below).
 	if completed == phase.PhaseArchive {
 		if err := c.MarkCompleted(s.d.Clock.Now()); err == nil {
-			_ = s.d.ChangeRepo.Save(ctx, c)
+			if saveErr := s.d.ChangeRepo.Save(ctx, c); saveErr == nil {
+				// Resolve the archive phase ID via the phase repo so we can
+				// correlate the SSE event with the phase row. Failure to look
+				// up is non-fatal — emit with a zero PhaseID rather than
+				// dropping the event entirely.
+				var archivePhaseID ids.PhaseID
+				if p, lookupErr := s.d.PhaseRepo.FindByChangeAndType(ctx, c.ID(), phase.PhaseArchive); lookupErr == nil {
+					archivePhaseID = p.ID()
+				}
+				s.publishEvent(ctx, archivePhaseID, inbound.EventPhaseArchived, inbound.PhaseArchivedPayload{
+					ChangeID:   c.ID().String(),
+					ChangeName: c.Name(),
+					PhaseType:  string(phase.PhaseArchive),
+					ArchivedAt: s.d.Clock.Now(),
+				})
+			}
 		}
 	}
 }
