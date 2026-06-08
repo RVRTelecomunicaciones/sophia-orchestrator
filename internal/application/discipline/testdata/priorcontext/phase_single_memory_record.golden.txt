@@ -1,0 +1,2 @@
+fix flaky test in apply phase — root cause: race condition in goroutine fan-out
+

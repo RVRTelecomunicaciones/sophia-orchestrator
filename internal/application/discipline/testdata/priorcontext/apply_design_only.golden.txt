@@ -1,0 +1,3 @@
+## design (sdd/feat-prior-context-fixture/design)
+
+Design content: single file prior_context.go with Render method and 8 stub types.

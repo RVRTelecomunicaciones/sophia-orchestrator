@@ -1,0 +1,10 @@
+fix flaky test in apply phase — root cause: race condition in goroutine fan-out
+
+heuristic: always freeze Clock and IDGenerator in golden tests to ensure byte-exact reproducibility
+
+decision: PriorContext struct in discipline package, render-at-boundary preserves downstream signatures
+
+pattern: use strings.Builder for inline-concat paths to minimize allocations
+
+discovery: golangci-lint v2.12 enforces wrapcheck on all error returns from outbound ports
+
