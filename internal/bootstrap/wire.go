@@ -232,6 +232,11 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	if cfg.Apply.DispatchTimeoutMS > 0 {
 		applyRunCfg.DispatchTimeoutMS = cfg.Apply.DispatchTimeoutMS
 	}
+	// ADR-0010 Slice 4: fallback model for quota exhaustion. When
+	// SOPHIA_DISPATCHER_FALLBACK_MODEL is set, the apply phase will
+	// re-dispatch a quota-failed task once with ModelOverride = FallbackModel
+	// before triggering the Slice-2 fail-fast. Empty = no fallback.
+	applyRunCfg.FallbackModel = cfg.Apply.FallbackModel
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,
