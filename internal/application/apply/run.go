@@ -820,10 +820,14 @@ func (s *RunService) refreshApplyProgress(ctx context.Context, c *change.Change,
 	}
 	section := fmt.Sprintf("## Recent progress (sdd/%s/apply-progress)\n\n%s",
 		c.Name(), rec.Content)
+	var assembled string
 	if base == "" {
-		return section
+		assembled = section
+	} else {
+		assembled = base + "\n\n" + section
 	}
-	return base + "\n\n" + section
+	pc := discipline.PriorContext{PhaseIdentity: assembled}
+	return pc.Render(discipline.RenderOpts{})
 }
 
 // loadPriorContext pulls the spec and design artifacts from memory-engine
@@ -876,7 +880,8 @@ func (s *RunService) loadPriorContext(ctx context.Context, c *change.Change) (st
 	for _, s := range sections[1:] {
 		out += "\n\n" + s
 	}
-	return out, nil
+	pc := discipline.PriorContext{PhaseIdentity: out}
+	return pc.Render(discipline.RenderOpts{}), nil
 }
 
 func (s *RunService) buildBoard(ctx context.Context, p *phase.Phase, tl *tasksList) (*apply.Board, error) {

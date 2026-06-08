@@ -988,7 +988,8 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) strin
 			sb.WriteString("\n\n")
 		}
 	}
-	return sb.String()
+	pc := discipline.PriorContext{RawMemoryBlob: sb.String()}
+	return pc.Render(discipline.RenderOpts{})
 }
 
 func (s *Service) fallbackToMemory(ctx context.Context, c *change.Change, p *phase.Phase) []byte {
