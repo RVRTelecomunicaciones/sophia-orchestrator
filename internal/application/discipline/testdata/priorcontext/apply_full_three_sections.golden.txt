@@ -1,0 +1,11 @@
+## spec (sdd/feat-prior-context-fixture/spec)
+
+Spec content: introduce PriorContext struct for structured assembly of prior-context content.
+
+## design (sdd/feat-prior-context-fixture/design)
+
+Design content: single file prior_context.go with Render method and 8 stub types.
+
+## Recent progress (sdd/feat-prior-context-fixture/apply-progress)
+
+Progress: Group A baseline capture complete. Group B struct implementation in progress.

@@ -1,0 +1,3 @@
+## spec (sdd/feat-prior-context-fixture/spec)
+
+Spec content: introduce PriorContext struct for structured assembly of prior-context content.
