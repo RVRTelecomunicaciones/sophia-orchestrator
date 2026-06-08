@@ -26,6 +26,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia/pkg/contract"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
+	initdetector "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
@@ -125,12 +126,36 @@ type Deps struct {
 	// Metrics is the optional Prometheus instrument set. When nil, all
 	// metric record calls are no-ops.
 	Metrics *obs.Metrics
+
+	// Init is the InitService that handles PhaseInit execution. When non-nil
+	// and Phase.Type == init, the Service invokes runInitPhase instead of the
+	// standard governance/IronLaw/dispatch flow. nil ⇒ PhaseInit falls through
+	// to the standard single-agent flow (should not happen in production).
+	// Design: D-INIT-3 (branch at TOP of runAsync).
+	Init InitService
 }
 
 // ApplyExecutor is the contract phase.Service uses to delegate apply-phase
 // coordination. internal/application/apply.RunService implements it.
 type ApplyExecutor interface {
 	Execute(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) (*envelope.Envelope, error)
+}
+
+// InitRunInput carries the data InitService.Run needs from phase.Service.
+// Wrapping *change.Change avoids a circular import; the concrete InitService
+// implementation in internal/application/init/ can accept this directly.
+type InitRunInput = *change.Change
+
+// InitService is the contract phase.Service uses to delegate INIT phase
+// execution. internal/application/init.Service implements it.
+// The INIT branch fires at the TOP of runAsync BEFORE governance/IronLaw/dispatch
+// (design D-INIT-3). persistArtifactsToMemory is skipped for INIT because
+// InitService.Run persists internally (design D-INIT-3).
+type InitService interface {
+	// Run executes the INIT phase for change c. Returns the StructuralContext,
+	// the phase envelope, and any hard error. Spawner degraded-mode is NOT a
+	// hard error; it is absorbed into sc.DegradedReason.
+	Run(ctx context.Context, c InitRunInput) (initdetector.StructuralContext, *envelope.Envelope, error)
 }
 
 // SpawnGovernor is the minimal contract from discipline.SpawnGovernor used
@@ -269,6 +294,16 @@ func (s *Service) Run(ctx context.Context, in inbound.RunPhaseInput) (*inbound.R
 
 // runAsync executes steps 10-16 of the phase flow.
 func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase, in inbound.RunPhaseInput) {
+	// INIT branch: short-circuits BEFORE governance/IronLaw/prompt/dispatch.
+	// Design D-INIT-3: PhaseInit uses deterministic FS detection instead of
+	// an LLM agent; skips governance, IronLaw, session, and dispatch entirely.
+	// persistArtifactsToMemory is also skipped (InitService.Run persists
+	// internally — design D-INIT-3).
+	if p.Type() == phase.PhaseInit && s.d.Init != nil {
+		s.runInitPhase(ctx, c, p)
+		return
+	}
+
 	// Step 4: governance.
 	decision, err := s.d.Governance.EvaluatePhase(ctx, outbound.EvaluatePhaseInput{
 		ChangeID:        c.ID(),
@@ -564,6 +599,74 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	})
+}
+
+// runInitPhase handles the INIT phase execution path. It mirrors Steps 13-16
+// of runAsync (envelope persist + advance + audit + event) but SKIPS governance,
+// IronLaw, prompt, session, dispatch, and persistArtifactsToMemory.
+//
+// Iron Law D1.2 ordering:
+//  1. InitService.Run → (sc, env, err)  [compute + artifact persist inside]
+//  2. Validator.Validate(envBytes)        [schema check]
+//  3. p.Complete(env, clock.Now())        [in-memory]
+//  4. PhaseRepo.Save                      [PHASE durable — after artifact]
+//  5. advanceChange                       [CHANGE durable]
+//  6. appendAudit + publishEvent          [SSE]
+func (s *Service) runInitPhase(ctx context.Context, c *change.Change, p *phase.Phase) {
+	// Step 1: run InitService (structural detection + dual persist inside).
+	_, env, err := s.d.Init.Run(ctx, c)
+	if err != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("init service: %v", err))
+		return
+	}
+	if env == nil {
+		s.failPhase(ctx, p, "init service returned nil envelope")
+		return
+	}
+
+	// Step 2: validate envelope (uniformity check — same as runAsync).
+	envBytes, marshalErr := jsonMarshal(env)
+	if marshalErr != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("init: marshal envelope: %v", marshalErr))
+		return
+	}
+	validatedEnv, valErr := s.d.Validator.Validate(envBytes, p.Type())
+	if valErr != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("init: envelope validation: %v", valErr))
+		return
+	}
+
+	// Steps 3-4: complete phase + persist (Iron Law D1.2).
+	if err := p.Complete(validatedEnv, s.d.Clock.Now()); err != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("init: phase complete: %v", err))
+		return
+	}
+	if err := s.d.PhaseRepo.Save(ctx, p); err != nil {
+		s.failPhase(ctx, p, fmt.Sprintf("init: save phase: %v", err))
+		return
+	}
+	s.recordPhaseTerminal(p, validatedEnv)
+	s.recordPhaseEnded(p)
+
+	// Step 5: advance Change.CurrentPhase.
+	if p.Status().AdvanceAllowed() {
+		s.advanceChange(ctx, c, p.Type())
+	}
+
+	// Step 6: audit + SSE event.
+	cidLocal := c.ID()
+	pidLocal := p.ID()
+	eventType := eventTypeForStatus(p.Status())
+	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventType, validatedEnv)
+	payload := inbound.PhaseCompletedPayload{
+		PhaseID:            p.ID().String(),
+		PhaseType:          string(p.Type()),
+		EndedAt:            s.d.Clock.Now().UTC(),
+		Confidence:         validatedEnv.Confidence,
+		EnvelopeStatus:     string(validatedEnv.Status),
+		EnvelopeConfidence: validatedEnv.Confidence,
+	}
+	s.publishEvent(ctx, p.ID(), eventType, payload)
 }
 
 // Resume re-launches an interrupted phase. V1: validates the phase is in

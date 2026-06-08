@@ -1,0 +1,14 @@
+[project]
+name = "my-fastapi-app"
+version = "0.1.0"
+description = "A FastAPI application"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

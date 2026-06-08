@@ -22,15 +22,22 @@ import (
 	mcpdispatcher "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/mcp"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/ollama"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/opencode"
+	execadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/exec"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/governance"
+	graphifyadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/graphify"
 	httpbase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/memory"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/pg"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/runtime"
+	gitrunneradapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/gitrunner"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/eventstream"
+	initphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init"
+	initcache "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/cache"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
+	initpersister "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/persister"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/recovery"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
@@ -106,7 +113,13 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("bootstrap: governance: %w", err)
 	}
-	memClient, err := memory.New(memory.DefaultConfig(cfg.Memory.BaseURL, cfg.Memory.APIKey))
+	memCfg := memory.DefaultConfig(cfg.Memory.BaseURL, cfg.Memory.APIKey)
+	if cfg.Memory.TimeoutMS > 0 {
+		// SOPHIA_MEMORY_TIMEOUT_MS override. Default is 15s (see memory.DefaultConfig).
+		// INIT phase p95 budget < 30s; 15s default satisfies that constraint.
+		memCfg.HTTPBase.HTTPTimeout = time.Duration(cfg.Memory.TimeoutMS) * time.Millisecond
+	}
+	memClient, err := memory.New(memCfg)
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("bootstrap: memory: %w", err)
@@ -271,6 +284,30 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Skills:      skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
 	})
 
+	// INIT phase wiring (design D-INIT-4, D-INIT-7 through D-INIT-11).
+	// All subprocess and HTTP calls are behind interfaces; real adapters wired
+	// here; tests inject fakes directly into initphase.Deps.
+	initDetector := initphase.NewDetectorAdapter(detector.New())
+	initExecRunner := execadapter.NewRealRunner()
+	initSpawner := graphifyadapter.NewSpawner(initExecRunner, logger, 0) // 0 = use SOPHIA_GRAPHIFY_TIMEOUT_MS or 30s default
+	initGitRunner := gitrunneradapter.NewExecRunner()
+	initFileReader := initphase.NewOSFileReader()
+	initKeyBuilder := initphase.NewKeyBuilder(initGitRunner, initFileReader)
+	initFileCacheDir := ".sophia/cache/structural" // relative to cwd (repo root at boot)
+	initFileCache := initcache.NewFileCache(initFileCacheDir, clock, 24*time.Hour)
+	initDualPersister := initpersister.New(memClient, initFileCache, logger, cfg.Memory.TenantID, cfg.Environment)
+	initSvc := initphase.NewService(initphase.Deps{
+		Detector:  initDetector,
+		Spawner:   initSpawner,
+		Persister: initDualPersister,
+		Cache:     initFileCache,
+		CacheKey:  initKeyBuilder,
+		Clock:     clock,
+		IDGen:     idGen,
+		Logger:    logger,
+		CacheTTL:  24 * time.Hour,
+	})
+
 	phaseSvc := phase.New(phase.Deps{
 		ChangeRepo:  changeRepo,
 		PhaseRepo:   phaseRepo,
@@ -299,6 +336,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		ApplyExecutor: applyExecutor,
 		Metrics:       metrics,
 		Skills:        skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
+		Init:          initSvc,       // INIT phase structural detection (D-INIT-3)
 	})
 
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
