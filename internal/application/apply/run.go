@@ -126,7 +126,7 @@ const (
 )
 
 // DefaultRunConfig returns V1 defaults aligned with spec § 5.2:
-// 2x2 = 4 max concurrent agents, 10min dep wait, 30min dispatch, V1
+// 2x2 = 4 max concurrent agents, 10min dep wait, 3min dispatch, V1
 // worktree root /tmp/sophia/worktrees.
 func DefaultRunConfig() RunConfig {
 	return RunConfig{
@@ -141,8 +141,16 @@ func DefaultRunConfig() RunConfig {
 		MaxParallelGroups:             2,
 		MaxParallelImplementsPerGroup: 2,
 		DepWaitTimeout:                600,
-		DispatchTimeoutMS:             1_800_000,
-		WorktreeRoot:                  "/tmp/sophia/worktrees",
+		// 2026-06 (ADR-0010 Slice 3): lowered 1_800_000 → 180_000 (3min).
+		// A doomed dispatch (quota exhaustion or silent hang) must fail
+		// fast so the quota detector + fail-fast path (Slice 2) can fire
+		// within the E2E budget. The orch timeout must be ≤ the runtime
+		// shell.exec cap — the E2E compose runtime caps dispatches at 600s,
+		// so a 3min orchestrator-side timeout stays safely inside that cap
+		// and leaves margin for retries. Operators who need longer running
+		// agents can override via SOPHIA_DISPATCH_TIMEOUT_MS.
+		DispatchTimeoutMS: 180_000,
+		WorktreeRoot:      "/tmp/sophia/worktrees",
 	}
 }
 
@@ -182,7 +190,9 @@ func NewRun(d RunDeps) *RunService {
 		d.Config.WorktreeRoot = "/tmp/sophia/worktrees"
 	}
 	if d.Config.DispatchTimeoutMS <= 0 {
-		d.Config.DispatchTimeoutMS = 1_800_000
+		// Same 3min default as DefaultRunConfig; see comment there for
+		// the E2E runtime cap alignment rationale (ADR-0010 Slice 3).
+		d.Config.DispatchTimeoutMS = 180_000
 	}
 	return &RunService{d: d}
 }

@@ -31,7 +31,8 @@ const saturationRetryBudget = 9
 // retry attempt. Starts at 500ms and doubles each retry, capping at 30s.
 //
 // Calibration (2026-06): a single implement-agent is a real LLM/opencode
-// subprocess that runs for ~30-90s (DispatchTimeoutMS allows up to 30min).
+// subprocess that runs for ~30-90s (DispatchTimeoutMS default: 3min per
+// ADR-0010 Slice 3; operators may override via SOPHIA_DISPATCH_TIMEOUT_MS).
 // The previous ~10s total wait budget gave up LONG before any in-flight
 // slot could free, so a saturated Acquire failed the task with attempts=0
 // and cascaded to a false group failure — the dominant cause of the

@@ -225,6 +225,13 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// end of apply. Empty preserves the legacy behaviour of leaving
 	// worktrees isolated under WorktreeRoot.
 	applyRunCfg.TargetPath = cfg.Apply.TargetPath
+	// ADR-0010 Slice 3: configurable short dispatch timeout. When
+	// SOPHIA_DISPATCH_TIMEOUT_MS is set (> 0), forward it to RunConfig
+	// so operators can tune the per-dispatch deadline. Zero keeps the
+	// apply.DefaultRunConfig default (180_000 ms = 3min).
+	if cfg.Apply.DispatchTimeoutMS > 0 {
+		applyRunCfg.DispatchTimeoutMS = cfg.Apply.DispatchTimeoutMS
+	}
 	applyExecutor := apply.NewRun(apply.RunDeps{
 		BoardRepo:   boardRepo,
 		SessionRepo: sessionRepo,

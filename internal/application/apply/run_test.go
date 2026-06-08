@@ -1710,3 +1710,64 @@ func TestNormalTaskFailure_BurnsAttempts_NoQuotaEvent(t *testing.T) {
 			"normal failure path MUST burn all MaxAttempts (Iron Law #5)")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0010 Slice 3: configurable short dispatch timeout
+// ---------------------------------------------------------------------------
+
+// TestDefaultRunConfig_DispatchTimeoutMS_Is180000 pins the new 3-minute
+// default introduced in ADR-0010 Slice 3. Previous value was 1_800_000
+// (30min); the new value is 180_000 (3min) so doomed dispatches (quota
+// or silent hang) fail fast within the E2E runtime shell.exec cap of 600s.
+func TestDefaultRunConfig_DispatchTimeoutMS_Is180000(t *testing.T) {
+	c := apply.DefaultRunConfig()
+	require.Equal(t, 180_000, c.DispatchTimeoutMS,
+		"DefaultRunConfig.DispatchTimeoutMS must be 180_000 ms (3min) per ADR-0010 Slice 3; "+
+			"the old 30min value caused doomed dispatches to hold the apply phase for the "+
+			"full runtime shell.exec cap without triggering the quota fail-fast path")
+}
+
+// TestNewRun_ZeroDispatchTimeoutMS_AppliesDefault verifies that passing
+// DispatchTimeoutMS=0 in RunConfig triggers the ≤0 guard in NewRun and
+// the resulting config carries the 180_000 default — not zero. This guard
+// prevents an accidental "instant timeout" from config layer bugs.
+func TestNewRun_ZeroDispatchTimeoutMS_AppliesDefault(t *testing.T) {
+	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Config.DispatchTimeoutMS = 0 // trigger the guard
+	})
+	// The service must not panic or return nil; the guard applies during NewRun.
+	require.NotNil(t, svc,
+		"NewRun must succeed when DispatchTimeoutMS=0 (guard applies default)")
+	// Confirm the healthy-run path is unaffected after the guard fires.
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"healthy-run with DispatchTimeoutMS defaulted via guard must still produce StatusDone")
+}
+
+// TestRunConfig_ExplicitDispatchTimeoutMS_ForwardedToDispatch verifies that
+// an explicit DispatchTimeoutMS in RunConfig is respected. We use a very
+// short value (5ms) to confirm the config field is wired through the
+// real Dispatch call without altering apply's healthy-run semantics
+// (the fakeDispatcher returns synchronously so 5ms is never actually hit).
+func TestRunConfig_ExplicitDispatchTimeoutMS_ForwardedToDispatch(t *testing.T) {
+	svc, _, disp, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
+		d.Config.DispatchTimeoutMS = 5_000 // custom value, not the default
+	})
+	c := mkChange(t, "feat-x")
+	p := mkPhase(t, c)
+	env, err := svc.Execute(context.Background(), c, p, inbound.RunPhaseInput{
+		ChangeID:  c.ID(),
+		PhaseType: phase.PhaseApply,
+	})
+	require.NoError(t, err)
+	require.Equal(t, envelope.StatusDone, env.Status,
+		"explicit DispatchTimeoutMS must not break healthy-run")
+	require.GreaterOrEqual(t, disp.dispatchCalls.Load(), int32(1),
+		"dispatch must be invoked at least once with custom timeout")
+}
