@@ -337,3 +337,177 @@ func TestSkillRepo_FindByPhase_NeverReturnsErrNotFound(t *testing.T) {
 	require.NotErrorIs(t, err, outbound.ErrNotFound)
 	require.NotNil(t, got)
 }
+
+// ── Group E RED tests: FindByPhase status filter, Upsert (name,version), JSONB ──
+
+// newActiveTestSkill creates a skill with status=active for FindByPhase filter tests.
+func newActiveTestSkill(t *testing.T, rawID, name string, phases []phase.PhaseType) *skill.Skill {
+	t.Helper()
+	s, err := skill.New(
+		mustSkillIDInteg(t, rawID),
+		name,
+		phases,
+		"Active skill content.",
+		[]skill.Technique{skill.TechniqueConstitutionalSelfCritique, skill.TechniqueInlineWhy},
+		skill.LifecycleInput{Status: skill.StatusActive},
+		integNow,
+	)
+	require.NoError(t, err)
+	return s
+}
+
+// newDeprecatedTestSkill creates a skill with status=deprecated.
+func newDeprecatedTestSkill(t *testing.T, rawID, name string, phases []phase.PhaseType) *skill.Skill {
+	t.Helper()
+	s, err := skill.New(
+		mustSkillIDInteg(t, rawID),
+		name,
+		phases,
+		"Deprecated skill content.",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{Status: skill.StatusDeprecated},
+		integNow,
+	)
+	require.NoError(t, err)
+	return s
+}
+
+// E.1: FindByPhase returns only active skills.
+func TestSkillRepo_FindByPhase_ReturnsOnlyActiveSkills(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	// Insert one active and one deprecated skill both for phase apply.
+	active := newActiveTestSkill(t, skillID1, "active-skill-apply", []phase.PhaseType{phase.PhaseApply})
+	deprecated := newDeprecatedTestSkill(t, skillID2, "deprecated-skill-apply", []phase.PhaseType{phase.PhaseApply})
+
+	require.NoError(t, repo.Upsert(ctx, active))
+	require.NoError(t, repo.Upsert(ctx, deprecated))
+
+	got, err := repo.FindByPhase(ctx, phase.PhaseApply)
+	require.NoError(t, err)
+	require.Len(t, got, 1,
+		"FindByPhase must only return active skills; deprecated must be filtered out")
+	require.Equal(t, "active-skill-apply", got[0].Name())
+}
+
+// E.2: Upsert ON CONFLICT (name, version) merges lifecycle fields; idempotent re-run.
+func TestSkillRepo_Upsert_OnConflictNameVersion_MergesLifecycle(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	// Insert initial skill with default lifecycle.
+	s1 := newActiveTestSkill(t, skillID1, "unique-skill", []phase.PhaseType{phase.PhaseApply})
+	require.NoError(t, repo.Upsert(ctx, s1))
+
+	// Create same name+version but with updated content.
+	s2, err := skill.New(
+		mustSkillIDInteg(t, skillID2), // different ID, same name+version
+		"unique-skill",
+		[]phase.PhaseType{phase.PhaseApply},
+		"Updated content via Upsert.",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{
+			Status:           skill.StatusValidated,
+			ActivationSource: skill.SourceLegacySeed,
+		},
+		integNow,
+	)
+	require.NoError(t, err)
+	require.NoError(t, repo.Upsert(ctx, s2))
+
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "Upsert ON CONFLICT (name, version) must merge, not duplicate")
+	require.Equal(t, "Updated content via Upsert.", list[0].Content(),
+		"content must be updated by the second Upsert")
+
+	// Idempotent re-run — must still produce exactly 1 row.
+	require.NoError(t, repo.Upsert(ctx, s2))
+	list2, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list2, 1, "second Upsert must be idempotent")
+}
+
+// E.3: scanSkill correctly decodes non-empty Scope, AppliesWhen, Metrics JSONB.
+func TestSkillRepo_Upsert_HydrationRoundtrip_WithLifecycle(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	lastUsed := integNow.Add(-24 * time.Hour)
+	lastVal := integNow.Add(-48 * time.Hour)
+	stackVer := "v1.2.3"
+
+	lc := skill.LifecycleInput{
+		Status:           skill.StatusActive,
+		Version:          "v2",
+		RiskLevel:        skill.RiskHigh,
+		ActivationSource: skill.SourceLegacySeed,
+		Scope: skill.Scope{
+			ProjectID: "proj-123",
+			RepoID:    "repo-456",
+			Phases:    []string{"apply", "verify"},
+		},
+		AppliesWhen: skill.AppliesWhen{
+			FeatureType:  []string{"bugfix"},
+			TouchedPaths: []string{"internal/**/*.go"},
+			ExcludePaths: []string{"vendor/**"},
+		},
+		Metrics: skill.Metrics{
+			UsageCount:        42,
+			SuccessCount:      38,
+			FailureCount:      4,
+			AvgRetryReduction: 0.25,
+			LastStackVersion:  &stackVer,
+		},
+		LastUsedAt:      &lastUsed,
+		LastValidatedAt: &lastVal,
+	}
+
+	s, err := skill.New(
+		mustSkillIDInteg(t, skillID1),
+		"lifecycle-roundtrip-skill",
+		[]phase.PhaseType{phase.PhaseApply},
+		"Lifecycle roundtrip test content.",
+		[]skill.Technique{skill.TechniqueConstitutionalSelfCritique, skill.TechniqueInlineWhy},
+		lc,
+		integNow,
+	)
+	require.NoError(t, err)
+	require.NoError(t, repo.Upsert(ctx, s))
+
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+
+	got := list[0]
+	require.Equal(t, skill.StatusActive, got.Status(), "status must round-trip")
+	require.Equal(t, "v2", got.Version(), "version must round-trip")
+	require.Equal(t, skill.RiskHigh, got.RiskLevel(), "risk_level must round-trip")
+	require.Equal(t, skill.SourceLegacySeed, got.ActivationSource(), "activation_source must round-trip")
+
+	// Scope JSONB round-trip.
+	require.Equal(t, "proj-123", got.Scope().ProjectID, "scope.project_id must round-trip")
+	require.Equal(t, "repo-456", got.Scope().RepoID, "scope.repo_id must round-trip")
+	require.Equal(t, []string{"apply", "verify"}, got.Scope().Phases, "scope.phases must round-trip")
+
+	// AppliesWhen JSONB round-trip.
+	require.Equal(t, []string{"bugfix"}, got.AppliesWhen().FeatureType, "applies_when.feature_type must round-trip")
+	require.Equal(t, []string{"internal/**/*.go"}, got.AppliesWhen().TouchedPaths, "applies_when.touched_paths must round-trip")
+	require.Equal(t, []string{"vendor/**"}, got.AppliesWhen().ExcludePaths, "applies_when.exclude_paths must round-trip")
+
+	// Metrics JSONB round-trip.
+	require.Equal(t, 42, got.Metrics().UsageCount, "metrics.usage_count must round-trip")
+	require.Equal(t, 38, got.Metrics().SuccessCount, "metrics.success_count must round-trip")
+	require.NotNil(t, got.Metrics().LastStackVersion, "metrics.last_stack_version must round-trip")
+	require.Equal(t, stackVer, *got.Metrics().LastStackVersion, "metrics.last_stack_version value must round-trip")
+
+	// Timestamp round-trips.
+	require.NotNil(t, got.LastUsedAt(), "last_used_at must round-trip")
+	require.True(t, got.LastUsedAt().Equal(lastUsed), "last_used_at value must round-trip")
+	require.NotNil(t, got.LastValidatedAt(), "last_validated_at must round-trip")
+	require.True(t, got.LastValidatedAt().Equal(lastVal), "last_validated_at value must round-trip")
+}

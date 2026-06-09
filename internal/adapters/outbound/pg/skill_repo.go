@@ -2,6 +2,8 @@ package pg
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,8 +15,16 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
-// SkillRepo persists Skill aggregates against the skills table (migration 009).
+// selectColumns lists all 16 columns for SELECT queries after migration 010.
+// Order MUST match the scan positions in scanSkill.
+const selectColumns = `id, name, phases, content, techniques,
+    status, version, scope, applies_when, risk_level,
+    activation_source, metrics, last_used_at, last_validated_at,
+    created_at, updated_at`
+
+// SkillRepo persists Skill aggregates against the skills table (migration 010).
 // The GIN index on phases enables efficient ANY(phases) look-ups for FindByPhase.
+// The status='active' filter on FindByPhase is a hard-coded invariant per D-M1-6.
 type SkillRepo struct {
 	pool *pgxpool.Pool
 }
@@ -27,13 +37,16 @@ func NewSkillRepo(pool *pgxpool.Pool) *SkillRepo {
 	return &SkillRepo{pool: pool}
 }
 
-// FindByPhase returns every Skill whose phases array contains pt.
+// FindByPhase returns every Skill whose phases array contains pt AND status='active'.
 // Returns an empty (non-nil) slice when no rows match; never returns ErrNotFound.
+// The status='active' filter is a hard-coded invariant (D-M1-6): FindByPhase
+// callers MUST NEVER receive non-active skills. New code uses SkillMatcher.SkillsForContext.
 func (r *SkillRepo) FindByPhase(ctx context.Context, pt phase.PhaseType) ([]*skill.Skill, error) {
-	const q = `
-SELECT id, name, phases, content, techniques, created_at, updated_at
+	q := `
+SELECT ` + selectColumns + `
 FROM   skills
-WHERE  $1 = ANY(phases)`
+WHERE  $1 = ANY(phases)
+  AND  status = 'active'`
 
 	rows, err := r.pool.Query(ctx, q, string(pt))
 	if err != nil {
@@ -52,46 +65,114 @@ WHERE  $1 = ANY(phases)`
 	return out, rows.Err()
 }
 
-// Upsert inserts or fully replaces the Skill row identified by id.
+// Upsert inserts or fully replaces the Skill row identified by (name, version).
+// Conflicts on (name, version) per migration 010 D-M1-1. Idempotent.
 func (r *SkillRepo) Upsert(ctx context.Context, s *skill.Skill) error {
-	const q = `
-INSERT INTO skills (id, name, phases, content, techniques, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (id) DO UPDATE SET
-    name       = EXCLUDED.name,
-    phases     = EXCLUDED.phases,
-    content    = EXCLUDED.content,
-    techniques = EXCLUDED.techniques,
-    updated_at = EXCLUDED.updated_at`
+	scopeJSON, err := json.Marshal(s.Scope())
+	if err != nil {
+		return wrapErr("SkillRepo.Upsert.marshalScope", err)
+	}
+	appliesJSON, err := json.Marshal(s.AppliesWhen())
+	if err != nil {
+		return wrapErr("SkillRepo.Upsert.marshalAppliesWhen", err)
+	}
+	metricsJSON, err := json.Marshal(s.Metrics())
+	if err != nil {
+		return wrapErr("SkillRepo.Upsert.marshalMetrics", err)
+	}
 
-	_, err := r.pool.Exec(ctx, q,
+	const q = `
+INSERT INTO skills (
+    id, name, phases, content, techniques,
+    status, version, scope, applies_when, risk_level,
+    activation_source, metrics, last_used_at, last_validated_at,
+    created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5,
+        $6, $7, $8, $9, $10,
+        $11, $12, $13, $14,
+        $15, $16)
+ON CONFLICT (name, version) DO UPDATE SET
+    id                = EXCLUDED.id,
+    phases            = EXCLUDED.phases,
+    content           = EXCLUDED.content,
+    techniques        = EXCLUDED.techniques,
+    status            = EXCLUDED.status,
+    scope             = EXCLUDED.scope,
+    applies_when      = EXCLUDED.applies_when,
+    risk_level        = EXCLUDED.risk_level,
+    activation_source = EXCLUDED.activation_source,
+    metrics           = EXCLUDED.metrics,
+    last_used_at      = EXCLUDED.last_used_at,
+    last_validated_at = EXCLUDED.last_validated_at,
+    updated_at        = EXCLUDED.updated_at`
+
+	_, err = r.pool.Exec(ctx, q,
 		s.ID().String(),
 		s.Name(),
 		s.PhaseStrings(),
 		s.Content(),
 		s.TechniqueStrings(),
+		s.Status().String(),
+		s.Version(),
+		scopeJSON,
+		appliesJSON,
+		s.RiskLevel().String(),
+		s.ActivationSource().String(),
+		metricsJSON,
+		s.LastUsedAt(),
+		s.LastValidatedAt(),
 		s.CreatedAt(),
 		s.UpdatedAt(),
 	)
 	return wrapErr("SkillRepo.Upsert", err)
 }
 
-// InsertIfAbsent inserts the Skill only when no row with the same name already
-// exists. It is a deliberate no-op when a name collision is detected — this is
-// the safe boot-time seeder operation. Returns nil in both the insert and
-// no-op cases; returns a non-nil error only on infrastructure failures.
+// InsertIfAbsent inserts the Skill only when no row with the same (name, version)
+// already exists per migration 010 constraint swap. Returns nil in both the
+// insert and no-op cases; returns a non-nil error only on infrastructure failures.
 func (r *SkillRepo) InsertIfAbsent(ctx context.Context, s *skill.Skill) error {
-	const q = `
-INSERT INTO skills (id, name, phases, content, techniques, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (name) DO NOTHING`
+	scopeJSON, err := json.Marshal(s.Scope())
+	if err != nil {
+		return wrapErr("SkillRepo.InsertIfAbsent.marshalScope", err)
+	}
+	appliesJSON, err := json.Marshal(s.AppliesWhen())
+	if err != nil {
+		return wrapErr("SkillRepo.InsertIfAbsent.marshalAppliesWhen", err)
+	}
+	metricsJSON, err := json.Marshal(s.Metrics())
+	if err != nil {
+		return wrapErr("SkillRepo.InsertIfAbsent.marshalMetrics", err)
+	}
 
-	_, err := r.pool.Exec(ctx, q,
+	const q = `
+INSERT INTO skills (
+    id, name, phases, content, techniques,
+    status, version, scope, applies_when, risk_level,
+    activation_source, metrics, last_used_at, last_validated_at,
+    created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5,
+        $6, $7, $8, $9, $10,
+        $11, $12, $13, $14,
+        $15, $16)
+ON CONFLICT (name, version) DO NOTHING`
+
+	_, err = r.pool.Exec(ctx, q,
 		s.ID().String(),
 		s.Name(),
 		s.PhaseStrings(),
 		s.Content(),
 		s.TechniqueStrings(),
+		s.Status().String(),
+		s.Version(),
+		scopeJSON,
+		appliesJSON,
+		s.RiskLevel().String(),
+		s.ActivationSource().String(),
+		metricsJSON,
+		s.LastUsedAt(),
+		s.LastValidatedAt(),
 		s.CreatedAt(),
 		s.UpdatedAt(),
 	)
@@ -101,8 +182,7 @@ ON CONFLICT (name) DO NOTHING`
 // List returns all persisted Skills. Returns an empty (non-nil) slice when the
 // table is empty.
 func (r *SkillRepo) List(ctx context.Context) ([]*skill.Skill, error) {
-	const q = `
-SELECT id, name, phases, content, techniques, created_at, updated_at
+	q := `SELECT ` + selectColumns + `
 FROM   skills
 ORDER  BY name`
 
@@ -124,21 +204,25 @@ ORDER  BY name`
 }
 
 // scanSkill reads one row from a pgx.Rows cursor and hydrates a Skill.
-// M1 NOTE: This function is extended in Group E to read the 9 lifecycle
-// columns added by migration 010. The temporary implementation here reads
-// the 7 pre-M1 columns and passes zero-value lifecycle fields to Hydrate.
-// selectColumns constant is updated in Group E to list all 16 columns.
+// Expects 16 columns in the order defined by selectColumns.
+// JSONB columns (scope, applies_when, metrics) are scanned as []byte and
+// decoded via json.Unmarshal into their respective value types.
 func scanSkill(rows pgx.Rows) (*skill.Skill, error) {
 	var (
-		rawID      string
-		name       string
-		phases     []string
-		content    string
-		techniques []string
-		createdAt  time.Time
-		updatedAt  time.Time
+		rawID                                  string
+		name, content                          string
+		phases, techniques                     []string
+		statusStr, versionStr, riskStr, srcStr string
+		scopeBytes, appliesBytes, metricsBytes []byte
+		lastUsedAt, lastValidatedAt            *time.Time
+		createdAt, updatedAt                   time.Time
 	)
-	if err := rows.Scan(&rawID, &name, &phases, &content, &techniques, &createdAt, &updatedAt); err != nil {
+	if err := rows.Scan(
+		&rawID, &name, &phases, &content, &techniques,
+		&statusStr, &versionStr, &scopeBytes, &appliesBytes, &riskStr,
+		&srcStr, &metricsBytes, &lastUsedAt, &lastValidatedAt,
+		&createdAt, &updatedAt,
+	); err != nil {
 		return nil, err
 	}
 
@@ -157,12 +241,25 @@ func scanSkill(rows pgx.Rows) (*skill.Skill, error) {
 		techTags[i] = skill.Technique(t)
 	}
 
-	return skill.Hydrate(skillID, name, phaseTypes, content, techTags,
-		skill.StatusCandidate, "v1",
-		skill.Scope{}, skill.AppliesWhen{},
-		skill.RiskMedium, skill.SourceManual,
-		skill.Metrics{},
-		nil, nil, // lastUsedAt, lastValidatedAt
+	var sc skill.Scope
+	if err := json.Unmarshal(scopeBytes, &sc); err != nil {
+		return nil, fmt.Errorf("scanSkill: scope: %w", err)
+	}
+	var aw skill.AppliesWhen
+	if err := json.Unmarshal(appliesBytes, &aw); err != nil {
+		return nil, fmt.Errorf("scanSkill: applies_when: %w", err)
+	}
+	var met skill.Metrics
+	if err := json.Unmarshal(metricsBytes, &met); err != nil {
+		return nil, fmt.Errorf("scanSkill: metrics: %w", err)
+	}
+
+	return skill.Hydrate(
+		skillID, name, phaseTypes, content, techTags,
+		skill.Status(statusStr), versionStr,
+		sc, aw,
+		skill.RiskLevel(riskStr), skill.ActivationSource(srcStr), met,
+		lastUsedAt, lastValidatedAt,
 		createdAt, updatedAt,
 	), nil
 }
