@@ -234,8 +234,12 @@ func TestSeedSkills_OperatorEditedRow_NotClobbered(t *testing.T) {
 		applySkill.Phases(),
 		operatorContent,
 		applySkill.Techniques(),
-		time.Now(),
-		time.Now().Add(time.Hour),
+		skill.StatusCandidate, "v1",
+		skill.Scope{}, skill.AppliesWhen{},
+		skill.RiskMedium, skill.SourceManual,
+		skill.Metrics{},
+		nil, nil,
+		time.Now(), time.Now().Add(time.Hour),
 	)
 	repo.storedByName(edited.Name(), edited)
 

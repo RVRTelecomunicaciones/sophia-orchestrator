@@ -124,6 +124,10 @@ ORDER  BY name`
 }
 
 // scanSkill reads one row from a pgx.Rows cursor and hydrates a Skill.
+// M1 NOTE: This function is extended in Group E to read the 9 lifecycle
+// columns added by migration 010. The temporary implementation here reads
+// the 7 pre-M1 columns and passes zero-value lifecycle fields to Hydrate.
+// selectColumns constant is updated in Group E to list all 16 columns.
 func scanSkill(rows pgx.Rows) (*skill.Skill, error) {
 	var (
 		rawID      string
@@ -153,7 +157,14 @@ func scanSkill(rows pgx.Rows) (*skill.Skill, error) {
 		techTags[i] = skill.Technique(t)
 	}
 
-	return skill.Hydrate(skillID, name, phaseTypes, content, techTags, createdAt, updatedAt), nil
+	return skill.Hydrate(skillID, name, phaseTypes, content, techTags,
+		skill.StatusCandidate, "v1",
+		skill.Scope{}, skill.AppliesWhen{},
+		skill.RiskMedium, skill.SourceManual,
+		skill.Metrics{},
+		nil, nil, // lastUsedAt, lastValidatedAt
+		createdAt, updatedAt,
+	), nil
 }
 
 // Verify SkillRepo satisfies the SkillRepository port at compile time.

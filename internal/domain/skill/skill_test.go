@@ -29,10 +29,13 @@ var (
 	now          = time.Date(2026, 6, 7, 0, 0, 0, 0, time.UTC)
 )
 
+// noLC is the zero-value LifecycleInput (uses V4.1 §7 defaults).
+var noLC = skill.LifecycleInput{}
+
 // ── New — happy path ──────────────────────────────────────────────────────────
 
 func TestNew_ValidSkill(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, validName, s.Name())
 	require.Equal(t, validContent, s.Content())
@@ -45,54 +48,54 @@ func TestNew_ValidSkill(t *testing.T) {
 // ── New — invariant violations ────────────────────────────────────────────────
 
 func TestNew_EmptyName(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), "", validPhase, validContent, validTechs, now)
+	_, err := skill.New(mustSkillID(t, validID), "", validPhase, validContent, validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrEmptyName)
 }
 
 func TestNew_WhitespaceName(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), "   ", validPhase, validContent, validTechs, now)
+	_, err := skill.New(mustSkillID(t, validID), "   ", validPhase, validContent, validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrEmptyName)
 }
 
 func TestNew_EmptyContent(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, "", validTechs, now)
+	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, "", validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrEmptyContent)
 }
 
 func TestNew_WhitespaceContent(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, "   ", validTechs, now)
+	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, "   ", validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrEmptyContent)
 }
 
 func TestNew_NoPhases(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), validName, nil, validContent, validTechs, now)
+	_, err := skill.New(mustSkillID(t, validID), validName, nil, validContent, validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrNoValidPhases)
 }
 
 func TestNew_EmptyPhaseSlice(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), validName, []phase.PhaseType{}, validContent, validTechs, now)
+	_, err := skill.New(mustSkillID(t, validID), validName, []phase.PhaseType{}, validContent, validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrNoValidPhases)
 }
 
 func TestNew_NoTechniques(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, nil, now)
+	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, nil, noLC, now)
 	require.ErrorIs(t, err, skill.ErrNoTechniques)
 }
 
 func TestNew_EmptyTechniqueSlice(t *testing.T) {
-	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, []skill.Technique{}, now)
+	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, []skill.Technique{}, noLC, now)
 	require.ErrorIs(t, err, skill.ErrNoTechniques)
 }
 
 func TestNew_InvalidTechniqueTag(t *testing.T) {
 	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent,
-		[]skill.Technique{"freeform-thinking"}, now)
+		[]skill.Technique{"freeform-thinking"}, noLC, now)
 	require.ErrorIs(t, err, skill.ErrInvalidTechnique)
 }
 
 func TestNew_MixedValidAndInvalidTechniques(t *testing.T) {
 	_, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent,
-		[]skill.Technique{skill.TechniqueReAct, "not-a-tag"}, now)
+		[]skill.Technique{skill.TechniqueReAct, "not-a-tag"}, noLC, now)
 	require.ErrorIs(t, err, skill.ErrInvalidTechnique)
 }
 
@@ -100,7 +103,7 @@ func TestNew_MixedValidAndInvalidTechniques(t *testing.T) {
 
 func TestNew_DuplicatePhasesDeduped(t *testing.T) {
 	phases := []phase.PhaseType{phase.PhaseApply, phase.PhaseApply, phase.PhaseVerify}
-	s, err := skill.New(mustSkillID(t, validID), validName, phases, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, phases, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	// apply comes before verify in canonical order; no duplicates.
 	require.Equal(t, []phase.PhaseType{phase.PhaseApply, phase.PhaseVerify}, s.Phases())
@@ -109,7 +112,7 @@ func TestNew_DuplicatePhasesDeduped(t *testing.T) {
 func TestNew_PhasesCanonicalOrder(t *testing.T) {
 	// Input in reverse order — output must be canonical.
 	phases := []phase.PhaseType{phase.PhaseVerify, phase.PhaseApply, phase.PhaseDesign}
-	s, err := skill.New(mustSkillID(t, validID), validName, phases, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, phases, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, []phase.PhaseType{phase.PhaseDesign, phase.PhaseApply, phase.PhaseVerify}, s.Phases())
 }
@@ -121,14 +124,14 @@ func TestNew_AllPhasesCanonicalOrder(t *testing.T) {
 	for i, p := range all {
 		reversed[len(all)-1-i] = p
 	}
-	s, err := skill.New(mustSkillID(t, validID), validName, reversed, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, reversed, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, all, s.Phases())
 }
 
 // Phases slice returned by getter must be a copy (mutation-safe).
 func TestNew_PhasesGetterDefensiveCopy(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	got := s.Phases()
 	got[0] = phase.PhaseInit
@@ -143,14 +146,14 @@ func TestNew_DuplicateTechniquesDeduped(t *testing.T) {
 		skill.TechniqueInlineWhy,
 		skill.TechniqueReAct,
 	}
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, techs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, techs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, []skill.Technique{skill.TechniqueInlineWhy, skill.TechniqueReAct}, s.Techniques())
 }
 
 // Techniques getter must return a copy.
 func TestNew_TechniquesGetterDefensiveCopy(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	got := s.Techniques()
 	got[0] = skill.TechniqueReAct
@@ -164,6 +167,11 @@ func TestHydrate_ReconstructsAllFields(t *testing.T) {
 	updatedAt := now.Add(time.Hour)
 	s := skill.Hydrate(
 		mustSkillID(t, validID), validName, validPhase, validContent, validTechs,
+		skill.StatusCandidate, "v1",
+		skill.Scope{}, skill.AppliesWhen{},
+		skill.RiskMedium, skill.SourceManual,
+		skill.Metrics{},
+		nil, nil, // lastUsedAt, lastValidatedAt
 		createdAt, updatedAt,
 	)
 	require.Equal(t, validName, s.Name())
@@ -178,7 +186,13 @@ func TestHydrate_ReconstructsAllFields(t *testing.T) {
 func TestHydrate_AcceptsStoredDataWithoutRevalidation(t *testing.T) {
 	// Hydrate does not validate — we can confirm it returns without error.
 	s := skill.Hydrate(
-		mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now, now,
+		mustSkillID(t, validID), validName, validPhase, validContent, validTechs,
+		skill.StatusCandidate, "v1",
+		skill.Scope{}, skill.AppliesWhen{},
+		skill.RiskMedium, skill.SourceManual,
+		skill.Metrics{},
+		nil, nil,
+		now, now,
 	)
 	require.NotNil(t, s)
 }
@@ -186,14 +200,14 @@ func TestHydrate_AcceptsStoredDataWithoutRevalidation(t *testing.T) {
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func TestUpdate_ChangesFieldsAndBumpsUpdatedAt(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 
 	later := now.Add(time.Hour)
 	newContent := "Updated guidance: step back before diving in."
 	newTechs := []skill.Technique{skill.TechniqueStepBack}
 
-	err = s.Update(validName, validPhase, newContent, newTechs, later)
+	err = s.Update(validName, validPhase, newContent, newTechs, noLC, later)
 	require.NoError(t, err)
 	require.Equal(t, newContent, s.Content())
 	require.Equal(t, newTechs, s.Techniques())
@@ -202,39 +216,39 @@ func TestUpdate_ChangesFieldsAndBumpsUpdatedAt(t *testing.T) {
 }
 
 func TestUpdate_EmptyNameRejected(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
-	err = s.Update("", validPhase, validContent, validTechs, now)
+	err = s.Update("", validPhase, validContent, validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrEmptyName)
 }
 
 func TestUpdate_EmptyContentRejected(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
-	err = s.Update(validName, validPhase, "", validTechs, now)
+	err = s.Update(validName, validPhase, "", validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrEmptyContent)
 }
 
 func TestUpdate_ZeroPhasesRejected(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
-	err = s.Update(validName, nil, validContent, validTechs, now)
+	err = s.Update(validName, nil, validContent, validTechs, noLC, now)
 	require.ErrorIs(t, err, skill.ErrNoValidPhases)
 }
 
 func TestUpdate_InvalidTechniqueRejected(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
-	err = s.Update(validName, validPhase, validContent, []skill.Technique{"bad-tag"}, now)
+	err = s.Update(validName, validPhase, validContent, []skill.Technique{"bad-tag"}, noLC, now)
 	require.ErrorIs(t, err, skill.ErrInvalidTechnique)
 }
 
 func TestUpdate_PhasesDedupedAndOrdered(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	// Reverse order + duplicate.
 	phases := []phase.PhaseType{phase.PhaseArchive, phase.PhaseApply, phase.PhaseApply}
-	err = s.Update(validName, phases, validContent, validTechs, now)
+	err = s.Update(validName, phases, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, []phase.PhaseType{phase.PhaseApply, phase.PhaseArchive}, s.Phases())
 }
@@ -242,13 +256,13 @@ func TestUpdate_PhasesDedupedAndOrdered(t *testing.T) {
 // ── AppliesTo ─────────────────────────────────────────────────────────────────
 
 func TestAppliesTo_MatchingPhase(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.True(t, s.AppliesTo(phase.PhaseApply))
 }
 
 func TestAppliesTo_NonMatchingPhase(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.False(t, s.AppliesTo(phase.PhaseDesign))
 }
@@ -257,13 +271,13 @@ func TestAppliesTo_NonMatchingPhase(t *testing.T) {
 
 func TestPhaseStrings(t *testing.T) {
 	phases := []phase.PhaseType{phase.PhaseApply, phase.PhaseVerify}
-	s, err := skill.New(mustSkillID(t, validID), validName, phases, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, phases, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, []string{"apply", "verify"}, s.PhaseStrings())
 }
 
 func TestTechniqueStrings(t *testing.T) {
-	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(mustSkillID(t, validID), validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, []string{"constitutional-self-critique", "inline-why"}, s.TechniqueStrings())
 }
@@ -272,7 +286,7 @@ func TestTechniqueStrings(t *testing.T) {
 
 func TestNew_IDRoundtrip(t *testing.T) {
 	id := mustSkillID(t, validID)
-	s, err := skill.New(id, validName, validPhase, validContent, validTechs, now)
+	s, err := skill.New(id, validName, validPhase, validContent, validTechs, noLC, now)
 	require.NoError(t, err)
 	require.Equal(t, id, s.ID())
 	require.Equal(t, validID, s.ID().String())
@@ -280,7 +294,14 @@ func TestNew_IDRoundtrip(t *testing.T) {
 
 func TestHydrate_IDRoundtrip(t *testing.T) {
 	id := mustSkillID(t, validID)
-	s := skill.Hydrate(id, validName, validPhase, validContent, validTechs, now, now)
+	s := skill.Hydrate(id, validName, validPhase, validContent, validTechs,
+		skill.StatusCandidate, "v1",
+		skill.Scope{}, skill.AppliesWhen{},
+		skill.RiskMedium, skill.SourceManual,
+		skill.Metrics{},
+		nil, nil,
+		now, now,
+	)
 	require.Equal(t, id, s.ID())
 }
 

@@ -399,7 +399,7 @@ func makeTestSkill(t *testing.T, name string, phases []phase.PhaseType, content 
 	t.Helper()
 	sid, err := ids.ParseSkillID("01ARZ3NDEKTSV4RRFFQ69G5SK1")
 	require.NoError(t, err)
-	s, err := skill.New(sid, name, phases, content, techniques, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	s, err := skill.New(sid, name, phases, content, techniques, skill.LifecycleInput{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	require.NoError(t, err)
 	return s
 }
@@ -462,6 +462,7 @@ func TestPromptBuilder_SkillSection_MultipleSkills(t *testing.T) {
 		[]phase.PhaseType{phase.PhaseApply},
 		"Skill two content.",
 		[]skill.Technique{skill.TechniqueChainOfVerification},
+		skill.LifecycleInput{},
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	)
 	require.NoError(t, err)

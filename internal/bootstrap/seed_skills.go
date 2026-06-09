@@ -291,7 +291,7 @@ Rules:
 		if err != nil {
 			return nil, fmt.Errorf("seed skill %q: invalid ID %q: %w", d.name, d.rawID, err)
 		}
-		s, err := skill.New(id, d.name, d.phases, d.content, d.techniques, now)
+		s, err := skill.New(id, d.name, d.phases, d.content, d.techniques, skill.LifecycleInput{}, now)
 		if err != nil {
 			return nil, fmt.Errorf("seed skill %q: %w", d.name, err)
 		}

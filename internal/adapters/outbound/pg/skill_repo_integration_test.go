@@ -101,6 +101,7 @@ func newTestSkill(t *testing.T, rawID, name string, phases []phase.PhaseType) *s
 		phases,
 		"Apply constitutional self-critique to review each change before committing.",
 		[]skill.Technique{skill.TechniqueConstitutionalSelfCritique, skill.TechniqueInlineWhy},
+		skill.LifecycleInput{},
 		integNow,
 	)
 	require.NoError(t, err)
@@ -149,6 +150,7 @@ func TestSkillRepo_Upsert_Replaces(t *testing.T) {
 		[]phase.PhaseType{phase.PhaseApply, phase.PhaseVerify},
 		"Revised guidance: step-back before diving in.",
 		[]skill.Technique{skill.TechniqueStepBack},
+		skill.LifecycleInput{},
 		later,
 	))
 	require.NoError(t, repo.Upsert(ctx, s))
@@ -189,6 +191,7 @@ func TestSkillRepo_InsertIfAbsent_NoOpOnExisting(t *testing.T) {
 		[]phase.PhaseType{phase.PhaseApply},
 		"OPERATOR EDITED: do not overwrite me.",
 		[]skill.Technique{skill.TechniqueStepBack},
+		skill.LifecycleInput{},
 		later,
 	))
 	require.NoError(t, repo.Upsert(ctx, original))
@@ -301,6 +304,7 @@ func TestSkillRepo_Upsert_HydrationRoundtrip(t *testing.T) {
 		[]phase.PhaseType{phase.PhaseDesign},
 		"Step back and consider the full system before proposing structure.",
 		[]skill.Technique{skill.TechniqueExtendedThinking, skill.TechniqueStepBack, skill.TechniqueInlineWhy},
+		skill.LifecycleInput{},
 		integNow,
 	)
 	require.NoError(t, err)

@@ -118,7 +118,7 @@ func TestSeedSkills_Integration_NoClobber(t *testing.T) {
 
 	const operatorContent = "OPERATOR EDITED PG: custom guidance — do not overwrite."
 	require.NoError(t, applyRow.Update(
-		applyRow.Name(), applyRow.Phases(), operatorContent, applyRow.Techniques(), time.Now(),
+		applyRow.Name(), applyRow.Phases(), operatorContent, applyRow.Techniques(), skill.LifecycleInput{}, time.Now(),
 	))
 	require.NoError(t, repo.Upsert(ctx, applyRow))
 
