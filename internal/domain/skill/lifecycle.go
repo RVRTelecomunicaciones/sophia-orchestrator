@@ -25,6 +25,7 @@ var (
 // Status is a closed lifecycle enum per V4.1 §5.2 (CORRECTED — 6 values).
 type Status string
 
+// Status lifecycle enum values per V4.1 §5.2.
 const (
 	StatusCandidate  Status = "candidate"
 	StatusValidated  Status = "validated"
@@ -52,6 +53,7 @@ func (s Status) String() string { return string(s) }
 // RiskLevel is a closed enum per V4.1 §5.2 (4 values).
 type RiskLevel string
 
+// RiskLevel enum values per V4.1 §5.2.
 const (
 	RiskLow      RiskLevel = "low"
 	RiskMedium   RiskLevel = "medium"
@@ -76,6 +78,7 @@ func (r RiskLevel) String() string { return string(r) }
 // ActivationSource is a closed enum per V4.1 §5.2 (5 values).
 type ActivationSource string
 
+// ActivationSource enum values per V4.1 §5.2.
 const (
 	SourceManual        ActivationSource = "manual"
 	SourceLegacySeed    ActivationSource = "legacy_seed"

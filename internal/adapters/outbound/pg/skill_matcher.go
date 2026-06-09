@@ -26,6 +26,8 @@ var riskOrder = map[skill.RiskLevel]int{
 // In-memory filtering is appropriate for M1 because the skills table is small
 // (<100 rows in V1 usage) and avoids complex JSONB query construction. M2+ can
 // push scope/applies_when filters to SQL with GIN index pushdown.
+//
+//nolint:revive // PGSkillMatcher is the correct name per design.md (PG qualifier is intentional).
 type PGSkillMatcher struct {
 	repo *SkillRepo
 }
