@@ -20,6 +20,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/pg"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/bootstrap"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 )
 
@@ -51,7 +52,7 @@ func TestSkillPhaseBaselineCapture(t *testing.T) {
 
 	// Seed the 9 canonical skills using the current pre-M1 seeder.
 	repo := pg.NewSkillRepo(pool)
-	err := bootstrap.SeedSkills(ctx, repo, slog.Default())
+	err := bootstrap.SeedSkills(ctx, repo, shared.SystemClock{}, slog.Default())
 	require.NoError(t, err, "seeder must succeed against migration-009 DB")
 
 	provider := pg.NewSkillProvider(repo)
