@@ -203,13 +203,16 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
 	}
 
-	// Skill provider — wraps the PG SkillRepository with the SkillProvider port.
-	// When SOPHIA_SKILLS_ENABLED=false (or false at default), a nil provider is
-	// passed to all services so prompts remain byte-identical to the pre-change
-	// baseline (fail-soft). When true, the PG repo is used.
+	// SkillMatcher + SkillProvider — M1 lifecycle-matcher wiring.
+	// PGSkillMatcher wraps the SkillRepo and implements context-aware filtering
+	// (scope, applies_when, risk_level sort). SkillProvider is the deprecated
+	// SkillsForPhase wrapper that delegates to the matcher (will be removed M3).
+	// When SOPHIA_SKILLS_ENABLED=false, a nil provider is passed to all services
+	// so prompts remain byte-identical to the pre-change baseline (fail-soft).
 	var skillProvider discipline.SkillProvider
 	if cfg.SkillsEnabled {
-		skillProvider = pg.NewSkillProvider(skillRepo)
+		skillMatcher := pg.NewPGSkillMatcher(pool, skillRepo)
+		skillProvider = pg.NewSkillProvider(skillMatcher)
 	}
 
 	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE

@@ -55,7 +55,8 @@ func TestSkillPhaseBaselineCapture(t *testing.T) {
 	err := bootstrap.SeedSkills(ctx, repo, shared.SystemClock{}, slog.Default())
 	require.NoError(t, err, "seeder must succeed against migration-009 DB")
 
-	provider := pg.NewSkillProvider(repo)
+	matcher := pg.NewPGSkillMatcher(pool, repo)
+	provider := pg.NewSkillProvider(matcher)
 	goldenDir := baselineGoldenDir(t)
 	updateMode := os.Getenv("GOLDEN_UPDATE") == "1"
 
