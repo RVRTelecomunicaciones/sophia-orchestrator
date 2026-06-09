@@ -1,8 +1,9 @@
 // Package bootstrap seeds initial Skill rows at startup.
 // This file is the boot-time seeder — NOT a data migration.
-// Seeding runs via InsertIfAbsent (by name), so any operator-edited row
-// survives a restart untouched. Running the seeder multiple times is safe
-// and idempotent.
+// M1: seeding uses Upsert (ON CONFLICT (name, version) DO UPDATE) with the
+// V4.1 §7 legacy payload (status=active, version=v1, activation_source=legacy_seed,
+// risk_level=medium, scope={project_id:*, repo_id:*, phases:[<phase>]}).
+// Running the seeder multiple times is idempotent (D-M1-4).
 package bootstrap
 
 import (
@@ -13,43 +14,42 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
-// SeedSkills inserts the 9 canonical Sophia SDD phase skills when they are
-// absent from the skills table. It uses InsertIfAbsent (ON CONFLICT DO NOTHING
-// by name), so rows that an operator has edited at runtime are NEVER clobbered.
+// SeedSkills upserts the 9 canonical Sophia SDD phase skills using the V4.1 §7
+// legacy payload. It uses Upsert (ON CONFLICT (name, version) DO UPDATE) so
+// re-running on an already-seeded DB is idempotent and keeps lifecycle fields
+// up-to-date.
 //
-// The seeder is called from Wire() after migrations run, before HTTP serving
-// begins, and only when cfg.SkillsEnabled is true. All errors are returned so
-// the caller can decide to fail-soft or hard-fail at startup.
-func SeedSkills(ctx context.Context, repo outbound.SkillRepository, logger *slog.Logger) error {
-	seeds, err := buildSeedSkills(time.Now().UTC())
+// The clock parameter is injected so timestamps are deterministic in tests
+// (CLAUDE.md rule #5: no direct time.Now() in application packages).
+//
+// All errors are returned so the caller can decide to fail-soft or hard-fail at
+// startup.
+func SeedSkills(ctx context.Context, repo outbound.SkillRepository, clock shared.Clock, logger *slog.Logger) error {
+	seeds, err := buildSeedSkills(clock.Now().UTC())
 	if err != nil {
 		// Construction errors indicate a programming mistake — hard-fail.
 		return fmt.Errorf("bootstrap: SeedSkills: build seed definitions: %w", err)
 	}
 
-	var inserted int
 	for _, s := range seeds {
-		if err := repo.InsertIfAbsent(ctx, s); err != nil {
-			return fmt.Errorf("bootstrap: SeedSkills: insert %q: %w", s.Name(), err)
+		if err := repo.Upsert(ctx, s); err != nil {
+			return fmt.Errorf("bootstrap: SeedSkills: upsert %q: %w", s.Name(), err)
 		}
-		inserted++
 	}
 
 	logger.Info("bootstrap: skill seeder complete",
-		slog.Int("seeds_attempted", len(seeds)),
-		slog.Int("repo_calls", inserted),
-	)
+		slog.Int("seeds_attempted", len(seeds)))
 	return nil
 }
 
-// buildSeedSkills constructs the 9 canonical Skill values using skill.New so
-// all domain invariants are validated at construction time. Returned errors
-// indicate programmer error in this file (wrong technique tag, empty content,
-// etc.) and should be treated as fatal at startup.
+// buildSeedSkills constructs the 9 canonical Skill values using skill.NewLegacy so
+// all domain invariants are validated at construction time and the V4.1 §7 payload
+// (status=active, activation_source=legacy_seed, etc.) is applied automatically.
 //
 // Why a separate function: makes the seed definitions unit-testable without a
 // real repository — callers can build the slice, inspect it, and assert counts
@@ -291,7 +291,7 @@ Rules:
 		if err != nil {
 			return nil, fmt.Errorf("seed skill %q: invalid ID %q: %w", d.name, d.rawID, err)
 		}
-		s, err := skill.New(id, d.name, d.phases, d.content, d.techniques, now)
+		s, err := skill.NewLegacy(id, d.name, d.phases, d.content, d.techniques, now)
 		if err != nil {
 			return nil, fmt.Errorf("seed skill %q: %w", d.name, err)
 		}

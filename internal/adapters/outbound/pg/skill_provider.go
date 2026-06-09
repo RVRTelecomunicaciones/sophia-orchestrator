@@ -8,25 +8,34 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 )
 
-// SkillProvider wraps a SkillRepo and satisfies the discipline.SkillProvider port.
-// It is the pg-layer adapter that the bootstrap package injects into phase.Service
-// and apply.RunService when SOPHIA_SKILLS_ENABLED=true.
+// SkillProvider wraps a SkillMatcher and satisfies the discipline.SkillProvider
+// port via the deprecated SkillsForPhase method.
+//
+// The underlying matcher is discipline.SkillMatcher so the provider composes
+// with PGSkillMatcher (and any future in-memory or remote matcher) without
+// depending on the concrete SkillRepo type.
 type SkillProvider struct {
-	repo *SkillRepo
+	matcher discipline.SkillMatcher
 }
 
-// NewSkillProvider constructs a SkillProvider backed by the given SkillRepo.
-func NewSkillProvider(repo *SkillRepo) *SkillProvider {
-	if repo == nil {
-		panic("pg.SkillProvider: nil repo")
+// NewSkillProvider constructs a SkillProvider backed by the given SkillMatcher.
+// The matcher is typically a *PGSkillMatcher wired in bootstrap.Wire().
+func NewSkillProvider(matcher discipline.SkillMatcher) *SkillProvider {
+	if matcher == nil {
+		panic("pg.SkillProvider: nil matcher")
 	}
-	return &SkillProvider{repo: repo}
+	return &SkillProvider{matcher: matcher}
 }
 
-// SkillsForPhase delegates to SkillRepo.FindByPhase and returns the matching
-// skills. Satisfies discipline.SkillProvider.
+// SkillsForPhase is a thin deprecated wrapper around SkillMatcher.SkillsForContext.
+// It translates the phase-only query into a SkillQuery and discards the skipped
+// list, returning only the matched skills.
+//
+// Deprecated: Use SkillMatcher.SkillsForContext(SkillQuery{Phase: phase}) instead.
+// SkillsForPhase will be removed in M3.
 func (p *SkillProvider) SkillsForPhase(ctx context.Context, pt phase.PhaseType) ([]*skill.Skill, error) {
-	return p.repo.FindByPhase(ctx, pt)
+	skills, _, err := p.matcher.SkillsForContext(ctx, discipline.SkillQuery{Phase: pt})
+	return skills, err
 }
 
 // Verify SkillProvider satisfies the discipline.SkillProvider port at compile time.

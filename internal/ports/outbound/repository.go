@@ -83,16 +83,21 @@ type WorktreeRepository interface {
 	FindBySessionID(ctx context.Context, sessionID ids.SessionID) (*worktree.Worktree, error)
 }
 
-// SkillRepository persists Skill aggregates.
+// SkillRepository persists Skill aggregates with V4.1 §5.2 lifecycle fields.
 //
-// FindByPhase returns every Skill whose phases array contains pt. The result
-// slice is empty (not ErrNotFound) when no Skill matches.
+// FindByPhase returns every Skill whose phases array contains pt AND
+// status='active'. The status filter is a hard-coded invariant (D-M1-6):
+// FindByPhase callers MUST NEVER receive non-active skills. New code uses
+// SkillMatcher.SkillsForContext for typed queries with explicit status semantics.
+// The result slice is empty (not ErrNotFound) when no active Skill matches.
 //
-// Upsert inserts or fully replaces a Skill row by id.
+// Upsert inserts or fully replaces a Skill row on CONFLICT (name, version) per
+// migration 010 constraint swap (D-M1-1). Idempotent: calling Upsert twice
+// with the same name+version is a no-op for unchanged content.
 //
-// InsertIfAbsent inserts the Skill only when no row with the same name exists.
-// It is a no-op (returns nil) when a matching name is already present — the
-// caller MUST NOT treat a no-op as an error. This is the safe seeder operation.
+// InsertIfAbsent inserts the Skill only when no row with the same (name, version)
+// exists. It is a no-op (returns nil) when a matching name+version is already
+// present. This is the legacy seeder operation; new code uses Upsert.
 //
 // List returns all persisted Skills in no guaranteed order.
 type SkillRepository interface {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/pg"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/bootstrap"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	dbpkg "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/db"
 )
@@ -73,37 +74,70 @@ func skipIfNoDocker(t *testing.T) {
 }
 
 // TestSeedSkills_Integration_EmptyTable seeds against a real Postgres container.
-// Verifies all 9 rows are inserted and a second run is idempotent.
+// Verifies all 9 rows are inserted and a second run is idempotent (D-M1-4).
 func TestSeedSkills_Integration_EmptyTable(t *testing.T) {
 	pool := setupSkillIntegPG(t)
 	repo := pg.NewSkillRepo(pool)
+	clock := shared.SystemClock{}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx := context.Background()
 
-	require.NoError(t, bootstrap.SeedSkills(ctx, repo, logger))
+	require.NoError(t, bootstrap.SeedSkills(ctx, repo, clock, logger))
 
 	list, err := repo.List(ctx)
 	require.NoError(t, err)
 	require.Len(t, list, 9, "all 9 skills must be present after seeding an empty table")
 
-	// Second run — idempotent.
-	require.NoError(t, bootstrap.SeedSkills(ctx, repo, logger))
+	// Second run — Upsert is idempotent; row count must stay at 9.
+	require.NoError(t, bootstrap.SeedSkills(ctx, repo, clock, logger))
 	list2, err := repo.List(ctx)
 	require.NoError(t, err)
 	require.Len(t, list2, 9, "second seeder run must not change row count")
 }
 
-// TestSeedSkills_Integration_NoClobber verifies operator edits survive a restart.
-func TestSeedSkills_Integration_NoClobber(t *testing.T) {
+// TestSeedSkills_Integration_V41Payload verifies that each seeded row carries the
+// V4.1 §7 legacy payload: status=active, version=v1, activation_source=legacy_seed,
+// risk_level=medium (D-M1-2).
+func TestSeedSkills_Integration_V41Payload(t *testing.T) {
 	pool := setupSkillIntegPG(t)
 	repo := pg.NewSkillRepo(pool)
+	clock := shared.SystemClock{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx := context.Background()
+
+	require.NoError(t, bootstrap.SeedSkills(ctx, repo, clock, logger))
+
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 9)
+
+	for _, s := range list {
+		require.Equal(t, skill.StatusActive, s.Status(),
+			"seed skill %q must have status=active (V4.1 §7)", s.Name())
+		require.Equal(t, "v1", s.Version(),
+			"seed skill %q must have version=v1 (V4.1 §7)", s.Name())
+		require.Equal(t, skill.SourceLegacySeed, s.ActivationSource(),
+			"seed skill %q must have activation_source=legacy_seed (V4.1 §7)", s.Name())
+		require.Equal(t, skill.RiskMedium, s.RiskLevel(),
+			"seed skill %q must have risk_level=medium (V4.1 §7)", s.Name())
+	}
+}
+
+// TestSeedSkills_Integration_UpsertReplacesStaleRow verifies that Upsert replaces
+// a stale row on re-seed, delivering the canonical V4.1 §7 legacy payload (D-M1-4).
+// This is the M1 migration contract: operator edits are scoped to name+version bump;
+// the seeder owns the canonical v1 content.
+func TestSeedSkills_Integration_UpsertReplacesStaleRow(t *testing.T) {
+	pool := setupSkillIntegPG(t)
+	repo := pg.NewSkillRepo(pool)
+	clock := shared.SystemClock{}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx := context.Background()
 
 	// First seed — populate all 9 rows.
-	require.NoError(t, bootstrap.SeedSkills(ctx, repo, logger))
+	require.NoError(t, bootstrap.SeedSkills(ctx, repo, clock, logger))
 
-	// Simulate operator edit: overwrite apply-implement-safely via Upsert.
+	// Simulate stale content: overwrite apply-implement-safely via Upsert.
 	list, err := repo.List(ctx)
 	require.NoError(t, err)
 
@@ -116,23 +150,35 @@ func TestSeedSkills_Integration_NoClobber(t *testing.T) {
 	}
 	require.NotNil(t, applyRow, "apply-implement-safely must exist after first seed")
 
-	const operatorContent = "OPERATOR EDITED PG: custom guidance — do not overwrite."
+	const staleContent = "STALE CONTENT: should be replaced by re-seed."
 	require.NoError(t, applyRow.Update(
-		applyRow.Name(), applyRow.Phases(), operatorContent, applyRow.Techniques(), time.Now(),
+		applyRow.Name(), applyRow.Phases(), staleContent, applyRow.Techniques(), skill.LifecycleInput{}, time.Now(),
 	))
 	require.NoError(t, repo.Upsert(ctx, applyRow))
 
-	// Re-seed — InsertIfAbsent must not overwrite the edited row.
-	require.NoError(t, bootstrap.SeedSkills(ctx, repo, logger))
+	// Re-seed — Upsert must replace the stale row with canonical content.
+	require.NoError(t, bootstrap.SeedSkills(ctx, repo, clock, logger))
 
 	list2, err := repo.List(ctx)
 	require.NoError(t, err)
 	require.Len(t, list2, 9)
 
+	// Canonical seeds — build expected content for apply-implement-safely.
+	seeds, err := bootstrap.ExportedBuildSeedSkills(time.Now())
+	require.NoError(t, err)
+	var canonicalContent string
+	for _, s := range seeds {
+		if s.Name() == "apply-implement-safely" {
+			canonicalContent = s.Content()
+			break
+		}
+	}
+	require.NotEmpty(t, canonicalContent)
+
 	for _, s := range list2 {
 		if s.Name() == "apply-implement-safely" {
-			require.Equal(t, operatorContent, s.Content(),
-				"seeder must not clobber operator-edited row on restart")
+			require.Equal(t, canonicalContent, s.Content(),
+				"Upsert must restore canonical seed content on re-seed")
 		}
 	}
 }
