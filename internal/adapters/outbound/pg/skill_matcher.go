@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,6 +11,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 )
 
 // riskOrder maps RiskLevel values to sortable integers (low < medium < high < critical).
@@ -95,6 +97,18 @@ func (m *PGSkillMatcher) SkillsForContext(ctx context.Context, q discipline.Skil
 
 		// AppliesWhen filter (feature_type, touched_paths, exclude_paths).
 		if reason, ok := appliesWhenMatches(s.AppliesWhen(), q); !ok {
+			skipped = append(skipped, discipline.SkippedSkill{
+				SkillID: s.ID().String(),
+				Reason:  reason,
+			})
+			continue
+		}
+
+		// Structural filter (framework, language) — D-M3-4.
+		// Placed AFTER appliesWhenMatches so skip-reason precedence is:
+		//   status → phase → scope → applies_when → structural → risk.
+		// Nil StructuralContext = fail-open (no filtering for pre-INIT-0 changes).
+		if reason, ok := structuralMatches(s.AppliesWhen(), q); !ok {
 			skipped = append(skipped, discipline.SkippedSkill{
 				SkillID: s.ID().String(),
 				Reason:  reason,
@@ -208,6 +222,68 @@ func appliesWhenMatches(aw skill.AppliesWhen, q discipline.SkillQuery) (string, 
 	}
 
 	return "", true
+}
+
+// structuralMatches checks applies_when.framework and applies_when.language
+// against the live StructuralContext carried on the query.
+//
+// Nil-context semantics: when q.StructuralContext is nil (pre-INIT-0 or
+// degraded INIT), the filter is a NO-OP — every skill passes this gate.
+// A skill that declares framework/language constraints but runs against a
+// change with no StructuralContext is NOT skipped (fail-open): the absence
+// of structural data must not silently hide skills.
+//
+// Matching is case-insensitive equality on the detected Name field.
+func structuralMatches(aw skill.AppliesWhen, q discipline.SkillQuery) (string, bool) {
+	if q.StructuralContext == nil {
+		return "", true // no structural data → no structural filtering
+	}
+	sc := q.StructuralContext
+
+	// Framework filter: if skill declares framework constraints, at least one
+	// declared framework must appear in sc.Frameworks.
+	if len(aw.Framework) > 0 {
+		if !anyFrameworkPresent(aw.Framework, sc.Frameworks) {
+			return discipline.SkipReasonStructuralMismatch, false
+		}
+	}
+
+	// Language filter: same semantics as framework.
+	if len(aw.Language) > 0 {
+		if !anyLanguagePresent(aw.Language, sc.Languages) {
+			return discipline.SkipReasonStructuralMismatch, false
+		}
+	}
+
+	return "", true
+}
+
+// anyFrameworkPresent returns true when at least one of the declared framework
+// names (from applies_when.framework) appears in the detected frameworks list
+// (case-insensitive equality on Name).
+func anyFrameworkPresent(declared []string, detected []structural.FrameworkInfo) bool {
+	for _, d := range declared {
+		for _, f := range detected {
+			if strings.EqualFold(d, f.Name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// anyLanguagePresent returns true when at least one of the declared language
+// names (from applies_when.language) appears in the detected languages list
+// (case-insensitive equality on Name).
+func anyLanguagePresent(declared []string, detected []structural.LanguageInfo) bool {
+	for _, d := range declared {
+		for _, l := range detected {
+			if strings.EqualFold(d, l.Name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // anyGlobMatch returns true when path matches any of the glob patterns via

@@ -92,3 +92,9 @@ const SkipReasonStatusNotActive = "status_not_active"
 // SkipReasonRiskExceeded is returned when a skill's risk_level exceeds the
 // SkillQuery.MaxRiskLevel inclusive bound (M2 D-M2-13 fix W1).
 const SkipReasonRiskExceeded = "risk_exceeded"
+
+// SkipReasonStructuralMismatch is returned when a skill's applies_when
+// framework or language constraints do not match the live StructuralContext
+// carried on the query (M3 D-M3-4). Distinct from SkipReasonAppliesWhenFailed
+// so callers can distinguish feature_type/path skips from structural skips.
+const SkipReasonStructuralMismatch = "structural_mismatch"
