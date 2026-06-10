@@ -20,6 +20,12 @@ const SchemaV1 = 1
 // Moved verbatim from internal/application/init/detector/types.go (D-M3-3).
 // detector/types.go retains type aliases for source-compatibility during
 // the transition; new code SHOULD import domain/structural directly.
+//
+// The name "StructuralContext" intentionally keeps the original type name for
+// source compatibility; detector.StructuralContext is a type alias for this
+// type. The stutter (structural.StructuralContext) is accepted by design.
+//
+//nolint:revive // stutter accepted: source-compat alias requires the original name.
 type StructuralContext struct {
 	// SchemaVersion is always SchemaV1 (= 1).
 	SchemaVersion int `json:"schema_version"`
