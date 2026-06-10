@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -262,6 +263,103 @@ func scanSkill(rows pgx.Rows) (*skill.Skill, error) {
 		lastUsedAt, lastValidatedAt,
 		createdAt, updatedAt,
 	), nil
+}
+
+// FindByID returns the Skill with the given ID, or outbound.ErrNotFound when absent.
+func (r *SkillRepo) FindByID(ctx context.Context, id ids.SkillID) (*skill.Skill, error) {
+	q := `SELECT ` + selectColumns + `
+FROM   skills
+WHERE  id = $1`
+
+	rows, err := r.pool.Query(ctx, q, id.String())
+	if err != nil {
+		return nil, wrapErr("SkillRepo.FindByID", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, wrapErr("SkillRepo.FindByID", err)
+		}
+		return nil, fmt.Errorf("SkillRepo.FindByID: %w", outbound.ErrNotFound)
+	}
+	return scanSkill(rows)
+}
+
+// PatchMetrics atomically applies additive integer deltas and overwrites
+// avg_retry_reduction to the metrics JSONB column, and sets last_used_at to now.
+// Uses SELECT FOR UPDATE within an explicit transaction to prevent lost updates
+// under concurrent worker batches (D-M2-10).
+func (r *SkillRepo) PatchMetrics(ctx context.Context, id ids.SkillID, delta skill.Metrics, now time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return wrapErr("SkillRepo.PatchMetrics.begin", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// SELECT FOR UPDATE: lock the row before reading metrics.
+	var metricsBytes []byte
+	const lockQ = `SELECT metrics FROM skills WHERE id = $1 FOR UPDATE`
+	if err := tx.QueryRow(ctx, lockQ, id.String()).Scan(&metricsBytes); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("SkillRepo.PatchMetrics: %w", outbound.ErrNotFound)
+		}
+		return wrapErr("SkillRepo.PatchMetrics.lock", err)
+	}
+
+	var current skill.Metrics
+	if err := json.Unmarshal(metricsBytes, &current); err != nil {
+		return fmt.Errorf("SkillRepo.PatchMetrics.unmarshal: %w", err)
+	}
+
+	// Apply additive deltas.
+	current.UsageCount += delta.UsageCount
+	current.SuccessCount += delta.SuccessCount
+	current.FailureCount += delta.FailureCount
+	current.TestsPassedCount += delta.TestsPassedCount
+	current.RollbackCount += delta.RollbackCount
+	current.DeprecatedAPIHits += delta.DeprecatedAPIHits
+	if delta.AvgRetryReduction != 0 {
+		current.AvgRetryReduction = delta.AvgRetryReduction
+	}
+
+	updated, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("SkillRepo.PatchMetrics.marshal: %w", err)
+	}
+
+	const updateQ = `UPDATE skills SET metrics = $2, last_used_at = $3, updated_at = $3 WHERE id = $1`
+	if _, err := tx.Exec(ctx, updateQ, id.String(), updated, now); err != nil {
+		return wrapErr("SkillRepo.PatchMetrics.update", err)
+	}
+
+	return wrapErr("SkillRepo.PatchMetrics.commit", tx.Commit(ctx))
+}
+
+// PatchStatus updates the skill's status column and sets last_validated_at when
+// the new status is "validated". Returns outbound.ErrNotFound when absent.
+func (r *SkillRepo) PatchStatus(ctx context.Context, id ids.SkillID, status skill.Status, now time.Time) error {
+	var err error
+	if status == skill.StatusValidated {
+		const q = `UPDATE skills SET status = $2, last_validated_at = $3, updated_at = $3 WHERE id = $1`
+		tag, e := r.pool.Exec(ctx, q, id.String(), status.String(), now)
+		if e != nil {
+			return wrapErr("SkillRepo.PatchStatus", e)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("SkillRepo.PatchStatus: %w", outbound.ErrNotFound)
+		}
+		return nil
+	}
+	const q = `UPDATE skills SET status = $2, updated_at = $3 WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id.String(), status.String(), now)
+	if err != nil {
+		return wrapErr("SkillRepo.PatchStatus", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("SkillRepo.PatchStatus: %w", outbound.ErrNotFound)
+	}
+	return nil
 }
 
 // Verify SkillRepo satisfies the SkillRepository port at compile time.

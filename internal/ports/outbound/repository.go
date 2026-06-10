@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
@@ -113,9 +114,22 @@ type SkillUsageRepository interface {
 // present. This is the legacy seeder operation; new code uses Upsert.
 //
 // List returns all persisted Skills in no guaranteed order.
+//
+// FindByID returns the skill with the given ID. Returns ErrNotFound when absent.
+//
+// PatchMetrics atomically applies additive deltas to the metrics JSONB column
+// and sets last_used_at to now. Uses SELECT FOR UPDATE within a transaction.
+// Returns ErrNotFound when no skill with that ID exists.
+//
+// PatchStatus updates the skill's status column and conditionally sets
+// last_validated_at (when new status is "validated"). Returns ErrNotFound when
+// no skill with that ID exists.
 type SkillRepository interface {
 	FindByPhase(ctx context.Context, pt phase.PhaseType) ([]*skill.Skill, error)
 	Upsert(ctx context.Context, s *skill.Skill) error
 	InsertIfAbsent(ctx context.Context, s *skill.Skill) error
 	List(ctx context.Context) ([]*skill.Skill, error)
+	FindByID(ctx context.Context, id ids.SkillID) (*skill.Skill, error)
+	PatchMetrics(ctx context.Context, id ids.SkillID, delta skill.Metrics, now time.Time) error
+	PatchStatus(ctx context.Context, id ids.SkillID, status skill.Status, now time.Time) error
 }

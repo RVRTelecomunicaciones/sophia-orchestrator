@@ -33,6 +33,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
+	skillapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/eventstream"
 	initphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init"
 	initcache "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/cache"
@@ -211,9 +212,11 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// When SOPHIA_SKILLS_ENABLED=false, a nil provider is passed to all services
 	// so prompts remain byte-identical to the pre-change baseline (fail-soft).
 	var skillProvider discipline.SkillProvider
+	var skillSvc *skillapp.Service
 	if cfg.SkillsEnabled {
 		skillMatcher := pg.NewPGSkillMatcher(pool, skillRepo)
 		skillProvider = pg.NewSkillProvider(skillMatcher)
+		skillSvc = skillapp.New(skillRepo, skillUsageRepo, clock)
 	}
 
 	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE
@@ -388,6 +391,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Metrics:            metrics,
 		AllowAnonLocalhost: effectiveAllowAnon,
 		IDGen:              idGen,
+		Skills:             skillSvc, // M2: skills write API (nil when SOPHIA_SKILLS_ENABLED=false)
 	}
 	if tracer.Enabled() {
 		routerDeps.Tracer = tracer.Tracer("sophia-orchestator/http")
