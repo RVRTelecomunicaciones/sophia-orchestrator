@@ -66,6 +66,11 @@ func (f *fakeSkillSvc) GetUsage(_ context.Context, _ string) ([]inbound.SkillUsa
 	return f.getUsageRows, f.getUsageErr
 }
 
+// GetSkill — not exercised by Group D tests; returns nil to satisfy SkillService.
+func (f *fakeSkillSvc) GetSkill(_ context.Context, _ string) (*inbound.GetSkillResult, error) {
+	return nil, nil
+}
+
 func skillSrv(t *testing.T, svc inbound.SkillService, rejectAuth bool) *httptest.Server {
 	t.Helper()
 	d := defaultDeps()
