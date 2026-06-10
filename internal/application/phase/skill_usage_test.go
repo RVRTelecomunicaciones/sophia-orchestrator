@@ -73,13 +73,12 @@ func (r *fakeSkillUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) ([]*s
 
 var _ outbound.SkillUsageRepository = (*fakeSkillUsageRepo)(nil)
 
-// fakeSkillProviderWithSkills implements discipline.SkillMatcher for usage-tracking tests.
-// Updated in M3 PR3a (K.4 GREEN): SkillsForPhase → SkillsForContext.
-type fakeSkillProviderWithSkills struct {
+// fakeSkillMatcherWithSkills implements discipline.SkillMatcher for usage-tracking tests.
+type fakeSkillMatcherWithSkills struct {
 	skills []*skdomain.Skill
 }
 
-func (f *fakeSkillProviderWithSkills) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+func (f *fakeSkillMatcherWithSkills) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
 	return f.skills, nil, nil
 }
 
@@ -107,7 +106,6 @@ func buildActiveSkill(t *testing.T) *skdomain.Skill {
 
 // newHarnessWithSkillsAndUsageRepo creates a harness wired with SkillMatcher
 // AND SkillUsageRepo so we can observe injection writes.
-// Updated in M3 PR3a (K.4 GREEN): SkillProvider → SkillMatcher.
 func newHarnessWithSkillsAndUsageRepo(t *testing.T, sp discipline.SkillMatcher, usageRepo outbound.SkillUsageRepository) *harness {
 	t.Helper()
 	h := newHarness(t)
@@ -143,7 +141,7 @@ func newHarnessWithSkillsAndUsageRepo(t *testing.T, sp discipline.SkillMatcher, 
 // outcome=pending for each injected skill.
 func TestRun_SkillUsage_RowWrittenOnInjection(t *testing.T) {
 	activeSkill := buildActiveSkill(t)
-	sp := &fakeSkillProviderWithSkills{skills: []*skdomain.Skill{activeSkill}}
+	sp := &fakeSkillMatcherWithSkills{skills: []*skdomain.Skill{activeSkill}}
 	usageRepo := &fakeSkillUsageRepo{}
 
 	h := newHarnessWithSkillsAndUsageRepo(t, sp, usageRepo)
@@ -173,7 +171,7 @@ func TestRun_SkillUsage_RowWrittenOnInjection(t *testing.T) {
 // to success.
 func TestRun_SkillUsage_OutcomeUpdatedOnDone(t *testing.T) {
 	activeSkill := buildActiveSkill(t)
-	sp := &fakeSkillProviderWithSkills{skills: []*skdomain.Skill{activeSkill}}
+	sp := &fakeSkillMatcherWithSkills{skills: []*skdomain.Skill{activeSkill}}
 	usageRepo := &fakeSkillUsageRepo{}
 
 	h := newHarnessWithSkillsAndUsageRepo(t, sp, usageRepo)
@@ -200,7 +198,7 @@ func TestRun_SkillUsage_OutcomeUpdatedOnDone(t *testing.T) {
 // When SkillUsageRepo is nil, phase must still run successfully (fail-soft).
 func TestRun_SkillUsage_NilRepo_PhaseRunsNormally(t *testing.T) {
 	activeSkill := buildActiveSkill(t)
-	sp := &fakeSkillProviderWithSkills{skills: []*skdomain.Skill{activeSkill}}
+	sp := &fakeSkillMatcherWithSkills{skills: []*skdomain.Skill{activeSkill}}
 
 	h := newHarnessWithSkillsAndUsageRepo(t, sp, nil)
 	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")

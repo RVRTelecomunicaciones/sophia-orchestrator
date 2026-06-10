@@ -38,7 +38,7 @@ var largePhaseRecordSlice = []string{
 	"discovery: golangci-lint v2.12 enforces wrapcheck on all error returns from outbound ports",
 }
 
-// largePhaseFixture is the pre-assembled RawMemoryBlob (equivalent of
+// largePhaseFixture is the pre-assembled PhaseIdentity string (equivalent of
 // the strings.Builder loop output that buildPriorContext produces).
 var largePhaseFixture = func() string {
 	var sb strings.Builder
@@ -67,7 +67,7 @@ var largeApplyFixture = func() string {
 // ---------------------------------------------------------------------------
 
 func BenchmarkPriorContext_Render_PhaseService(b *testing.B) {
-	pc := discipline.PriorContext{RawMemoryBlob: largePhaseFixture}
+	pc := discipline.PriorContext{PhaseIdentity: largePhaseFixture}
 	opts := discipline.RenderOpts{}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

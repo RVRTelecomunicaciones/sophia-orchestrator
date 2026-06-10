@@ -29,17 +29,6 @@ func TestRenderOpts_ZeroValue_IsNoOp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// B.2 — RawMemoryBlob-only path returns blob verbatim
-// ---------------------------------------------------------------------------
-
-func TestRender_RawMemoryBlob_Only(t *testing.T) {
-	pc := discipline.PriorContext{RawMemoryBlob: "x"}
-	got := pc.Render(discipline.RenderOpts{})
-	require.Equal(t, "x", got,
-		"RawMemoryBlob-only path must return the blob string byte-exact")
-}
-
-// ---------------------------------------------------------------------------
 // B.3 — PhaseIdentity-only path returns identity verbatim
 // ---------------------------------------------------------------------------
 
@@ -51,26 +40,12 @@ func TestRender_PhaseIdentity_Only(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// B.4 — Deterministic field order: PhaseIdentity first, then RawMemoryBlob
-// ---------------------------------------------------------------------------
-
-func TestRender_DeterministicOrder_PhaseIdentityBeforeRawBlob(t *testing.T) {
-	pc := discipline.PriorContext{
-		PhaseIdentity: "y",
-		RawMemoryBlob: "x",
-	}
-	got := pc.Render(discipline.RenderOpts{})
-	require.Equal(t, "yx", got,
-		"Render MUST emit PhaseIdentity first, then RawMemoryBlob (field order deterministic)")
-}
-
-// ---------------------------------------------------------------------------
 // B.5 — TokenBudget=0 is a no-op (same output as unlimited)
 // ---------------------------------------------------------------------------
 
 func TestRender_TokenBudget_Zero_IsNoOp(t *testing.T) {
 	control := "hello world"
-	pc := discipline.PriorContext{RawMemoryBlob: control}
+	pc := discipline.PriorContext{PhaseIdentity: control}
 	withZero := pc.Render(discipline.RenderOpts{TokenBudget: 0})
 	withUnlimited := pc.Render(discipline.RenderOpts{})
 	require.Equal(t, withUnlimited, withZero,
@@ -84,12 +59,16 @@ func TestRender_TokenBudget_Zero_IsNoOp(t *testing.T) {
 func TestRender_TokenBudget_Truncates(t *testing.T) {
 	// M3: enforceBudget truncates at the budget boundary and appends a
 	// truncation marker (deterministic text, no clock/random).
-	// raw_memory_blob has share 1.0 → alloc = budget = 5 bytes.
-	// "hello world" (11 bytes) → first 5 kept, marker appended.
-	pc := discipline.PriorContext{RawMemoryBlob: "hello world"}
-	got := pc.Render(discipline.RenderOpts{TokenBudget: 5})
-	require.True(t, strings.HasPrefix(got, "hello"),
-		"TokenBudget=5 must keep the first 5 bytes of output")
+	// skills layer has share 0.40 → with budget=25, alloc=10 bytes.
+	// content "hello world" (11 bytes) → first 10 kept, marker appended.
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			{Name: "s", Version: "v1", Status: "active", Source: "manual", Content: "hello world"},
+		},
+	}
+	got := pc.Render(discipline.RenderOpts{TokenBudget: 25})
+	require.Contains(t, got, "hello",
+		"truncated output must retain the start of skill content")
 	require.Contains(t, got, "truncated",
 		"TokenBudget truncation must append a truncation marker")
 }
@@ -129,7 +108,6 @@ func TestPriorContext_JSON_RoundTrip(t *testing.T) {
 		BusinessRules:   []discipline.RuleRef{{}},
 		Routines:        []discipline.RoutineOutput{{}},
 		AuxiliaryMemory: &discipline.AuxiliaryBlock{},
-		RawMemoryBlob:   "raw-blob",
 	}
 
 	data, err := json.Marshal(original)
@@ -139,7 +117,6 @@ func TestPriorContext_JSON_RoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &decoded), "PriorContext must be JSON-deserializable")
 
 	require.Equal(t, original.PhaseIdentity, decoded.PhaseIdentity)
-	require.Equal(t, original.RawMemoryBlob, decoded.RawMemoryBlob)
 	require.Equal(t, original.Skills, decoded.Skills)
 	require.Equal(t, original.Episodes, decoded.Episodes)
 	require.Equal(t, original.ChangeDigests, decoded.ChangeDigests)
@@ -266,7 +243,9 @@ func TestPriorContext_Render_Goldens(t *testing.T) {
 		pc   discipline.PriorContext
 		opts discipline.RenderOpts
 	}{
-		// --- C.3: 5 phase-service cases ---
+		// --- C.3: 5 phase-service cases (RawMemoryBlob retired in M3 PR3b;
+		//          memory content now lives in typed layers Episodes/ChangeDigests/
+		//          BusinessRules. Pass-through equivalence tested via PhaseIdentity.) ---
 		{
 			name: "phase_empty_memory_bundle",
 			pc:   discipline.PriorContext{},
@@ -274,17 +253,17 @@ func TestPriorContext_Render_Goldens(t *testing.T) {
 		},
 		{
 			name: "phase_single_memory_record",
-			pc:   discipline.PriorContext{RawMemoryBlob: snapshotRecord1 + "\n\n"},
+			pc:   discipline.PriorContext{PhaseIdentity: snapshotRecord1 + "\n\n"},
 			opts: discipline.RenderOpts{},
 		},
 		{
 			name: "phase_multi_memory_record",
-			pc:   discipline.PriorContext{RawMemoryBlob: snapshotMultiRecord()},
+			pc:   discipline.PriorContext{PhaseIdentity: snapshotMultiRecord()},
 			opts: discipline.RenderOpts{},
 		},
 		{
 			name: "phase_memory_with_unicode",
-			pc:   discipline.PriorContext{RawMemoryBlob: snapshotUnicode + "\n\n"},
+			pc:   discipline.PriorContext{PhaseIdentity: snapshotUnicode + "\n\n"},
 			opts: discipline.RenderOpts{},
 		},
 		{
@@ -379,7 +358,6 @@ func TestPriorContext_Render_Goldens(t *testing.T) {
 					{ID: "rule-01", Kind: "decision", Content: "Use pgx/v5."},
 				},
 				PhaseIdentity: "spec: defined Render contract\ndesign: layer-order canonical",
-				RawMemoryBlob: "legacy blob content",
 			},
 			opts: discipline.RenderOpts{},
 		},
@@ -548,7 +526,7 @@ func TestRender_GroupL_StructuralAssertions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRender_Deterministic(t *testing.T) {
-	pc := discipline.PriorContext{PhaseIdentity: "X", RawMemoryBlob: "Y"}
+	pc := discipline.PriorContext{PhaseIdentity: "X"}
 	first := pc.Render(discipline.RenderOpts{})
 	for i := 0; i < 100; i++ {
 		require.Equal(t, first, pc.Render(discipline.RenderOpts{}),

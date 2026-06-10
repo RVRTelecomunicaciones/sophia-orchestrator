@@ -1393,20 +1393,7 @@ func TestRun_RetryAfterNeedsContextBumpsAttempts(t *testing.T) {
 // Skill hydration fail-soft tests (Slice 2, task 2.4b)
 // ---------------------------------------------------------------------------
 
-// fakeSkillProvider implements discipline.SkillMatcher for service_test.go.
-// A nil err returns the configured skills; a non-nil err simulates DB failure.
-// Renamed from SkillsForPhase → SkillsForContext in M3 PR3a (K.4 GREEN).
-type fakeSkillProvider struct {
-	skills []*skdomain.Skill
-	err    error
-}
-
-func (f *fakeSkillProvider) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
-	return f.skills, nil, f.err
-}
-
 // newHarnessWithSkills creates a harness wired with the given SkillMatcher.
-// Updated in M3 PR3a (K.4) from SkillProvider → SkillMatcher.
 func newHarnessWithSkills(t *testing.T, sp discipline.SkillMatcher) *harness {
 	t.Helper()
 	h := newHarness(t)
@@ -1456,7 +1443,7 @@ func TestRun_Skills_NilProvider_PhaseRunsNormally(t *testing.T) {
 // TestRun_Skills_ProviderError_FailSoft verifies that when the SkillProvider
 // returns an error, the phase still runs (fail-soft) and "# Skill" is absent.
 func TestRun_Skills_ProviderError_FailSoft(t *testing.T) {
-	sp := &fakeSkillProvider{err: errors.New("db timeout")}
+	sp := &fakeSkillMatcher{err: errors.New("db timeout")}
 	h := newHarnessWithSkills(t, sp)
 	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
 	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
@@ -1471,7 +1458,7 @@ func TestRun_Skills_ProviderError_FailSoft(t *testing.T) {
 // TestRun_Skills_ProviderEmpty_FailSoft verifies that when the SkillProvider
 // returns an empty slice, the phase still runs (fail-soft) and "# Skill" is absent.
 func TestRun_Skills_ProviderEmpty_FailSoft(t *testing.T) {
-	sp := &fakeSkillProvider{skills: []*skdomain.Skill{}} // empty, no error
+	sp := &fakeSkillMatcher{skills: []*skdomain.Skill{}} // empty, no error
 	h := newHarnessWithSkills(t, sp)
 	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
 	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
@@ -1531,8 +1518,8 @@ func (m *spyMemory) Search(_ context.Context, q outbound.SearchQuery) (*outbound
 
 var _ outbound.MemoryClient = (*spyMemory)(nil)
 
-// fakeSkillMatcher implements discipline.SkillMatcher (replaces fakeSkillProvider
-// in K.4). Returns configured skills on every SkillsForContext call.
+// fakeSkillMatcher implements discipline.SkillMatcher for service_test.go.
+// Returns configured skills on every SkillsForContext call.
 type fakeSkillMatcher struct {
 	skills []*skdomain.Skill
 	err    error
@@ -1543,7 +1530,6 @@ func (f *fakeSkillMatcher) SkillsForContext(_ context.Context, _ discipline.Skil
 }
 
 // newHarnessWithMatcher creates a harness wired with the given SkillMatcher.
-// K.4: replaces newHarnessWithSkills which used SkillProvider.
 func newHarnessWithMatcher(t *testing.T, sm discipline.SkillMatcher) *harness {
 	t.Helper()
 	h := newHarness(t)
