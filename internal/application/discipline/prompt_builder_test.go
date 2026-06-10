@@ -393,64 +393,72 @@ func updateGolden() bool {
 	return os.Getenv("GOLDEN_UPDATE") == "1"
 }
 
-// makeTestSkill constructs a valid Skill for prompt rendering tests.
+// makeTestSkill constructs a valid active Skill for prompt rendering tests.
 // Uses a fixed SkillID so golden outputs are deterministic.
+// Status is StatusActive so renderSkills (which filters to active-only) renders it.
 func makeTestSkill(t *testing.T, name string, phases []phase.PhaseType, content string, techniques []skill.Technique) *skill.Skill {
 	t.Helper()
 	sid, err := ids.ParseSkillID("01ARZ3NDEKTSV4RRFFQ69G5SK1")
 	require.NoError(t, err)
-	s, err := skill.New(sid, name, phases, content, techniques, skill.LifecycleInput{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	s, err := skill.New(sid, name, phases, content, techniques,
+		skill.LifecycleInput{Status: skill.StatusActive, Version: "v1", RiskLevel: skill.RiskLow, ActivationSource: skill.SourceManual},
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	require.NoError(t, err)
 	return s
 }
 
 // ---------------------------------------------------------------------------
-// Task 2.4a: # Skill section renders correctly with skills present
+// M3 PR3a: Skills are now rendered inside PriorContext (D-M3-5).
+// The sibling # Skill section was removed from prompt_builder.
+// Tests verify that skills appear inside # Prior Context, not as a sibling section.
 // ---------------------------------------------------------------------------
 
-// TestPromptBuilder_SkillSection_RenderedAfterHardGateBeforePriorContext verifies
-// that when Skills is non-empty, a "# Skill" section is rendered AFTER
-// HARD-GATE Markers and BEFORE Prior Context.
-func TestPromptBuilder_SkillSection_RenderedAfterHardGateBeforePriorContext(t *testing.T) {
+// TestPromptBuilder_SkillsInPriorContext verifies that skills passed via the
+// PriorContext string appear inside the # Prior Context section, NOT as a
+// sibling # Skill section (D-M3-5).
+func TestPromptBuilder_SkillsInPriorContext(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
 	s := makeTestSkill(t, "apply-implement-safely",
 		[]phase.PhaseType{phase.PhaseApply},
 		"Use constitutional self-critique: after each change, ask yourself if the change is safe and reversible.\n\nWhy: apply agents tend to over-scope; this keeps changes minimal.",
 		[]skill.Technique{skill.TechniqueConstitutionalSelfCritique, skill.TechniqueInlineWhy},
 	)
+	// Simulate caller rendering skills into PriorContext.
+	rs := discipline.ToRenderedSkill(s)
+	pc := discipline.PriorContext{Skills: []discipline.RenderedSkill{rs}}
+	priorContextStr := pc.Render(discipline.RenderOpts{})
+
 	out, err := pb.Build(discipline.PromptInput{
 		Phase:           phase.PhaseApply,
 		ChangeName:      "feat-x",
 		Project:         "proj",
-		PriorContext:    "some prior ctx",
+		PriorContext:    priorContextStr,
 		TaskDescription: "apply the task",
-		Skills:          []*skill.Skill{s},
 	})
 	require.NoError(t, err)
 
-	// Presence checks.
-	require.Contains(t, out, "# Skill\n")
-	require.Contains(t, out, "## apply-implement-safely\n")
-	require.Contains(t, out, "Techniques: constitutional-self-critique, inline-why\n")
-	require.Contains(t, out, "Use constitutional self-critique:")
-	require.Contains(t, out, "Why: apply agents tend to over-scope")
+	// Skills appear inside # Prior Context, NOT as a sibling # Skill section.
+	require.NotContains(t, out, "# Skill\n",
+		"# Skill sibling section must NOT appear in M3 (skills move to PriorContext)")
+	require.Contains(t, out, "# Prior Context\n",
+		"# Prior Context section must be present")
+	// Skill content appears inside # Prior Context.
+	require.Contains(t, out, "apply-implement-safely",
+		"skill name must appear inside # Prior Context")
+	require.Contains(t, out, "Use constitutional self-critique:",
+		"skill content must appear inside # Prior Context")
 
-	// Order checks: HARD-GATE before # Skill before Prior Context.
+	// Order: HARD-GATE before Prior Context.
 	idxHardGate := strings.Index(out, "# HARD-GATE Markers")
-	idxSkill := strings.Index(out, "# Skill")
 	idxPriorCtx := strings.Index(out, "# Prior Context")
-
 	require.Greater(t, idxHardGate, -1, "HARD-GATE Markers section must be present")
-	require.Greater(t, idxSkill, -1, "# Skill section must be present")
 	require.Greater(t, idxPriorCtx, -1, "# Prior Context section must be present")
-
-	require.Less(t, idxHardGate, idxSkill, "# Skill must come AFTER HARD-GATE Markers")
-	require.Less(t, idxSkill, idxPriorCtx, "# Skill must come BEFORE Prior Context")
+	require.Less(t, idxHardGate, idxPriorCtx, "HARD-GATE must come BEFORE Prior Context")
 }
 
-// TestPromptBuilder_SkillSection_MultipleSkills verifies that multiple skills
-// are each rendered as their own "## <name>" sub-section.
-func TestPromptBuilder_SkillSection_MultipleSkills(t *testing.T) {
+// TestPromptBuilder_MultipleSkillsInPriorContext verifies multiple skills render
+// correctly inside PriorContext.
+func TestPromptBuilder_MultipleSkillsInPriorContext(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
 	s1 := makeTestSkill(t, "skill-one",
 		[]phase.PhaseType{phase.PhaseApply},
@@ -462,29 +470,35 @@ func TestPromptBuilder_SkillSection_MultipleSkills(t *testing.T) {
 		[]phase.PhaseType{phase.PhaseApply},
 		"Skill two content.",
 		[]skill.Technique{skill.TechniqueChainOfVerification},
-		skill.LifecycleInput{},
+		skill.LifecycleInput{Status: skill.StatusActive, Version: "v1", RiskLevel: skill.RiskLow, ActivationSource: skill.SourceManual},
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	)
 	require.NoError(t, err)
+
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			discipline.ToRenderedSkill(s1),
+			discipline.ToRenderedSkill(s2),
+		},
+	}
 
 	out, err := pb.Build(discipline.PromptInput{
 		Phase:           phase.PhaseApply,
 		ChangeName:      "feat-x",
 		Project:         "proj",
 		TaskDescription: "apply",
-		Skills:          []*skill.Skill{s1, s2},
+		PriorContext:    pc.Render(discipline.RenderOpts{}),
 	})
 	require.NoError(t, err)
-	require.Contains(t, out, "## skill-one\n")
-	require.Contains(t, out, "## skill-two\n")
-	require.Contains(t, out, "Techniques: constitutional-self-critique\n")
-	require.Contains(t, out, "Techniques: chain-of-verification\n")
+	require.Contains(t, out, "skill-one", "skill-one must appear in Prior Context")
+	require.Contains(t, out, "skill-two", "skill-two must appear in Prior Context")
+	require.Contains(t, out, "Skill one content.", "skill content must be verbatim")
+	require.Contains(t, out, "Skill two content.", "skill content must be verbatim")
 }
 
-// TestPromptBuilder_SkillSection_ContentVerbatim verifies that the content
-// field is rendered verbatim (including newlines and inline-why clauses) without
-// any modification.
-func TestPromptBuilder_SkillSection_ContentVerbatim(t *testing.T) {
+// TestPromptBuilder_SkillContentVerbatimInPriorContext verifies that skill content
+// is rendered verbatim (including newlines) when rendered through PriorContext.
+func TestPromptBuilder_SkillContentVerbatimInPriorContext(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
 	verbatimContent := "Line 1.\nLine 2.\n\nWhy: Because reasons.\n\nLine 4."
 	s := makeTestSkill(t, "verbatim-skill",
@@ -492,12 +506,13 @@ func TestPromptBuilder_SkillSection_ContentVerbatim(t *testing.T) {
 		verbatimContent,
 		[]skill.Technique{skill.TechniqueSkeletonOfThought},
 	)
+	pc := discipline.PriorContext{Skills: []discipline.RenderedSkill{discipline.ToRenderedSkill(s)}}
 	out, err := pb.Build(discipline.PromptInput{
 		Phase:           phase.PhaseSpec,
 		ChangeName:      "x",
 		Project:         "y",
 		TaskDescription: "spec task",
-		Skills:          []*skill.Skill{s},
+		PriorContext:    pc.Render(discipline.RenderOpts{}),
 	})
 	require.NoError(t, err)
 	require.Contains(t, out, verbatimContent,
@@ -508,14 +523,13 @@ func TestPromptBuilder_SkillSection_ContentVerbatim(t *testing.T) {
 // Task 2.4b: empty/nil skills → byte-identical to pre-change baseline
 // ---------------------------------------------------------------------------
 
-// TestPromptBuilder_NilSkills_ByteIdentical is the GOLDEN backward-compat test.
-// It generates the prompt TWICE — once without Skills (nil) and once with
-// Skills explicitly set to an empty slice — and verifies both are byte-identical
-// to each other AND to a saved golden file.
+// TestPromptBuilder_NoPriorContext_ByteIdentical verifies that a prompt built
+// with no PriorContext (empty string) matches the stored baseline golden.
+// In M3 PR3a, Skills were removed from PromptInput (D-M3-5); the baseline
+// golden now represents a prompt with no prior context at all.
 //
-// Pass GOLDEN_UPDATE=1 to regenerate the golden file when the prompt template
-// itself changes (not due to skills logic).
-func TestPromptBuilder_NilSkills_ByteIdentical(t *testing.T) {
+// Pass GOLDEN_UPDATE=1 to regenerate.
+func TestPromptBuilder_NoPriorContext_ByteIdentical(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
 	input := discipline.PromptInput{
 		Phase:           phase.PhaseApply,
@@ -523,30 +537,21 @@ func TestPromptBuilder_NilSkills_ByteIdentical(t *testing.T) {
 		Project:         "test-proj",
 		PriorContext:    "prior ctx text",
 		TaskDescription: "do the apply task",
-		// Skills intentionally nil
 	}
 
-	outNil, err := pb.Build(input)
+	out, err := pb.Build(input)
 	require.NoError(t, err)
-
-	inputEmpty := input
-	inputEmpty.Skills = []*skill.Skill{} // explicitly empty, not nil
-	outEmpty, err := pb.Build(inputEmpty)
-	require.NoError(t, err)
-
-	require.Equal(t, outNil, outEmpty,
-		"nil and empty Skills must produce byte-identical prompts — fail-soft contract")
 
 	// Golden file check.
 	const goldenName = "apply_no_skills_baseline.golden"
 	if updateGolden() {
-		writeGolden(t, goldenName, outNil)
+		writeGolden(t, goldenName, out)
 		t.Logf("golden file updated: testdata/%s", goldenName)
 		return
 	}
 	golden := readGolden(t, goldenName)
-	require.Equal(t, golden, outNil,
-		"nil Skills prompt must be byte-identical to the pre-change baseline golden")
+	require.Equal(t, golden, out,
+		"prompt with no prior context must be byte-identical to the baseline golden")
 }
 
 // TestPromptBuilder_EmptySkillsAllPhases_NeverAddsSkillSection verifies that
@@ -569,23 +574,26 @@ func TestPromptBuilder_EmptySkillsAllPhases_NeverAddsSkillSection(t *testing.T) 
 	}
 }
 
-// TestPromptBuilder_WithSkills_GoldenMatch verifies the rendered skill section
-// matches a stored golden file so regressions in formatting are caught.
-// Pass GOLDEN_UPDATE=1 to regenerate.
-func TestPromptBuilder_WithSkills_GoldenMatch(t *testing.T) {
+// TestPromptBuilder_WithSkillsInPriorContext_GoldenMatch verifies the rendered
+// prompt (with skills injected via PriorContext) matches a stored golden file.
+// In M3 PR3a, skills moved from PromptInput.Skills (deleted) into PriorContext
+// via PriorContext.Skills → Render (D-M3-5). Pass GOLDEN_UPDATE=1 to regenerate.
+func TestPromptBuilder_WithSkillsInPriorContext_GoldenMatch(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
 	s := makeTestSkill(t, "apply-implement-safely",
 		[]phase.PhaseType{phase.PhaseApply},
 		"Use constitutional self-critique after each change.\n\nWhy: Keeps changes minimal and reversible.",
 		[]skill.Technique{skill.TechniqueConstitutionalSelfCritique, skill.TechniqueInlineWhy},
 	)
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{discipline.ToRenderedSkill(s)},
+	}
 	out, err := pb.Build(discipline.PromptInput{
 		Phase:           phase.PhaseApply,
 		ChangeName:      "test-change",
 		Project:         "test-proj",
-		PriorContext:    "prior ctx text",
+		PriorContext:    pc.Render(discipline.RenderOpts{}),
 		TaskDescription: "do the apply task",
-		Skills:          []*skill.Skill{s},
 	})
 	require.NoError(t, err)
 
@@ -597,12 +605,12 @@ func TestPromptBuilder_WithSkills_GoldenMatch(t *testing.T) {
 	}
 	golden := readGolden(t, goldenName)
 	require.Equal(t, golden, out,
-		"prompt with skills must match the stored golden file")
+		"prompt with skills in PriorContext must match the stored golden file")
 }
 
 // TestPromptBuilder_Build_IsPure verifies that Build does not call any external
-// dependency — it only reads PromptInput.Skills and produces a deterministic
-// string. The same input always produces the same output.
+// dependency and produces a deterministic string. The same input always produces
+// the same output. Skills are passed via PriorContext (D-M3-5).
 func TestPromptBuilder_Build_IsPure(t *testing.T) {
 	pb := discipline.NewPromptBuilder()
 	s := makeTestSkill(t, "s1",
@@ -610,12 +618,13 @@ func TestPromptBuilder_Build_IsPure(t *testing.T) {
 		"content",
 		[]skill.Technique{skill.TechniqueStepBack},
 	)
+	pc := discipline.PriorContext{Skills: []discipline.RenderedSkill{discipline.ToRenderedSkill(s)}}
 	input := discipline.PromptInput{
 		Phase:           phase.PhaseSpec,
 		ChangeName:      "feat-x",
 		Project:         "proj",
 		TaskDescription: "spec",
-		Skills:          []*skill.Skill{s},
+		PriorContext:    pc.Render(discipline.RenderOpts{}),
 	}
 	out1, err1 := pb.Build(input)
 	out2, err2 := pb.Build(input)

@@ -29,6 +29,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	initdetector "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
@@ -118,12 +119,14 @@ type Deps struct {
 	// fallback).
 	ApplyExecutor ApplyExecutor
 
-	// Skills is the optional SkillProvider used to hydrate phase prompts
-	// with runtime skill-guidance units. nil or a no-op provider is
+	// Skills is the optional SkillMatcher used to hydrate phase prompts
+	// with runtime skill-guidance units. nil or a no-op matcher is
 	// safe: the prompt is left unchanged (byte-identical to pre-change
-	// baseline). When SOPHIA_SKILLS_ENABLED=false or the provider errors,
+	// baseline). When SOPHIA_SKILLS_ENABLED=false or the matcher errors,
 	// the service passes nil Skills to PromptBuilder (fail-soft).
-	Skills discipline.SkillProvider
+	// M3 D-M3-5: migrated from SkillProvider to SkillMatcher so the callsite
+	// can pass StructuralContext for structural filtering (PR3a).
+	Skills discipline.SkillMatcher
 
 	// SkillUsageRepo is the optional repository for recording skill injection
 	// events (migration 011). nil means "no tracking" and is safe: every
@@ -417,16 +420,34 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	// Spec #51: pass the orchestrator-verified prior-phase status map so
 	// the LLM sees factual evidence instead of having to search for it.
 	testsRequired := parseScopeTestsRequired(in.ContextOverrides)
-	priorCtx := s.buildPriorContext(ctx, c)
 
-	// Hydrate skills fail-soft: if provider is nil, flag off, returns empty,
-	// or errors → pass nil Skills so the prompt is unchanged (byte-identical).
+	// Build the enriched PriorContext (D-M3-5/6). StructuralContext is already
+	// fetched inside buildPriorContext so we can reuse it for SkillsForContext.
+	pc := s.buildPriorContext(ctx, c)
+
+	// Hydrate skills fail-soft: if matcher is nil, flag off, returns empty,
+	// or errors → Skills stays nil so prompt is unchanged (byte-identical).
+	// K.6: callsite migrated from SkillsForPhase → SkillsForContext (D-M3-9).
 	var phaseSkills []*skdomain.Skill
 	if s.d.Skills != nil {
-		if sk, skErr := s.d.Skills.SkillsForPhase(ctx, p.Type()); skErr == nil && len(sk) > 0 {
+		if sk, _, skErr := s.d.Skills.SkillsForContext(ctx, discipline.SkillQuery{
+			Phase:             p.Type(),
+			ProjectID:         c.Project(),
+			StructuralContext:  pc.StructuralCtx,
+		}); skErr == nil && len(sk) > 0 {
 			phaseSkills = sk
 		}
 		// skErr != nil or empty slice → phaseSkills stays nil (fail-soft)
+	}
+
+	// Map domain skills into RenderedSkill and attach to PriorContext (D-M3-5).
+	// recordSkillUsageInjection runs on the raw []*skill.Skill BEFORE the map.
+	if len(phaseSkills) > 0 {
+		rendered := make([]discipline.RenderedSkill, 0, len(phaseSkills))
+		for _, sk := range phaseSkills {
+			rendered = append(rendered, discipline.ToRenderedSkill(sk))
+		}
+		pc.Skills = rendered
 	}
 
 	// Record skill_usage rows at injection time (D-M2-2). Fail-soft: repo
@@ -455,11 +476,10 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		Phase:             p.Type(),
 		ChangeName:        c.Name(),
 		Project:           c.Project(),
-		PriorContext:      priorCtx,
+		PriorContext:      pc.Render(discipline.RenderOpts{}),
 		TaskDescription:   in.TaskDescription,
 		TestsRequired:     testsRequired,
 		PriorPhasesStatus: phasesPredicateToStatusMap(prior),
-		Skills:            phaseSkills,
 	})
 	if err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("prompt build: %v", err))
@@ -1012,39 +1032,91 @@ func (s *Service) loadPriorPhases(ctx context.Context, changeID ids.ChangeID) (m
 	return out, nil
 }
 
-func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) string {
+// buildPriorContext assembles a *discipline.PriorContext from the memory-engine
+// for the given change. It decomposes the BuildContext bundle into typed layers
+// (D-M3-6), fetches change digests via a dedicated Search call (DG-1), and
+// fetches the StructuralContext for structural skill filtering (D-M3-3).
+//
+// Returns an empty PriorContext on any error (fail-soft — enrichment is
+// best-effort; the phase must still run even if memory is unavailable).
+func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) discipline.PriorContext {
+	scope := outbound.MemoryScope{
+		ProjectID: c.Project(),
+		TenantID:  s.d.Config.MemoryTenantID,
+	}
+
+	// Round-trip 1: BuildContext — decisions, heuristics, recent_episodic.
+	// D-M3-6: set Query = c.Name() so FTS populates recent_episodic. Without
+	// a Query the ME context_builder skips FTS entirely.
 	bundle, err := s.d.Memory.BuildContext(ctx, outbound.ContextRequest{
-		Scope: outbound.MemoryScope{
-			ProjectID: c.Project(),
-			// Tenant binding mirrors persistArtifactsToMemory — without
-			// it the auth scope check filters out everything the API
-			// key actually owns.
-			TenantID: s.d.Config.MemoryTenantID,
-			// AgentID + SessionID are intentionally omitted from the
-			// BuildContext scope: heuristics and decisions are
-			// project-wide, not session-bound. memory-engine's
-			// retrieval filter narrows on whatever scope fields are
-			// present, so passing session_id excludes any record not
-			// tagged with that exact session — which is true for ALL
-			// heuristics and decisions (they're created out-of-band
-			// of any single change). Pass only the project (+ tenant)
-			// so the BuildContext returns the project-wide knowledge
-			// the LLM should reason from.
-		},
+		Scope:     scope,
+		Query:     c.Name(),
 		MaxTokens: 4000,
 	})
-	if err != nil || bundle == nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, sec := range bundle.Sections {
-		for _, rec := range sec.Records {
-			sb.WriteString(rec.Content)
-			sb.WriteString("\n\n")
+
+	var episodes []discipline.EpisodeRef
+	var rules []discipline.RuleRef
+	if err == nil && bundle != nil {
+		for _, sec := range bundle.Sections {
+			for _, rec := range sec.Records {
+				switch sec.Type {
+				case "recent_episodic", "related":
+					episodes = append(episodes, discipline.EpisodeRef{
+						ID:      rec.ID,
+						Content: rec.Content,
+					})
+				case "decisions":
+					rules = append(rules, discipline.RuleRef{
+						ID:      rec.ID,
+						Kind:    "decision",
+						Content: rec.Content,
+					})
+				case "heuristics":
+					rules = append(rules, discipline.RuleRef{
+						ID:      rec.ID,
+						Kind:    "heuristic",
+						Content: rec.Content,
+					})
+				}
+			}
 		}
 	}
-	pc := discipline.PriorContext{RawMemoryBlob: sb.String()}
-	return pc.Render(discipline.RenderOpts{})
+
+	// Round-trip 2: dedicated Search for change digests (DG-1).
+	// SearchQuery.Types IS honoured by ME search (search.go:67).
+	// Limit:3 matches V4.1 §12.2 "digests top-3".
+	var digests []discipline.ChangeDigestRef
+	if sr, srErr := s.d.Memory.Search(ctx, outbound.SearchQuery{
+		Query:  c.Name(),
+		Scope:  scope,
+		Types:  []string{"semantic"},
+		Limit:  3,
+	}); srErr == nil && sr != nil {
+		for _, r := range sr.Results {
+			digests = append(digests, discipline.ChangeDigestRef{
+				ChangeID: r.ID,
+				Content:  r.Snippet,
+			})
+		}
+	}
+
+	// Round-trip 3: GetByTopicKey for StructuralContext (D-M3-3 / D-M3-9).
+	// Topic key is "sdd/<changeName>/init" per INIT persister (dual_persister.go:66).
+	// Nil-safe: absent or unmarshal-failed → structuralCtx = nil (fail-open).
+	var structuralCtx *structural.StructuralContext
+	if rec, recErr := s.d.Memory.GetByTopicKey(ctx, scope, "sdd/"+c.Name()+"/init"); recErr == nil && rec != nil && rec.Content != "" {
+		var sc structural.StructuralContext
+		if jsonErr := parseJSON(rec.Content, &sc); jsonErr == nil {
+			structuralCtx = &sc
+		}
+	}
+
+	return discipline.PriorContext{
+		StructuralCtx: structuralCtx,
+		Episodes:      episodes,
+		ChangeDigests: digests,
+		BusinessRules: rules,
+	}
 }
 
 func (s *Service) fallbackToMemory(ctx context.Context, c *change.Change, p *phase.Phase) []byte {
@@ -1346,4 +1418,10 @@ func skillUsageOutcomeFor(s envelope.Status) skillusage.Outcome {
 	default:
 		return skillusage.OutcomeFailure
 	}
+}
+
+// parseJSON is a thin wrapper around encoding/json.Unmarshal for service-internal
+// use. Lives here to keep buildPriorContext readable without importing json twice.
+func parseJSON(content string, v any) error {
+	return json.Unmarshal([]byte(content), v)
 }

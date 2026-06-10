@@ -235,14 +235,16 @@ func (m *fakeMemory) RecordRelation(_ context.Context, _ outbound.RecordRelation
 }
 
 type fakeDispatcher struct {
-	result *outbound.DispatchResult
-	err    error
+	result     *outbound.DispatchResult
+	err        error
+	lastPrompt string // captures the last Dispatch call's prompt (K.1 assertion)
 }
 
 func (d *fakeDispatcher) Provider() session.Provider          { return session.ProviderOpenCode }
 func (d *fakeDispatcher) SuggestedMaxConcurrent() int         { return 4 }
 func (d *fakeDispatcher) HealthCheck(_ context.Context) error { return nil }
-func (d *fakeDispatcher) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+func (d *fakeDispatcher) Dispatch(_ context.Context, req outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	d.lastPrompt = req.Prompt
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -1391,19 +1393,21 @@ func TestRun_RetryAfterNeedsContextBumpsAttempts(t *testing.T) {
 // Skill hydration fail-soft tests (Slice 2, task 2.4b)
 // ---------------------------------------------------------------------------
 
-// fakeSkillProvider is a programmable SkillProvider for service_test.go.
+// fakeSkillProvider implements discipline.SkillMatcher for service_test.go.
 // A nil err returns the configured skills; a non-nil err simulates DB failure.
+// Renamed from SkillsForPhase → SkillsForContext in M3 PR3a (K.4 GREEN).
 type fakeSkillProvider struct {
 	skills []*skdomain.Skill
 	err    error
 }
 
-func (f *fakeSkillProvider) SkillsForPhase(_ context.Context, _ phase.PhaseType) ([]*skdomain.Skill, error) {
-	return f.skills, f.err
+func (f *fakeSkillProvider) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+	return f.skills, nil, f.err
 }
 
-// newHarnessWithSkills creates a harness wired with the given SkillProvider.
-func newHarnessWithSkills(t *testing.T, sp discipline.SkillProvider) *harness {
+// newHarnessWithSkills creates a harness wired with the given SkillMatcher.
+// Updated in M3 PR3a (K.4) from SkillProvider → SkillMatcher.
+func newHarnessWithSkills(t *testing.T, sp discipline.SkillMatcher) *harness {
 	t.Helper()
 	h := newHarness(t)
 	cr := h.changeRepo
@@ -1477,6 +1481,249 @@ func TestRun_Skills_ProviderEmpty_FailSoft(t *testing.T) {
 	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
 	require.Equal(t, phase.PhaseStatusDone, stored.Status(),
 		"phase must complete normally when SkillProvider returns empty (fail-soft)")
+}
+
+// ---------------------------------------------------------------------------
+// Group K RED tests — buildPriorContext decomposition + SkillsForContext
+// migration (M3 PR3a)
+// ---------------------------------------------------------------------------
+
+// spyMemory implements outbound.MemoryClient and records BuildContext requests
+// and Search calls so tests can assert on them (K.2 / K.3).
+type spyMemory struct {
+	lastBuildContextReq outbound.ContextRequest
+	lastSearchQuery     outbound.SearchQuery
+	searchResults       *outbound.SearchResults
+	buildBundle         *outbound.ContextBundle
+	getErr              error
+	ingestErr           error
+}
+
+func (m *spyMemory) Ingest(_ context.Context, _ outbound.IngestMemoryInput) (*outbound.MemoryRecord, error) {
+	return nil, m.ingestErr
+}
+func (m *spyMemory) Get(_ context.Context, _ string) (*outbound.MemoryRecord, error) {
+	return nil, m.getErr
+}
+func (m *spyMemory) GetByTopicKey(_ context.Context, _ outbound.MemoryScope, _ string) (*outbound.MemoryRecord, error) {
+	return nil, m.getErr
+}
+func (m *spyMemory) Archive(_ context.Context, _, _, _ string) error { return nil }
+func (m *spyMemory) RecordDecision(_ context.Context, _ outbound.RecordDecisionInput) (*outbound.MemoryRecord, error) {
+	return nil, nil
+}
+func (m *spyMemory) RecordRelation(_ context.Context, _ outbound.RecordRelationInput) error {
+	return nil
+}
+
+func (m *spyMemory) BuildContext(_ context.Context, req outbound.ContextRequest) (*outbound.ContextBundle, error) {
+	m.lastBuildContextReq = req
+	if m.buildBundle != nil {
+		return m.buildBundle, nil
+	}
+	return nil, nil
+}
+
+func (m *spyMemory) Search(_ context.Context, q outbound.SearchQuery) (*outbound.SearchResults, error) {
+	m.lastSearchQuery = q
+	return m.searchResults, nil
+}
+
+var _ outbound.MemoryClient = (*spyMemory)(nil)
+
+// fakeSkillMatcher implements discipline.SkillMatcher (replaces fakeSkillProvider
+// in K.4). Returns configured skills on every SkillsForContext call.
+type fakeSkillMatcher struct {
+	skills []*skdomain.Skill
+	err    error
+}
+
+func (f *fakeSkillMatcher) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+	return f.skills, nil, f.err
+}
+
+// newHarnessWithMatcher creates a harness wired with the given SkillMatcher.
+// K.4: replaces newHarnessWithSkills which used SkillProvider.
+func newHarnessWithMatcher(t *testing.T, sm discipline.SkillMatcher) *harness {
+	t.Helper()
+	h := newHarness(t)
+
+	h.svc = appphase.New(appphase.Deps{
+		ChangeRepo:  h.changeRepo,
+		PhaseRepo:   h.phaseRepo,
+		SessionRepo: h.sessRepo,
+		Governance:  h.governance,
+		Memory:      h.memory,
+		Dispatcher:  h.dispatcher,
+		SpawnGov:    h.spawn,
+		Validator:   discipline.NewValidator(),
+		IronLaw:     discipline.NewIronLawChecker(),
+		Prompts:     discipline.NewPromptBuilder(),
+		Audit:       h.audit,
+		Events:      h.events,
+		Clock:       h.clock,
+		IDGen: shared.FixedIDGenerator([]string{
+			"01ARZ3NDEKTSV4RRFFQ69G5P01",
+			"01ARZ3NDEKTSV4RRFFQ69G5S01",
+		}),
+		Scheduler: appphase.SyncScheduler,
+		Skills:    sm,
+	})
+	return h
+}
+
+// newHarnessWithSpyMemory creates a harness using spyMemory instead of fakeMemory.
+func newHarnessWithSpyMemory(t *testing.T, spy *spyMemory) *harness {
+	t.Helper()
+	h := newHarness(t)
+	h.svc = appphase.New(appphase.Deps{
+		ChangeRepo:  h.changeRepo,
+		PhaseRepo:   h.phaseRepo,
+		SessionRepo: h.sessRepo,
+		Governance:  h.governance,
+		Memory:      spy,
+		Dispatcher:  h.dispatcher,
+		SpawnGov:    h.spawn,
+		Validator:   discipline.NewValidator(),
+		IronLaw:     discipline.NewIronLawChecker(),
+		Prompts:     discipline.NewPromptBuilder(),
+		Audit:       h.audit,
+		Events:      h.events,
+		Clock:       h.clock,
+		IDGen: shared.FixedIDGenerator([]string{
+			"01ARZ3NDEKTSV4RRFFQ69G5P01",
+			"01ARZ3NDEKTSV4RRFFQ69G5S01",
+		}),
+		Scheduler: appphase.SyncScheduler,
+	})
+	return h
+}
+
+// TestBuildPriorContext_Decompose verifies that when BuildContext returns
+// decisions/heuristics/recent_episodic sections, buildPriorContext maps
+// them into PriorContext.Rules and PriorContext.Episodes (K.1 RED).
+// This test validates the decomposition indirectly via the dispatched prompt:
+// since the Render output now includes typed content from those sections,
+// the prompt contains the mapped content.
+//
+// Note: buildPriorContext is unexported; we test its effects via Run.
+// The dispatched prompt is captured by the fakeDispatcher.
+func TestBuildPriorContext_Decompose(t *testing.T) {
+	spy := &spyMemory{
+		buildBundle: &outbound.ContextBundle{
+			Sections: []outbound.ContextSection{
+				{
+					Type: "decisions",
+					Records: []outbound.ContextRecord{
+						{ID: "mem-D01", Content: "decision: use hexagonal architecture"},
+					},
+				},
+				{
+					Type: "heuristics",
+					Records: []outbound.ContextRecord{
+						{ID: "mem-H01", Content: "heuristic: always freeze Clock in tests"},
+					},
+				},
+				{
+					Type: "recent_episodic",
+					Records: []outbound.ContextRecord{
+						{ID: "mem-E01", Content: "episode: fixed N+1 query in phase service"},
+					},
+				},
+			},
+		},
+		searchResults: &outbound.SearchResults{
+			Results: []outbound.SearchResult{
+				{ID: "mem-CD01", Snippet: "digest: priorcontext enrichment complete"},
+			},
+		},
+	}
+	h := newHarnessWithSpyMemory(t, spy)
+
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	_ = out
+
+	// K.1 assertion: decomposition populated typed layers.
+	// Decision and heuristic content must appear in the dispatched prompt.
+	require.NotEmpty(t, h.dispatcher.lastPrompt,
+		"dispatcher must have received a prompt")
+	require.Contains(t, h.dispatcher.lastPrompt, "decision: use hexagonal architecture",
+		"decisions layer must appear in prompt (decomposed into BusinessRules)")
+	require.Contains(t, h.dispatcher.lastPrompt, "heuristic: always freeze Clock",
+		"heuristics layer must appear in prompt (decomposed into BusinessRules)")
+	require.Contains(t, h.dispatcher.lastPrompt, "episode: fixed N+1 query",
+		"episodes layer must appear in prompt (decomposed into Episodes)")
+}
+
+// TestBuildPriorContext_QuerySetToChangeName verifies that BuildContext is
+// called with Query = c.Name() so recent_episodic records actually surface
+// (K.2 RED — currently no Query is passed).
+func TestBuildPriorContext_QuerySetToChangeName(t *testing.T) {
+	spy := &spyMemory{}
+	h := newHarnessWithSpyMemory(t, spy)
+
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	_, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+
+	// K.2: Query must be non-empty (set to change name) so FTS surfaces episodes.
+	require.NotEmpty(t, spy.lastBuildContextReq.Query,
+		"BuildContext must be called with a non-empty Query so recent_episodic populates (D-M3-6)")
+}
+
+// TestBuildPriorContext_DigestSearchCalled verifies that a dedicated
+// Memory.Search(Types:["semantic"], Limit:3) is called for change digests (K.3 RED).
+func TestBuildPriorContext_DigestSearchCalled(t *testing.T) {
+	spy := &spyMemory{}
+	h := newHarnessWithSpyMemory(t, spy)
+
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	_, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+
+	// K.3: Search must have been called with Types:["semantic"] for DG-1 digests.
+	require.NotEmpty(t, spy.lastSearchQuery.Types,
+		"Memory.Search must be called for DG-1 digest retrieval")
+	require.Contains(t, spy.lastSearchQuery.Types, "semantic",
+		"DG-1: Search must use Types:[semantic] to retrieve change digests")
+	require.LessOrEqual(t, spy.lastSearchQuery.Limit, 3,
+		"DG-1: Search Limit must be ≤ 3 (V4.1 §12.2 digests top-3)")
+}
+
+// TestRun_SkillMatcher_NilProvider_PhaseRunsNormally mirrors the SkillProvider
+// nil-safety test but for the new SkillMatcher interface (K.4).
+func TestRun_SkillMatcher_NilProvider_PhaseRunsNormally(t *testing.T) {
+	h := newHarnessWithMatcher(t, nil) // nil → flag off
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
+	require.Equal(t, phase.PhaseStatusDone, stored.Status(),
+		"phase must complete normally when SkillMatcher is nil")
+}
+
+// TestRun_SkillMatcher_Error_FailSoft verifies fail-soft when SkillMatcher errors.
+func TestRun_SkillMatcher_Error_FailSoft(t *testing.T) {
+	sm := &fakeSkillMatcher{err: errors.New("db timeout")}
+	h := newHarnessWithMatcher(t, sm)
+	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
+	out, err := h.svc.Run(context.Background(), inbound.RunPhaseInput{
+		ChangeID: cid, PhaseType: phase.PhaseSpec,
+	})
+	require.NoError(t, err)
+	stored, _ := h.phaseRepo.FindByID(context.Background(), out.PhaseID)
+	require.Equal(t, phase.PhaseStatusDone, stored.Status(),
+		"phase must complete normally even when SkillMatcher errors (fail-soft)")
 }
 
 // --- Spec #46 tests_required from ContextOverrides ---

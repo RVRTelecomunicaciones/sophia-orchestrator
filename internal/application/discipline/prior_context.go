@@ -141,9 +141,11 @@ type layerBlock struct {
 	body string
 }
 
-// toRenderedSkill maps a domain skill.Skill to a RenderedSkill for PriorContext
+// ToRenderedSkill maps a domain skill.Skill to a RenderedSkill for PriorContext
 // injection (D-M3-5). Pure function: no I/O, no side effects.
-func toRenderedSkill(s *skill.Skill) RenderedSkill {
+// Exported so callsites (phase/service.go, apply/teamlead.go) can map matched
+// skills into PriorContext.Skills before calling Render.
+func ToRenderedSkill(s *skill.Skill) RenderedSkill {
 	return RenderedSkill{
 		Name:       s.Name(),
 		Version:    s.Version(),

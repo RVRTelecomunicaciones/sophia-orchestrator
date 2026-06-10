@@ -2577,14 +2577,15 @@ func TestBreaker_DefaultThreshold_IsThree(t *testing.T) {
 // Skill hydration fail-soft tests in apply.RunService (Slice 2, task 2.4b)
 // ---------------------------------------------------------------------------
 
-// fakeApplySkillProvider is a simple SkillProvider fake for apply run_test.go.
+// fakeApplySkillProvider implements discipline.SkillMatcher for apply run_test.go.
+// Updated in M3 PR3a (K.4 GREEN): SkillsForPhase → SkillsForContext.
 type fakeApplySkillProvider struct {
 	skills []*skdomain.Skill
 	err    error
 }
 
-func (f *fakeApplySkillProvider) SkillsForPhase(_ context.Context, _ phase.PhaseType) ([]*skdomain.Skill, error) {
-	return f.skills, f.err
+func (f *fakeApplySkillProvider) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+	return f.skills, nil, f.err
 }
 
 // TestExecute_Skills_NilProvider_PhaseRunsNormally verifies that when the Skills

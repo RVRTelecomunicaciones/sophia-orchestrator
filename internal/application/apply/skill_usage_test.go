@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/apply"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
@@ -54,13 +55,14 @@ func (r *applyFakeSkillUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) 
 
 var _ outbound.SkillUsageRepository = (*applyFakeSkillUsageRepo)(nil)
 
-// applyFakeSkillProvider returns one active apply skill.
+// applyFakeSkillProvider implements discipline.SkillMatcher for apply skill_usage_test.go.
+// Updated in M3 PR3a (K.4 GREEN): SkillsForPhase → SkillsForContext.
 type applyFakeSkillProvider struct {
 	skills []*skdomain.Skill
 }
 
-func (f *applyFakeSkillProvider) SkillsForPhase(_ context.Context, _ phase.PhaseType) ([]*skdomain.Skill, error) {
-	return f.skills, nil
+func (f *applyFakeSkillProvider) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+	return f.skills, nil, nil
 }
 
 // buildApplyActiveSkill creates an active apply-phase skill.
