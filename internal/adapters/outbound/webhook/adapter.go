@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -73,8 +74,10 @@ func (a *Adapter) Notify(_ context.Context, payload PhaseArchivedWebhookPayload)
 	}
 
 	// Copy payload to avoid data races in the goroutine closure.
+	// context.Background is intentional: fire-and-forget delivery must not be
+	// cancelled by the caller's request context. gosec G118 suppressed.
 	p := payload
-	go a.post(p)
+	go a.post(p) //nolint:gosec // G118: fire-and-forget delivery must not be cancelled by caller context
 }
 
 // post performs the synchronous HTTP POST. Called inside a goroutine by Notify.
@@ -110,7 +113,13 @@ func (a *Adapter) post(payload PhaseArchivedWebhookPayload) {
 		)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Drain before close to enable connection reuse; ignore read error.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("webhook: close response body", slog.String("error", err.Error()))
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slog.Warn("webhook: non-2xx response",

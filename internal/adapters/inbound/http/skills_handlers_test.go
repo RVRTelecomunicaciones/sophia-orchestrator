@@ -39,10 +39,9 @@ type fakeSkillSvc struct {
 	patchMetricsDelta  inbound.MetricsDelta
 
 	// PatchStatus control
-	patchStatusErr     error
-	patchStatusCalled  bool
-	patchStatusStatus  string
-	lastValidatedAtSet bool
+	patchStatusErr    error
+	patchStatusCalled bool
+	patchStatusStatus string
 
 	// GetUsage control
 	getUsageRows []inbound.SkillUsageRow

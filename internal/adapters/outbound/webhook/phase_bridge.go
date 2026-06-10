@@ -7,7 +7,7 @@ import (
 )
 
 // PhaseBridge wraps Adapter and implements phase.WebhookNotifier.
-// It converts phase.PhaseArchivedWebhookPayload → webhook.PhaseArchivedWebhookPayload,
+// It converts phase.ArchivedWebhookPayload → webhook.PhaseArchivedWebhookPayload,
 // keeping the adapter layer free of application-layer type dependencies.
 type PhaseBridge struct {
 	adapter *Adapter
@@ -19,7 +19,7 @@ func NewPhaseBridge(a *Adapter) *PhaseBridge {
 }
 
 // Notify implements phase.WebhookNotifier by bridging the payload types.
-func (b *PhaseBridge) Notify(ctx context.Context, p phaseapp.PhaseArchivedWebhookPayload) {
+func (b *PhaseBridge) Notify(ctx context.Context, p phaseapp.ArchivedWebhookPayload) {
 	b.adapter.Notify(ctx, PhaseArchivedWebhookPayload{
 		ChangeID:   p.ChangeID,
 		ChangeName: p.ChangeName,

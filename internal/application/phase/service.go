@@ -131,7 +131,7 @@ type Deps struct {
 	SkillUsageRepo outbound.SkillUsageRepository
 
 	// WebhookNotifier is the optional outbound webhook adapter that posts a
-	// PhaseArchivedWebhookPayload to memory-engine after phase.archived is
+	// ArchivedWebhookPayload to memory-engine after phase.archived is
 	// published (D-M2-1). nil = disabled; the callsite is nil-tolerant.
 	WebhookNotifier WebhookNotifier
 
@@ -177,11 +177,11 @@ type SpawnGovernor interface {
 	Release(ctx context.Context) error
 }
 
-// PhaseArchivedWebhookPayload is the outbound body for the memory-engine
+// ArchivedWebhookPayload is the outbound body for the memory-engine
 // POST /api/v1/worker/phase-archived endpoint (D-M2-1).
 // This struct mirrors webhook.PhaseArchivedWebhookPayload — it is redeclared
 // here to keep the domain/application layer free of adapter imports.
-type PhaseArchivedWebhookPayload struct {
+type ArchivedWebhookPayload struct {
 	ChangeID   string    `json:"change_id"`
 	ChangeName string    `json:"change_name"`
 	PhaseType  string    `json:"phase_type"`
@@ -192,7 +192,7 @@ type PhaseArchivedWebhookPayload struct {
 // notification to memory-engine. Implementations must be nil-safe callers can
 // skip the nil check at callsites.
 type WebhookNotifier interface {
-	Notify(ctx context.Context, payload PhaseArchivedWebhookPayload)
+	Notify(ctx context.Context, payload ArchivedWebhookPayload)
 }
 
 // Service implements inbound.PhaseService.
@@ -1090,7 +1090,7 @@ func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed
 				// Fire-and-forget webhook to memory-engine after publishEvent succeeds
 				// (D-M2-1 / D-M2-14). Non-nil guard: adapter may be disabled.
 				if s.d.WebhookNotifier != nil {
-					s.d.WebhookNotifier.Notify(ctx, PhaseArchivedWebhookPayload{
+					s.d.WebhookNotifier.Notify(ctx, ArchivedWebhookPayload{
 						ChangeID:   c.ID().String(),
 						ChangeName: c.Name(),
 						PhaseType:  string(phase.PhaseArchive),
