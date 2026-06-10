@@ -1,6 +1,10 @@
 package discipline
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
+)
 
 // PriorContext is the structured assembly of prior-context content fed to
 // LLM phase prompts. M0.5 introduces this struct as a refactor of inline
@@ -20,9 +24,11 @@ type PriorContext struct {
 	// Empty in M0.5.
 	Skills []RenderedSkill
 
-	// StructuralCtx is the M3 wiring point for StructuralContext.
-	// Always nil in M0.5 (opaque marker per D-M05-2).
-	StructuralCtx *StructuralContextRef
+	// StructuralCtx carries the detected structural context for this change.
+	// Populated by the phase-service callsite from the INIT structural record.
+	// Nil when INIT-0 has not run or structural data is unavailable — the
+	// structural filter and Render layer are skipped in that case (fail-open).
+	StructuralCtx *structural.StructuralContext
 
 	// Episodes holds relevant episodic memories. M3 populates this field.
 	// Empty in M0.5.
@@ -57,11 +63,6 @@ type PriorContext struct {
 // RenderedSkill is a forward-compat stub for M3 skill rendering integration.
 // Concrete shape chosen in M3.
 type RenderedSkill struct{}
-
-// StructuralContextRef is an opaque marker for M3 StructuralContext wiring.
-// Concrete shape chosen in M3 (interface vs domain type — see explore §4).
-// Zero-size, zero-cost. M3 redefines or renames to the chosen concrete type.
-type StructuralContextRef struct{}
 
 // EpisodeRef is a forward-compat stub for M3 episodic memory integration.
 // Empty struct = zero-cost anchor. M3 populates with concrete episodic shape.

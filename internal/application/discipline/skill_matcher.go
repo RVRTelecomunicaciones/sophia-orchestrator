@@ -5,6 +5,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 )
 
 // SkillMatcher is the M1 application port for context-aware skill selection.
@@ -44,10 +45,11 @@ type SkillQuery struct {
 	// OR is the wildcard "*". Empty string disables the repo filter.
 	RepoID string
 
-	// StructuralContext is an opaque marker for M3 StructuralContext-aware
-	// filtering. Always nil in M1 (opaque per D-M1-7 / D-M05-2); the adapter
-	// MUST silently ignore this field until M3 wires it.
-	StructuralContext *StructuralContextRef
+	// StructuralContext carries the detected structural context for this change,
+	// used by the matcher to filter skills by applies_when.framework and
+	// applies_when.language (D-M3-3, D-M3-4). Nil = no structural filtering
+	// (fail-open: pre-INIT-0 or degraded INIT changes pass the structural gate).
+	StructuralContext *structural.StructuralContext
 
 	// FeatureType matches against skill.AppliesWhen.FeatureType inclusion list.
 	// Empty string disables the feature_type filter.
@@ -90,3 +92,9 @@ const SkipReasonStatusNotActive = "status_not_active"
 // SkipReasonRiskExceeded is returned when a skill's risk_level exceeds the
 // SkillQuery.MaxRiskLevel inclusive bound (M2 D-M2-13 fix W1).
 const SkipReasonRiskExceeded = "risk_exceeded"
+
+// SkipReasonStructuralMismatch is returned when a skill's applies_when
+// framework or language constraints do not match the live StructuralContext
+// carried on the query (M3 D-M3-4). Distinct from SkipReasonAppliesWhenFailed
+// so callers can distinguish feature_type/path skips from structural skips.
+const SkipReasonStructuralMismatch = "structural_mismatch"

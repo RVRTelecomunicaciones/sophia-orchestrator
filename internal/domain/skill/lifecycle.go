@@ -113,11 +113,19 @@ type Scope struct {
 // ── AppliesWhen ───────────────────────────────────────────────────────────────
 
 // AppliesWhen mirrors the JSONB applies_when column. M1 uses FeatureType +
-// TouchedPaths + ExcludePaths; M3 adds Framework + StateModel.
+// TouchedPaths + ExcludePaths; M3 adds Framework + Language (C-2).
 type AppliesWhen struct {
 	FeatureType  []string `json:"feature_type,omitempty"`
 	TouchedPaths []string `json:"touched_paths,omitempty"`
 	ExcludePaths []string `json:"exclude_paths,omitempty"`
+	// Framework lists the framework names this skill targets (e.g. "nextjs",
+	// "rails"). The matcher skips skills whose declared frameworks do not
+	// appear in the live StructuralContext.Frameworks list. Empty = unconstrained.
+	Framework []string `json:"framework,omitempty"`
+	// Language lists the programming language names this skill targets (e.g.
+	// "typescript", "go"). Matched case-insensitively against
+	// StructuralContext.Languages. Empty = unconstrained.
+	Language []string `json:"language,omitempty"`
 }
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
