@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skillusage"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -382,6 +384,9 @@ func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *chang
 	// Hydrate skills fail-soft: nil provider, empty result, or error → nil Skills.
 	phaseSkills := s.hydrateSkills(ctx, phase.PhaseApply)
 
+	// Record skill_usage rows at injection time (D-M2-2). Fail-soft.
+	s.recordSkillUsageInjection(ctx, c.ID(), p.Type(), phaseSkills)
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
 		ChangeName:        c.Name(),
@@ -480,6 +485,9 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 
 	// Hydrate skills fail-soft: nil provider, empty result, or error → nil Skills.
 	phaseSkills := s.hydrateSkills(ctx, phase.PhaseApply)
+
+	// Record skill_usage rows at injection time (D-M2-2). Fail-soft.
+	s.recordSkillUsageInjection(ctx, c.ID(), p.Type(), phaseSkills)
 
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
@@ -596,6 +604,28 @@ func (s *RunService) hydrateSkills(ctx context.Context, pt phase.PhaseType) []*s
 		return nil
 	}
 	return sk
+}
+
+// recordSkillUsageInjection writes skill_usage rows for each skill in skills.
+// Fail-soft: repo errors are logged at WARN level and do not affect the
+// dispatch path. Nil repo or empty skills are no-ops.
+func (s *RunService) recordSkillUsageInjection(ctx context.Context, changeID ids.ChangeID, phaseType phase.PhaseType, skills []*skdomain.Skill) {
+	if s.d.SkillUsageRepo == nil || len(skills) == 0 {
+		return
+	}
+	now := s.d.Clock.Now()
+	for _, sk := range skills {
+		usageIDStr := s.d.IDGen.NewID()
+		usageID, err := ids.ParseSkillUsageID(usageIDStr)
+		if err != nil {
+			continue
+		}
+		su := skillusage.New(usageID, changeID, string(phaseType), sk.ID(), sk.Version(), now)
+		if insertErr := s.d.SkillUsageRepo.Insert(ctx, su); insertErr != nil {
+			slog.Default().WarnContext(ctx, "apply: skill_usage insert failed; continuing",
+				"skill_id", sk.ID().String(), "error", insertErr)
+		}
+	}
 }
 
 func (s *RunService) makeSession(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Group, role session.AgentRole, command string) (*session.Session, error) {

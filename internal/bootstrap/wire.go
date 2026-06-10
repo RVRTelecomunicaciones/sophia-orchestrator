@@ -105,6 +105,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	auditLog := pg.NewAuditLog(pool)
 	spawnRepo := pg.NewSpawnGovernorRepo(pool)
 	skillRepo := pg.NewSkillRepo(pool)
+	skillUsageRepo := pg.NewSkillUsageRepo(pool)
 	_ = boardRepo // used by ApplyService below
 
 	// Outbound HTTP clients.
@@ -270,21 +271,22 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		applyRunCfg.QuotaBreakerThreshold = cfg.Apply.QuotaBreakerThreshold
 	}
 	applyExecutor := apply.NewRun(apply.RunDeps{
-		BoardRepo:   boardRepo,
-		SessionRepo: sessionRepo,
-		Runtime:     rtClient,
-		Dispatcher:  dispatcher,
-		SpawnGov:    spawnGov,
-		Validator:   validator,
-		Prompts:     prompts,
-		Audit:       auditLog,
-		Events:      events,
-		Memory:      memClient,
-		Clock:       clock,
-		IDGen:       idGen,
-		Config:      applyRunCfg,
-		Metrics:     metrics,
-		Skills:      skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
+		BoardRepo:      boardRepo,
+		SessionRepo:    sessionRepo,
+		Runtime:        rtClient,
+		Dispatcher:     dispatcher,
+		SpawnGov:       spawnGov,
+		Validator:      validator,
+		Prompts:        prompts,
+		Audit:          auditLog,
+		Events:         events,
+		Memory:         memClient,
+		Clock:          clock,
+		IDGen:          idGen,
+		Config:         applyRunCfg,
+		Metrics:        metrics,
+		Skills:         skillProvider,    // nil when SOPHIA_SKILLS_ENABLED=false
+		SkillUsageRepo: skillUsageRepo,   // M2: track skill injection events
 	})
 
 	// INIT phase wiring (design D-INIT-4, D-INIT-7 through D-INIT-11).
@@ -312,21 +314,21 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	})
 
 	phaseSvc := phase.New(phase.Deps{
-		ChangeRepo:  changeRepo,
-		PhaseRepo:   phaseRepo,
-		SessionRepo: sessionRepo,
-		Governance:  govClient,
-		Memory:      memClient,
-		Dispatcher:  dispatcher,
-		SpawnGov:    spawnGov,
-		Validator:   validator,
-		IronLaw:     ironLaw,
-		Prompts:     prompts,
-		Audit:       auditLog,
-		Events:      events,
-		Clock:       clock,
-		IDGen:       idGen,
-		Scheduler:   phase.AsyncScheduler,
+		ChangeRepo:     changeRepo,
+		PhaseRepo:      phaseRepo,
+		SessionRepo:    sessionRepo,
+		Governance:     govClient,
+		Memory:         memClient,
+		Dispatcher:     dispatcher,
+		SpawnGov:       spawnGov,
+		Validator:      validator,
+		IronLaw:        ironLaw,
+		Prompts:        prompts,
+		Audit:          auditLog,
+		Events:         events,
+		Clock:          clock,
+		IDGen:          idGen,
+		Scheduler:      phase.AsyncScheduler,
 		Config: func() phase.ServiceConfig {
 			c := phase.DefaultServiceConfig()
 			// Tenant binding for memory-engine ingest. Empty in
@@ -336,10 +338,11 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			c.MemoryTenantID = cfg.Memory.TenantID
 			return c
 		}(),
-		ApplyExecutor: applyExecutor,
-		Metrics:       metrics,
-		Skills:        skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
-		Init:          initSvc,       // INIT phase structural detection (D-INIT-3)
+		ApplyExecutor:  applyExecutor,
+		Metrics:        metrics,
+		Skills:         skillProvider,    // nil when SOPHIA_SKILLS_ENABLED=false
+		SkillUsageRepo: skillUsageRepo,   // M2: track skill injection events
+		Init:           initSvc,          // INIT phase structural detection (D-INIT-3)
 	})
 
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
