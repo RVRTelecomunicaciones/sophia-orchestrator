@@ -27,12 +27,14 @@ import (
 	graphifyadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/graphify"
 	httpbase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/memory"
+	webhookadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/webhook"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/pg"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/runtime"
 	gitrunneradapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/gitrunner"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
+	skillapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/eventstream"
 	initphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init"
 	initcache "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/cache"
@@ -105,6 +107,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	auditLog := pg.NewAuditLog(pool)
 	spawnRepo := pg.NewSpawnGovernorRepo(pool)
 	skillRepo := pg.NewSkillRepo(pool)
+	skillUsageRepo := pg.NewSkillUsageRepo(pool)
 	_ = boardRepo // used by ApplyService below
 
 	// Outbound HTTP clients.
@@ -210,9 +213,11 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	// When SOPHIA_SKILLS_ENABLED=false, a nil provider is passed to all services
 	// so prompts remain byte-identical to the pre-change baseline (fail-soft).
 	var skillProvider discipline.SkillProvider
+	var skillSvc *skillapp.Service
 	if cfg.SkillsEnabled {
 		skillMatcher := pg.NewPGSkillMatcher(pool, skillRepo)
 		skillProvider = pg.NewSkillProvider(skillMatcher)
+		skillSvc = skillapp.New(skillRepo, skillUsageRepo, clock)
 	}
 
 	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE
@@ -270,21 +275,22 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		applyRunCfg.QuotaBreakerThreshold = cfg.Apply.QuotaBreakerThreshold
 	}
 	applyExecutor := apply.NewRun(apply.RunDeps{
-		BoardRepo:   boardRepo,
-		SessionRepo: sessionRepo,
-		Runtime:     rtClient,
-		Dispatcher:  dispatcher,
-		SpawnGov:    spawnGov,
-		Validator:   validator,
-		Prompts:     prompts,
-		Audit:       auditLog,
-		Events:      events,
-		Memory:      memClient,
-		Clock:       clock,
-		IDGen:       idGen,
-		Config:      applyRunCfg,
-		Metrics:     metrics,
-		Skills:      skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
+		BoardRepo:      boardRepo,
+		SessionRepo:    sessionRepo,
+		Runtime:        rtClient,
+		Dispatcher:     dispatcher,
+		SpawnGov:       spawnGov,
+		Validator:      validator,
+		Prompts:        prompts,
+		Audit:          auditLog,
+		Events:         events,
+		Memory:         memClient,
+		Clock:          clock,
+		IDGen:          idGen,
+		Config:         applyRunCfg,
+		Metrics:        metrics,
+		Skills:         skillProvider,    // nil when SOPHIA_SKILLS_ENABLED=false
+		SkillUsageRepo: skillUsageRepo,   // M2: track skill injection events
 	})
 
 	// INIT phase wiring (design D-INIT-4, D-INIT-7 through D-INIT-11).
@@ -311,22 +317,34 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		CacheTTL:  24 * time.Hour,
 	})
 
+	// Memory-engine webhook bridge (M2 D-M2-1): fire-and-forget POST after phase.archived.
+	// nil when SOPHIA_MEMORY_WEBHOOK_URL is empty (adapter disabled).
+	var webhookNotifier phase.WebhookNotifier
+	if cfg.MemoryWebhook.URL != "" {
+		wh := webhookadapter.New(webhookadapter.Config{
+			URL:     cfg.MemoryWebhook.URL,
+			APIKey:  cfg.MemoryWebhook.APIKey,
+			Timeout: time.Duration(cfg.MemoryWebhook.TimeoutMS) * time.Millisecond,
+		})
+		webhookNotifier = webhookadapter.NewPhaseBridge(wh)
+	}
+
 	phaseSvc := phase.New(phase.Deps{
-		ChangeRepo:  changeRepo,
-		PhaseRepo:   phaseRepo,
-		SessionRepo: sessionRepo,
-		Governance:  govClient,
-		Memory:      memClient,
-		Dispatcher:  dispatcher,
-		SpawnGov:    spawnGov,
-		Validator:   validator,
-		IronLaw:     ironLaw,
-		Prompts:     prompts,
-		Audit:       auditLog,
-		Events:      events,
-		Clock:       clock,
-		IDGen:       idGen,
-		Scheduler:   phase.AsyncScheduler,
+		ChangeRepo:      changeRepo,
+		PhaseRepo:       phaseRepo,
+		SessionRepo:     sessionRepo,
+		Governance:      govClient,
+		Memory:          memClient,
+		Dispatcher:      dispatcher,
+		SpawnGov:        spawnGov,
+		Validator:       validator,
+		IronLaw:         ironLaw,
+		Prompts:         prompts,
+		Audit:           auditLog,
+		Events:          events,
+		Clock:           clock,
+		IDGen:           idGen,
+		Scheduler:       phase.AsyncScheduler,
 		Config: func() phase.ServiceConfig {
 			c := phase.DefaultServiceConfig()
 			// Tenant binding for memory-engine ingest. Empty in
@@ -336,10 +354,12 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			c.MemoryTenantID = cfg.Memory.TenantID
 			return c
 		}(),
-		ApplyExecutor: applyExecutor,
-		Metrics:       metrics,
-		Skills:        skillProvider, // nil when SOPHIA_SKILLS_ENABLED=false
-		Init:          initSvc,       // INIT phase structural detection (D-INIT-3)
+		ApplyExecutor:   applyExecutor,
+		Metrics:         metrics,
+		Skills:          skillProvider,    // nil when SOPHIA_SKILLS_ENABLED=false
+		SkillUsageRepo:  skillUsageRepo,   // M2: track skill injection events
+		WebhookNotifier: webhookNotifier,  // M2: fire-and-forget phase.archived (nil = disabled)
+		Init:            initSvc,          // INIT phase structural detection (D-INIT-3)
 	})
 
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
@@ -385,6 +405,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Metrics:            metrics,
 		AllowAnonLocalhost: effectiveAllowAnon,
 		IDGen:              idGen,
+		Skills:             skillSvc, // M2: skills write API (nil when SOPHIA_SKILLS_ENABLED=false)
 	}
 	if tracer.Enabled() {
 		routerDeps.Tracer = tracer.Tracer("sophia-orchestator/http")

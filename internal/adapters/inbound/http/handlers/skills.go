@@ -1,0 +1,185 @@
+package handlers
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+
+	skillapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
+)
+
+// SkillsHandler exposes the skills write API:
+//   - PATCH /api/v1/skills/{id}/metrics
+//   - PATCH /api/v1/skills/{id}/status
+//   - GET  /api/v1/skills/usage
+type SkillsHandler struct {
+	svc       inbound.SkillService
+	writeErr  func(http.ResponseWriter, error)
+	writeJSON func(http.ResponseWriter, int, any)
+}
+
+// NewSkillsHandler constructs a SkillsHandler.
+func NewSkillsHandler(svc inbound.SkillService, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any)) *SkillsHandler {
+	return &SkillsHandler{svc: svc, writeErr: writeErr, writeJSON: writeJSON}
+}
+
+// patchMetricsReq is the JSON body for PATCH /api/v1/skills/{id}/metrics.
+type patchMetricsReq struct {
+	SuccessDelta         int     `json:"success_delta"`
+	FailureDelta         int     `json:"failure_delta"`
+	TestsPassedDelta     int     `json:"tests_passed_delta"`
+	RollbackDelta        int     `json:"rollback_delta"`
+	DeprecatedAPIHitsDelta int   `json:"deprecated_api_hits_delta"`
+	UsageDelta           int     `json:"usage_delta"`
+	AvgRetryReduction    float64 `json:"avg_retry_reduction"`
+}
+
+// PatchMetrics handles PATCH /api/v1/skills/{id}/metrics.
+func (h *SkillsHandler) PatchMetrics(w http.ResponseWriter, r *http.Request) {
+	skillID := chi.URLParam(r, "skill_id")
+
+	var req patchMetricsReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	// Negative delta rejection per spec: HTTP 422.
+	if req.SuccessDelta < 0 || req.FailureDelta < 0 || req.TestsPassedDelta < 0 ||
+		req.RollbackDelta < 0 || req.DeprecatedAPIHitsDelta < 0 || req.UsageDelta < 0 {
+		h.writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "negative delta values are not allowed",
+			"code":  "negative_delta",
+		})
+		return
+	}
+
+	delta := inbound.MetricsDelta{
+		SuccessDelta:      req.SuccessDelta,
+		FailureDelta:      req.FailureDelta,
+		TestsPassedDelta:  req.TestsPassedDelta,
+		RollbackDelta:     req.RollbackDelta,
+		DeprecatedAPIHits: req.DeprecatedAPIHitsDelta,
+		UsageDelta:        req.UsageDelta,
+		AvgRetryReduction: req.AvgRetryReduction,
+	}
+
+	if err := h.svc.PatchMetrics(r.Context(), skillID, delta); err != nil {
+		if errors.Is(err, outbound.ErrNotFound) {
+			h.writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "skill not found",
+				"code":  "skill_not_found",
+			})
+			return
+		}
+		h.writeErr(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// patchStatusReq is the JSON body for PATCH /api/v1/skills/{id}/status.
+type patchStatusReq struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+// validStatusValues is the closed set of V4.1 §5.2 status values.
+var validStatusValues = map[string]bool{
+	"candidate":  true,
+	"validated":  true,
+	"active":     true,
+	"deprecated": true,
+	"blocked":    true,
+	"archived":   true,
+}
+
+// PatchStatus handles PATCH /api/v1/skills/{id}/status.
+func (h *SkillsHandler) PatchStatus(w http.ResponseWriter, r *http.Request) {
+	skillID := chi.URLParam(r, "skill_id")
+
+	var req patchStatusReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	// Enum validation at handler boundary — reject unknown values before service call.
+	if !validStatusValues[req.Status] {
+		h.writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "invalid status value",
+			"code":  "invalid_status",
+		})
+		return
+	}
+
+	if err := h.svc.PatchStatus(r.Context(), skillID, req.Status, req.Reason); err != nil {
+		if errors.Is(err, outbound.ErrNotFound) {
+			h.writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "skill not found",
+				"code":  "skill_not_found",
+			})
+			return
+		}
+		if errors.Is(err, skillapp.ErrForbiddenStatusTransition) {
+			h.writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": err.Error(),
+				"code":  "forbidden_transition",
+			})
+			return
+		}
+		h.writeErr(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// skillUsageRowDTO is the JSON shape for each row in GET /api/v1/skills/usage.
+type skillUsageRowDTO struct {
+	SkillUsageID string `json:"skill_usage_id"`
+	ChangeID     string `json:"change_id"`
+	PhaseType    string `json:"phase_type"`
+	SkillID      string `json:"skill_id"`
+	SkillVersion string `json:"skill_version"`
+	Outcome      string `json:"outcome"`
+	ApplyAttempts int   `json:"apply_attempts"`
+}
+
+// GetUsage handles GET /api/v1/skills/usage?change_id=...
+func (h *SkillsHandler) GetUsage(w http.ResponseWriter, r *http.Request) {
+	changeID := r.URL.Query().Get("change_id")
+	if changeID == "" {
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "change_id query parameter is required",
+			"code":  "missing_change_id",
+		})
+		return
+	}
+
+	rows, err := h.svc.GetUsage(r.Context(), changeID)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+
+	dtos := make([]skillUsageRowDTO, 0, len(rows))
+	for _, row := range rows {
+		dtos = append(dtos, skillUsageRowDTO{
+			SkillUsageID:  row.ID().String(),
+			ChangeID:      row.ChangeID().String(),
+			PhaseType:     row.PhaseType(),
+			SkillID:       row.SkillID().String(),
+			SkillVersion:  row.SkillVersion(),
+			Outcome:       row.Outcome().String(),
+			ApplyAttempts: row.ApplyAttempts,
+		})
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{"items": dtos})
+}

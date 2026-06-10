@@ -30,6 +30,8 @@ type (
 	WorktreeID struct{ raw string }
 	// SkillID identifies a Skill aggregate root.
 	SkillID struct{ raw string }
+	// SkillUsageID identifies a SkillUsage record.
+	SkillUsageID struct{ raw string }
 )
 
 func parseULID(raw string) (string, error) {
@@ -90,6 +92,12 @@ func ParseSkillID(raw string) (SkillID, error) {
 	return SkillID{r}, err
 }
 
+// ParseSkillUsageID validates and constructs a SkillUsageID.
+func ParseSkillUsageID(raw string) (SkillUsageID, error) {
+	r, err := parseULID(raw)
+	return SkillUsageID{r}, err
+}
+
 // String implementations for each ID type.
 func (i ChangeID) String() string   { return i.raw }
 func (i PhaseID) String() string    { return i.raw }
@@ -98,7 +106,8 @@ func (i GroupID) String() string    { return i.raw }
 func (i TaskID) String() string     { return i.raw }
 func (i SessionID) String() string  { return i.raw }
 func (i WorktreeID) String() string { return i.raw }
-func (i SkillID) String() string    { return i.raw }
+func (i SkillID) String() string      { return i.raw }
+func (i SkillUsageID) String() string { return i.raw }
 
 // IsZero reports whether the ID is the zero value.
 func (i ChangeID) IsZero() bool { return i.raw == "" }
@@ -123,3 +132,6 @@ func (i WorktreeID) IsZero() bool { return i.raw == "" }
 
 // IsZero reports whether the ID is the zero value.
 func (i SkillID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i SkillUsageID) IsZero() bool { return i.raw == "" }

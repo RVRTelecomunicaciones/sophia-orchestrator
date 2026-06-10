@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skillusage"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
@@ -123,6 +125,16 @@ type Deps struct {
 	// the service passes nil Skills to PromptBuilder (fail-soft).
 	Skills discipline.SkillProvider
 
+	// SkillUsageRepo is the optional repository for recording skill injection
+	// events (migration 011). nil means "no tracking" and is safe: every
+	// callsite is nil-tolerant. Wired by bootstrap when skills are enabled.
+	SkillUsageRepo outbound.SkillUsageRepository
+
+	// WebhookNotifier is the optional outbound webhook adapter that posts a
+	// ArchivedWebhookPayload to memory-engine after phase.archived is
+	// published (D-M2-1). nil = disabled; the callsite is nil-tolerant.
+	WebhookNotifier WebhookNotifier
+
 	// Metrics is the optional Prometheus instrument set. When nil, all
 	// metric record calls are no-ops.
 	Metrics *obs.Metrics
@@ -163,6 +175,24 @@ type InitService interface {
 type SpawnGovernor interface {
 	Acquire(ctx context.Context) error
 	Release(ctx context.Context) error
+}
+
+// ArchivedWebhookPayload is the outbound body for the memory-engine
+// POST /api/v1/worker/phase-archived endpoint (D-M2-1).
+// This struct mirrors webhook.PhaseArchivedWebhookPayload — it is redeclared
+// here to keep the domain/application layer free of adapter imports.
+type ArchivedWebhookPayload struct {
+	ChangeID   string    `json:"change_id"`
+	ChangeName string    `json:"change_name"`
+	PhaseType  string    `json:"phase_type"`
+	ArchivedAt time.Time `json:"archived_at"`
+}
+
+// WebhookNotifier is the outbound port for fire-and-forget phase.archived
+// notification to memory-engine. Implementations must be nil-safe callers can
+// skip the nil check at callsites.
+type WebhookNotifier interface {
+	Notify(ctx context.Context, payload ArchivedWebhookPayload)
 }
 
 // Service implements inbound.PhaseService.
@@ -399,6 +429,28 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		// skErr != nil or empty slice → phaseSkills stays nil (fail-soft)
 	}
 
+	// Record skill_usage rows at injection time (D-M2-2). Fail-soft: repo
+	// errors are logged and swallowed so the phase is never blocked by
+	// tracking infra failures.
+	var skillUsageIDs []ids.SkillUsageID
+	if s.d.SkillUsageRepo != nil && len(phaseSkills) > 0 {
+		now := s.d.Clock.Now()
+		for _, sk := range phaseSkills {
+			usageIDStr := s.d.IDGen.NewID()
+			usageID, parseErr := ids.ParseSkillUsageID(usageIDStr)
+			if parseErr != nil {
+				continue
+			}
+			su := newSkillUsage(usageID, c.ID(), p.Type(), sk.ID(), sk.Version(), now)
+			if insertErr := s.d.SkillUsageRepo.Insert(ctx, su); insertErr != nil {
+				slog.Default().WarnContext(ctx, "skill_usage insert failed; continuing",
+					"skill_id", sk.ID().String(), "error", insertErr)
+				continue
+			}
+			skillUsageIDs = append(skillUsageIDs, usageID)
+		}
+	}
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             p.Type(),
 		ChangeName:        c.Name(),
@@ -508,6 +560,9 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 	s.recordPhaseTerminal(p, env)
 	s.recordPhaseEnded(p)
+
+	// Update skill_usage outcomes now that the phase has a terminal status.
+	s.updateSkillUsageOutcomes(ctx, skillUsageIDs, env.Status)
 
 	// Step 13b: persist envelope.ArtifactsSaved entries to memory-engine
 	// so downstream phases can read them via MemoryClient.GetByTopicKey
@@ -1025,12 +1080,23 @@ func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed
 				if p, lookupErr := s.d.PhaseRepo.FindByChangeAndType(ctx, c.ID(), phase.PhaseArchive); lookupErr == nil {
 					archivePhaseID = p.ID()
 				}
+				archivedAt := s.d.Clock.Now()
 				s.publishEvent(ctx, archivePhaseID, inbound.EventPhaseArchived, inbound.PhaseArchivedPayload{
 					ChangeID:   c.ID().String(),
 					ChangeName: c.Name(),
 					PhaseType:  string(phase.PhaseArchive),
-					ArchivedAt: s.d.Clock.Now(),
+					ArchivedAt: archivedAt,
 				})
+				// Fire-and-forget webhook to memory-engine after publishEvent succeeds
+				// (D-M2-1 / D-M2-14). Non-nil guard: adapter may be disabled.
+				if s.d.WebhookNotifier != nil {
+					s.d.WebhookNotifier.Notify(ctx, ArchivedWebhookPayload{
+						ChangeID:   c.ID().String(),
+						ChangeName: c.Name(),
+						PhaseType:  string(phase.PhaseArchive),
+						ArchivedAt: archivedAt,
+					})
+				}
 			}
 		}
 	}
@@ -1237,4 +1303,47 @@ func detectTasksSchemaMismatch(data json.RawMessage) string {
 		return "tasks output must use data.groups[] not a flat tasks array (schema_mismatch)"
 	}
 	return ""
+}
+
+// ── Skill usage helpers ───────────────────────────────────────────────────────
+
+// newSkillUsage constructs a SkillUsage entity for injection tracking (D-M2-2).
+func newSkillUsage(
+	id ids.SkillUsageID,
+	changeID ids.ChangeID,
+	phaseType phase.PhaseType,
+	skillID ids.SkillID,
+	skillVersion string,
+	now time.Time,
+) *skillusage.SkillUsage {
+	return skillusage.New(id, changeID, string(phaseType), skillID, skillVersion, now)
+}
+
+// updateSkillUsageOutcomes updates every skill_usage row that was written
+// at injection time with the final outcome derived from the envelope status.
+// Fail-soft: errors are logged at WARN level and do not surface to callers.
+func (s *Service) updateSkillUsageOutcomes(ctx context.Context, ids []ids.SkillUsageID, envStatus envelope.Status) {
+	if s.d.SkillUsageRepo == nil || len(ids) == 0 {
+		return
+	}
+	outcome := skillUsageOutcomeFor(envStatus)
+	for _, id := range ids {
+		if err := s.d.SkillUsageRepo.UpdateOutcome(ctx, id, outcome); err != nil {
+			slog.Default().WarnContext(ctx, "skill_usage outcome update failed",
+				"skill_usage_id", id.String(), "error", err)
+		}
+	}
+}
+
+// skillUsageOutcomeFor maps an envelope.Status to a skillusage.Outcome.
+// done → success; blocked → failure; anything else → failure.
+func skillUsageOutcomeFor(s envelope.Status) skillusage.Outcome {
+	switch s {
+	case envelope.StatusDone, envelope.StatusDoneWithConcerns:
+		return skillusage.OutcomeSuccess
+	case envelope.StatusBlocked:
+		return skillusage.OutcomeBlocked
+	default:
+		return skillusage.OutcomeFailure
+	}
 }

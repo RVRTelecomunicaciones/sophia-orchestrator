@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/change"
@@ -10,6 +11,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skillusage"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/worktree"
 )
 
@@ -83,6 +85,18 @@ type WorktreeRepository interface {
 	FindBySessionID(ctx context.Context, sessionID ids.SessionID) (*worktree.Worktree, error)
 }
 
+// SkillUsageRepository persists SkillUsage records (migration 011).
+// Insert is idempotent: ON CONFLICT DO NOTHING on (change_id, phase_type, skill_id, skill_version).
+// UpdateOutcome sets the outcome column for a specific row.
+// FindByChange returns all rows for a given change_id (ordered by injected_at asc).
+// FindBySkill returns all rows for a given skill_id (ordered by injected_at desc).
+type SkillUsageRepository interface {
+	Insert(ctx context.Context, su *skillusage.SkillUsage) error
+	UpdateOutcome(ctx context.Context, id ids.SkillUsageID, outcome skillusage.Outcome) error
+	FindByChange(ctx context.Context, changeID ids.ChangeID) ([]*skillusage.SkillUsage, error)
+	FindBySkill(ctx context.Context, skillID ids.SkillID) ([]*skillusage.SkillUsage, error)
+}
+
 // SkillRepository persists Skill aggregates with V4.1 §5.2 lifecycle fields.
 //
 // FindByPhase returns every Skill whose phases array contains pt AND
@@ -100,9 +114,22 @@ type WorktreeRepository interface {
 // present. This is the legacy seeder operation; new code uses Upsert.
 //
 // List returns all persisted Skills in no guaranteed order.
+//
+// FindByID returns the skill with the given ID. Returns ErrNotFound when absent.
+//
+// PatchMetrics atomically applies additive deltas to the metrics JSONB column
+// and sets last_used_at to now. Uses SELECT FOR UPDATE within a transaction.
+// Returns ErrNotFound when no skill with that ID exists.
+//
+// PatchStatus updates the skill's status column and conditionally sets
+// last_validated_at (when new status is "validated"). Returns ErrNotFound when
+// no skill with that ID exists.
 type SkillRepository interface {
 	FindByPhase(ctx context.Context, pt phase.PhaseType) ([]*skill.Skill, error)
 	Upsert(ctx context.Context, s *skill.Skill) error
 	InsertIfAbsent(ctx context.Context, s *skill.Skill) error
 	List(ctx context.Context) ([]*skill.Skill, error)
+	FindByID(ctx context.Context, id ids.SkillID) (*skill.Skill, error)
+	PatchMetrics(ctx context.Context, id ids.SkillID, delta skill.Metrics, now time.Time) error
+	PatchStatus(ctx context.Context, id ids.SkillID, status skill.Status, now time.Time) error
 }

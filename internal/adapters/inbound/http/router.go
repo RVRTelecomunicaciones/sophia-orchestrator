@@ -47,6 +47,11 @@ type Deps struct {
 	// the listener.
 	AllowAnonLocalhost bool
 
+	// Skills is the inbound service for the skills write API (M2: PATCH metrics/status +
+	// GET usage). When nil, the three skills routes are not registered (fail-soft for
+	// deployments where SOPHIA_SKILLS_ENABLED=false).
+	Skills inbound.SkillService
+
 	// Observability (optional). When nil, the corresponding middleware is a no-op.
 	Metrics *obs.Metrics
 	Tracer  trace.Tracer
@@ -124,6 +129,23 @@ func NewRouter(d Deps) chi.Router {
 			r.Get("/board", ap.GetBoard)
 			r.Get("/events", sh.Stream)
 		})
+
+		// Skills write API (M2: D-M2-3). Registered only when the SkillService
+		// is wired (SOPHIA_SKILLS_ENABLED=true). Three routes:
+		//   PATCH /api/v1/skills/{skill_id}/metrics — additive delta update
+		//   PATCH /api/v1/skills/{skill_id}/status  — lifecycle transition
+		//   GET   /api/v1/skills/usage              — usage rows by change_id
+		if d.Skills != nil {
+			skillWriteErr := func(w http.ResponseWriter, err error) { writeError(w, err) }
+			skillH := handlers.NewSkillsHandler(d.Skills, skillWriteErr, writeJSON)
+			r.Route("/api/v1/skills", func(r chi.Router) {
+				r.Get("/usage", skillH.GetUsage)
+				r.Route("/{skill_id}", func(r chi.Router) {
+					r.Patch("/metrics", skillH.PatchMetrics)
+					r.Patch("/status", skillH.PatchStatus)
+				})
+			})
+		}
 	})
 
 	// 404 fallback as JSON (chi defaults to plaintext).

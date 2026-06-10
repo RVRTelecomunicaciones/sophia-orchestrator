@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/bootstrap"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
@@ -344,6 +345,21 @@ func (f *fakeSkillRepo) List(_ context.Context) ([]*skill.Skill, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// FindByID is a stub — not exercised by seeder tests.
+func (f *fakeSkillRepo) FindByID(_ context.Context, _ ids.SkillID) (*skill.Skill, error) {
+	return nil, outbound.ErrNotFound
+}
+
+// PatchMetrics is a stub — not exercised by seeder tests.
+func (f *fakeSkillRepo) PatchMetrics(_ context.Context, _ ids.SkillID, _ skill.Metrics, _ time.Time) error {
+	return nil
+}
+
+// PatchStatus is a stub — not exercised by seeder tests.
+func (f *fakeSkillRepo) PatchStatus(_ context.Context, _ ids.SkillID, _ skill.Status, _ time.Time) error {
+	return nil
 }
 
 // Verify fakeSkillRepo satisfies the SkillRepository port at compile time.

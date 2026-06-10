@@ -72,6 +72,11 @@ type RunDeps struct {
 	// (byte-identical to pre-change baseline). Fail-soft: provider error or
 	// empty result → nil Skills passed to PromptBuilder, phase continues.
 	Skills discipline.SkillProvider
+
+	// SkillUsageRepo is the optional repository for recording skill injection
+	// events (migration 011). nil means "no tracking" and is safe: every
+	// callsite is nil-tolerant. Wired by bootstrap when skills are enabled.
+	SkillUsageRepo outbound.SkillUsageRepository
 }
 
 // RunConfig parameterizes RunService.

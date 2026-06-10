@@ -86,3 +86,7 @@ const SkipReasonAppliesWhenFailed = "applies_when_failed"
 // SkipReasonStatusNotActive is returned when a skill's status is not "active".
 // Only active skills are eligible for selection (D-M1-6).
 const SkipReasonStatusNotActive = "status_not_active"
+
+// SkipReasonRiskExceeded is returned when a skill's risk_level exceeds the
+// SkillQuery.MaxRiskLevel inclusive bound (M2 D-M2-13 fix W1).
+const SkipReasonRiskExceeded = "risk_exceeded"
