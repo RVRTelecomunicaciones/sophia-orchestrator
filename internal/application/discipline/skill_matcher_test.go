@@ -9,6 +9,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 )
 
 // TestSkillQuery_ZeroValueCompiles verifies the zero-value SkillQuery is
@@ -26,22 +27,26 @@ func TestSkillQuery_ZeroValueCompiles(t *testing.T) {
 }
 
 // TestSkillQuery_ExplicitFields verifies all 7 SkillQuery fields can be set.
+// StructuralContext is now *structural.StructuralContext (E.4 — domain move).
 func TestSkillQuery_ExplicitFields(t *testing.T) {
-	ref := &discipline.StructuralContextRef{}
+	sc := &structural.StructuralContext{
+		SchemaVersion: structural.SchemaV1,
+		ProjectID:     "proj-123",
+	}
 	q := discipline.SkillQuery{
-		Phase:            phase.PhaseApply,
-		ProjectID:        "proj-123",
-		RepoID:           "repo-456",
-		StructuralContext: ref,
-		FeatureType:      "bugfix",
-		TouchedPaths:     []string{"internal/domain/**", "internal/adapters/**"},
-		MaxRiskLevel:     skill.RiskHigh,
+		Phase:             phase.PhaseApply,
+		ProjectID:         "proj-123",
+		RepoID:            "repo-456",
+		StructuralContext: sc,
+		FeatureType:       "bugfix",
+		TouchedPaths:      []string{"internal/domain/**", "internal/adapters/**"},
+		MaxRiskLevel:      skill.RiskHigh,
 	}
 
 	require.Equal(t, phase.PhaseApply, q.Phase)
 	require.Equal(t, "proj-123", q.ProjectID)
 	require.Equal(t, "repo-456", q.RepoID)
-	require.Equal(t, ref, q.StructuralContext)
+	require.Equal(t, sc, q.StructuralContext)
 	require.Equal(t, "bugfix", q.FeatureType)
 	require.Len(t, q.TouchedPaths, 2)
 	require.Equal(t, skill.RiskHigh, q.MaxRiskLevel)
@@ -75,22 +80,19 @@ func TestSkippedSkill_AllReasonConstants(t *testing.T) {
 	}
 }
 
-// TestStructuralContextRef_NotRedeclared verifies StructuralContextRef in the
-// discipline package is the SAME type as the one used by PriorContext.StructuralCtx.
-// If SkillMatcher redeclared a separate StructuralContextRef type, this test
-// would fail with a type-incompatibility compile error — the two fields must
-// accept the same *StructuralContextRef pointer without any conversion.
-func TestStructuralContextRef_NotRedeclared(t *testing.T) {
-	// Constructing a PriorContext with a StructuralContextRef from this same
-	// package proves they are the same type (one declaration, not two).
-	ref := &discipline.StructuralContextRef{}
+// TestStructuralContext_SharedType verifies that SkillQuery.StructuralContext and
+// PriorContext.StructuralCtx both accept the SAME *structural.StructuralContext
+// pointer (E.3 + E.4 post-domain-move). Written to replace the prior
+// TestStructuralContextRef_NotRedeclared which tested the now-deleted stub type.
+func TestStructuralContext_SharedType(t *testing.T) {
+	// A single *structural.StructuralContext value must be assignable to both
+	// SkillQuery.StructuralContext and PriorContext.StructuralCtx without
+	// any conversion — they are the same type (not separate aliases).
+	sc := &structural.StructuralContext{SchemaVersion: structural.SchemaV1}
 
-	// This assignment compiles only when SkillQuery.StructuralContext and
-	// PriorContext.StructuralCtx both accept the SAME *StructuralContextRef type.
-	qRef := discipline.SkillQuery{StructuralContext: ref}
-	pc := discipline.PriorContext{StructuralCtx: ref}
+	qRef := discipline.SkillQuery{StructuralContext: sc}
+	pc := discipline.PriorContext{StructuralCtx: sc}
 
-	// Both fields accept the same pointer — they share the same type declaration.
 	assert.Same(t, qRef.StructuralContext, pc.StructuralCtx,
-		"SkillQuery.StructuralContext and PriorContext.StructuralCtx must be the same *StructuralContextRef pointer")
+		"SkillQuery.StructuralContext and PriorContext.StructuralCtx must share the same *structural.StructuralContext pointer")
 }

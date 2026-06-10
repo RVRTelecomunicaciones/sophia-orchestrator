@@ -5,6 +5,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 )
 
 // SkillMatcher is the M1 application port for context-aware skill selection.
@@ -44,10 +45,11 @@ type SkillQuery struct {
 	// OR is the wildcard "*". Empty string disables the repo filter.
 	RepoID string
 
-	// StructuralContext is an opaque marker for M3 StructuralContext-aware
-	// filtering. Always nil in M1 (opaque per D-M1-7 / D-M05-2); the adapter
-	// MUST silently ignore this field until M3 wires it.
-	StructuralContext *StructuralContextRef
+	// StructuralContext carries the detected structural context for this change,
+	// used by the matcher to filter skills by applies_when.framework and
+	// applies_when.language (D-M3-3, D-M3-4). Nil = no structural filtering
+	// (fail-open: pre-INIT-0 or degraded INIT changes pass the structural gate).
+	StructuralContext *structural.StructuralContext
 
 	// FeatureType matches against skill.AppliesWhen.FeatureType inclusion list.
 	// Empty string disables the feature_type filter.

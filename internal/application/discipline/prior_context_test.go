@@ -9,8 +9,10 @@ package discipline_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 	"github.com/stretchr/testify/require"
 )
 
@@ -104,10 +106,16 @@ func TestRender_EnableAttribution_False_IsNoOp(t *testing.T) {
 
 func TestPriorContext_JSON_RoundTrip(t *testing.T) {
 	// Construct a PriorContext with non-zero values for all reachable fields.
+	// StructuralCtx is now *structural.StructuralContext (E.3 — domain move).
+	sc := &structural.StructuralContext{
+		SchemaVersion: structural.SchemaV1,
+		ProjectID:     "proj-1",
+		DetectedAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
 	original := discipline.PriorContext{
 		PhaseIdentity:   "phase-id",
 		Skills:          []discipline.RenderedSkill{{}},
-		StructuralCtx:   &discipline.StructuralContextRef{},
+		StructuralCtx:   sc,
 		Episodes:        []discipline.EpisodeRef{{}},
 		ChangeDigests:   []discipline.ChangeDigestRef{{}},
 		BusinessRules:   []discipline.RuleRef{{}},
@@ -129,15 +137,13 @@ func TestPriorContext_JSON_RoundTrip(t *testing.T) {
 	require.Equal(t, original.ChangeDigests, decoded.ChangeDigests)
 	require.Equal(t, original.BusinessRules, decoded.BusinessRules)
 	require.Equal(t, original.Routines, decoded.Routines)
+	require.NotNil(t, decoded.StructuralCtx, "StructuralCtx must round-trip non-nil")
+	require.Equal(t, sc.ProjectID, decoded.StructuralCtx.ProjectID, "StructuralCtx.ProjectID must survive JSON round-trip")
 
-	// Stub types must round-trip as {} in JSON.
+	// Stub types must marshal to {}.
 	renderedSkillJSON, err := json.Marshal(discipline.RenderedSkill{})
 	require.NoError(t, err)
 	require.Equal(t, "{}", string(renderedSkillJSON), "RenderedSkill{} must marshal to {}")
-
-	structuralCtxJSON, err := json.Marshal(discipline.StructuralContextRef{})
-	require.NoError(t, err)
-	require.Equal(t, "{}", string(structuralCtxJSON), "StructuralContextRef{} must marshal to {}")
 
 	episodeJSON, err := json.Marshal(discipline.EpisodeRef{})
 	require.NoError(t, err)
