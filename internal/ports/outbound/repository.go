@@ -10,6 +10,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skillusage"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/worktree"
 )
 
@@ -81,6 +82,18 @@ type WorktreeRepository interface {
 	Save(ctx context.Context, w *worktree.Worktree) error
 	FindByID(ctx context.Context, id ids.WorktreeID) (*worktree.Worktree, error)
 	FindBySessionID(ctx context.Context, sessionID ids.SessionID) (*worktree.Worktree, error)
+}
+
+// SkillUsageRepository persists SkillUsage records (migration 011).
+// Insert is idempotent: ON CONFLICT DO NOTHING on (change_id, phase_type, skill_id, skill_version).
+// UpdateOutcome sets the outcome column for a specific row.
+// FindByChange returns all rows for a given change_id (ordered by injected_at asc).
+// FindBySkill returns all rows for a given skill_id (ordered by injected_at desc).
+type SkillUsageRepository interface {
+	Insert(ctx context.Context, su *skillusage.SkillUsage) error
+	UpdateOutcome(ctx context.Context, id ids.SkillUsageID, outcome skillusage.Outcome) error
+	FindByChange(ctx context.Context, changeID ids.ChangeID) ([]*skillusage.SkillUsage, error)
+	FindBySkill(ctx context.Context, skillID ids.SkillID) ([]*skillusage.SkillUsage, error)
 }
 
 // SkillRepository persists Skill aggregates with V4.1 §5.2 lifecycle fields.
