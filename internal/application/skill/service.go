@@ -5,6 +5,7 @@ package skill
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -117,6 +118,65 @@ func (s *Service) GetUsage(ctx context.Context, changeID string) ([]inbound.Skil
 		})
 	}
 	return out, nil
+}
+
+// GetSkill returns the current skill snapshot for GET /api/v1/skills/{id}.
+// Returns outbound.ErrNotFound (wrapped) when the skill_id is unknown or
+// cannot be parsed.
+func (s *Service) GetSkill(ctx context.Context, skillID string) (*inbound.GetSkillResult, error) {
+	id, err := ids.ParseSkillID(skillID)
+	if err != nil {
+		return nil, fmt.Errorf("skill.GetSkill: %w", outbound.ErrNotFound)
+	}
+
+	sk, err := s.skillRepo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	scopeMap, err := structToMap(sk.Scope())
+	if err != nil {
+		return nil, fmt.Errorf("skill.GetSkill: marshal scope: %w", err)
+	}
+
+	awMap, err := structToMap(sk.AppliesWhen())
+	if err != nil {
+		return nil, fmt.Errorf("skill.GetSkill: marshal applies_when: %w", err)
+	}
+
+	m := sk.Metrics()
+	return &inbound.GetSkillResult{
+		SkillID:     sk.ID().String(),
+		Status:      sk.Status().String(),
+		RiskLevel:   sk.RiskLevel().String(),
+		Version:     sk.Version(),
+		Name:        sk.Name(),
+		Scope:       scopeMap,
+		AppliesWhen: awMap,
+		Metrics: inbound.SkillMetricsResult{
+			UsageCount:        m.UsageCount,
+			SuccessCount:      m.SuccessCount,
+			FailureCount:      m.FailureCount,
+			TestsPassedCount:  m.TestsPassedCount,
+			DeprecatedAPIHits: m.DeprecatedAPIHits,
+			RollbackCount:     m.RollbackCount,
+			AvgRetryReduction: m.AvgRetryReduction,
+		},
+	}, nil
+}
+
+// structToMap JSON-marshals v and unmarshals into map[string]any, providing
+// a clean any-typed representation of JSONB-tagged struct fields.
+func structToMap(v any) (map[string]any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // Verify Service satisfies the SkillService port at compile time.

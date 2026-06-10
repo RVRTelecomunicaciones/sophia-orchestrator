@@ -12,6 +12,62 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
+// ── GET /api/v1/skills/{skill_id} DTOs ──────────────────────────────────────
+
+// getSkillResp is the JSON shape for GET /api/v1/skills/{skill_id}.
+// The narrow fields (skill_id, status, risk_level, version, metrics) mirror the
+// ME worker's SkillSnapshot contract verbatim (D-M3-1).
+// The additive fields (skill_name, scope, applies_when) extend the response so
+// the ME proposer can consume them without a second endpoint (D-M3-2). These
+// fields use omitempty so a zero-value struct produces no extra keys.
+// Go's default json.Unmarshal ignores unknown keys, so the worker's existing
+// GetSkill deserialization is unaffected.
+type getSkillResp struct {
+	SkillID     string          `json:"skill_id"`
+	Status      string          `json:"status"`
+	RiskLevel   string          `json:"risk_level"`
+	Version     string          `json:"version"`
+	Metrics     getSkillMetrics `json:"metrics"`
+	// Additive richer fields — NOT in worker SkillSnapshot; consumed by the ME proposer.
+	Name        string         `json:"skill_name,omitempty"`
+	Scope       map[string]any `json:"scope,omitempty"`
+	AppliesWhen map[string]any `json:"applies_when,omitempty"`
+}
+
+// getSkillMetrics mirrors the ME worker's SkillMetrics (outbound.SkillMetrics)
+// field-for-field. JSON tags must not drift.
+type getSkillMetrics struct {
+	UsageCount        int     `json:"usage_count"`
+	SuccessCount      int     `json:"success_count"`
+	FailureCount      int     `json:"failure_count"`
+	TestsPassedCount  int     `json:"tests_passed_count"`
+	DeprecatedAPIHits int     `json:"deprecated_api_hits"`
+	RollbackCount     int     `json:"rollback_count"`
+	AvgRetryReduction float64 `json:"avg_retry_reduction"`
+}
+
+// toGetSkillResp maps a GetSkillResult into the wire shape.
+func toGetSkillResp(r *inbound.GetSkillResult) getSkillResp {
+	return getSkillResp{
+		SkillID:   r.SkillID,
+		Status:    r.Status,
+		RiskLevel: r.RiskLevel,
+		Version:   r.Version,
+		Name:      r.Name,
+		Scope:     r.Scope,
+		AppliesWhen: r.AppliesWhen,
+		Metrics: getSkillMetrics{
+			UsageCount:        r.Metrics.UsageCount,
+			SuccessCount:      r.Metrics.SuccessCount,
+			FailureCount:      r.Metrics.FailureCount,
+			TestsPassedCount:  r.Metrics.TestsPassedCount,
+			DeprecatedAPIHits: r.Metrics.DeprecatedAPIHits,
+			RollbackCount:     r.Metrics.RollbackCount,
+			AvgRetryReduction: r.Metrics.AvgRetryReduction,
+		},
+	}
+}
+
 // SkillsHandler exposes the skills write API:
 //   - PATCH /api/v1/skills/{id}/metrics
 //   - PATCH /api/v1/skills/{id}/status
@@ -138,6 +194,27 @@ func (h *SkillsHandler) PatchStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// GetSkill handles GET /api/v1/skills/{skill_id}.
+// Returns 200 + getSkillResp on success, 404 when the skill is not found.
+func (h *SkillsHandler) GetSkill(w http.ResponseWriter, r *http.Request) {
+	skillID := chi.URLParam(r, "skill_id")
+
+	result, err := h.svc.GetSkill(r.Context(), skillID)
+	if err != nil {
+		if errors.Is(err, outbound.ErrNotFound) {
+			h.writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "skill not found",
+				"code":  "skill_not_found",
+			})
+			return
+		}
+		h.writeErr(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, toGetSkillResp(result))
 }
 
 // skillUsageRowDTO is the JSON shape for each row in GET /api/v1/skills/usage.

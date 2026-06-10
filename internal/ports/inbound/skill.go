@@ -28,6 +28,32 @@ type SkillUsageRow struct {
 	ApplyAttempts int
 }
 
+// SkillMetricsResult carries the metrics snapshot for the GET /api/v1/skills/{id} response.
+type SkillMetricsResult struct {
+	UsageCount        int
+	SuccessCount      int
+	FailureCount      int
+	TestsPassedCount  int
+	DeprecatedAPIHits int
+	RollbackCount     int
+	AvgRetryReduction float64
+}
+
+// GetSkillResult carries the full GET /api/v1/skills/{id} response data.
+// The narrow fields (SkillID, Status, RiskLevel, Version, Metrics) mirror the
+// ME worker's SkillSnapshot contract. The additive fields (Name, Scope,
+// AppliesWhen) are consumed by the ME proposer reconcile (D-M3-2).
+type GetSkillResult struct {
+	SkillID     string
+	Status      string
+	RiskLevel   string
+	Version     string
+	Name        string
+	Scope       map[string]any
+	AppliesWhen map[string]any
+	Metrics     SkillMetricsResult
+}
+
 // SkillService is the inbound port for the skills write API.
 // Implementations apply mutations atomically and enforce domain invariants.
 //
@@ -40,8 +66,12 @@ type SkillUsageRow struct {
 //
 // GetUsage returns all skill_usage rows for the given change_id enriched with
 // apply_attempts from the apply phase envelope.
+//
+// GetSkill returns the current skill snapshot for GET /api/v1/skills/{id}.
+// Returns outbound.ErrNotFound when the skill does not exist.
 type SkillService interface {
 	PatchMetrics(ctx context.Context, skillID string, delta MetricsDelta) error
 	PatchStatus(ctx context.Context, skillID string, status, reason string) error
 	GetUsage(ctx context.Context, changeID string) ([]SkillUsageRow, error)
+	GetSkill(ctx context.Context, skillID string) (*GetSkillResult, error)
 }

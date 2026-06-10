@@ -141,6 +141,7 @@ func NewRouter(d Deps) chi.Router {
 			r.Route("/api/v1/skills", func(r chi.Router) {
 				r.Get("/usage", skillH.GetUsage)
 				r.Route("/{skill_id}", func(r chi.Router) {
+					r.Get("/", skillH.GetSkill)
 					r.Patch("/metrics", skillH.PatchMetrics)
 					r.Patch("/status", skillH.PatchStatus)
 				})
