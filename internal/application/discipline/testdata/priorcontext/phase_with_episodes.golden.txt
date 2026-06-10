@@ -1,0 +1,4 @@
+Fixed N+1 query in phase service.
+
+Discovered advisory lock race on concurrent apply.
+

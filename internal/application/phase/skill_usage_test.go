@@ -73,13 +73,14 @@ func (r *fakeSkillUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) ([]*s
 
 var _ outbound.SkillUsageRepository = (*fakeSkillUsageRepo)(nil)
 
-// fakeSkillProviderWithSkills returns one active skill on every call.
+// fakeSkillProviderWithSkills implements discipline.SkillMatcher for usage-tracking tests.
+// Updated in M3 PR3a (K.4 GREEN): SkillsForPhase → SkillsForContext.
 type fakeSkillProviderWithSkills struct {
 	skills []*skdomain.Skill
 }
 
-func (f *fakeSkillProviderWithSkills) SkillsForPhase(_ context.Context, _ phase.PhaseType) ([]*skdomain.Skill, error) {
-	return f.skills, nil
+func (f *fakeSkillProviderWithSkills) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+	return f.skills, nil, nil
 }
 
 // buildActiveSkill creates an active skill for test injection.
@@ -104,9 +105,10 @@ func buildActiveSkill(t *testing.T) *skdomain.Skill {
 	return s
 }
 
-// newHarnessWithSkillsAndUsageRepo creates a harness wired with SkillProvider
+// newHarnessWithSkillsAndUsageRepo creates a harness wired with SkillMatcher
 // AND SkillUsageRepo so we can observe injection writes.
-func newHarnessWithSkillsAndUsageRepo(t *testing.T, sp discipline.SkillProvider, usageRepo outbound.SkillUsageRepository) *harness {
+// Updated in M3 PR3a (K.4 GREEN): SkillProvider → SkillMatcher.
+func newHarnessWithSkillsAndUsageRepo(t *testing.T, sp discipline.SkillMatcher, usageRepo outbound.SkillUsageRepository) *harness {
 	t.Helper()
 	h := newHarness(t)
 

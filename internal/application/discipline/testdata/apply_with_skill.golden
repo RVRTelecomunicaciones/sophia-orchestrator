@@ -14,17 +14,14 @@ These invariants are validated BEFORE this prompt fires. Your job is to produce 
 <HARD-GATE>DO NOT modify files outside your assigned files_pattern.</HARD-GATE>
 <HARD-GATE>DO NOT attempt fix #4 — escalate after 3 failures.</HARD-GATE>
 
-# Skill
-Use the following runtime skill guidance for this phase. It augments Iron Laws and HARD-GATE markers; it does not override them.
-
+# Prior Context
 ## apply-implement-safely
 Techniques: constitutional-self-critique, inline-why
 Use constitutional self-critique after each change.
 
 Why: Keeps changes minimal and reversible.
 
-# Prior Context
-prior ctx text
+
 
 # Task
 do the apply task

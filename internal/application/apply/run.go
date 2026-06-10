@@ -67,11 +67,12 @@ type RunDeps struct {
 	// Metrics is the optional Prometheus instrument set. nil ⇒ no-op.
 	Metrics *obs.Metrics
 
-	// Skills is the optional SkillProvider used to hydrate implement-agent
+	// Skills is the optional SkillMatcher used to hydrate implement-agent
 	// prompts with runtime skill-guidance units. nil → prompts unchanged
-	// (byte-identical to pre-change baseline). Fail-soft: provider error or
+	// (byte-identical to pre-change baseline). Fail-soft: matcher error or
 	// empty result → nil Skills passed to PromptBuilder, phase continues.
-	Skills discipline.SkillProvider
+	// M3 D-M3-5: migrated from SkillProvider to SkillMatcher (PR3a).
+	Skills discipline.SkillMatcher
 
 	// SkillUsageRepo is the optional repository for recording skill injection
 	// events (migration 011). nil means "no tracking" and is safe: every

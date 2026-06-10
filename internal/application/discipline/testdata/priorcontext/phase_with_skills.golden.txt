@@ -1,0 +1,4 @@
+## clean-arch
+Techniques: step-back
+Apply hexagonal architecture: ports+adapters boundary.
+

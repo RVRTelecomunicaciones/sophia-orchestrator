@@ -381,20 +381,24 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext, modelOverride string) (bool, *outbound.ProviderQuotaError) {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
 
-	// Hydrate skills fail-soft: nil provider, empty result, or error → nil Skills.
+	// Hydrate skills fail-soft: nil matcher, empty result, or error → nil Skills.
+	// K.7: hydrateSkills now calls SkillsForContext (D-M3-9 / PR3a).
 	phaseSkills := s.hydrateSkills(ctx, phase.PhaseApply)
 
 	// Record skill_usage rows at injection time (D-M2-2). Fail-soft.
 	s.recordSkillUsageInjection(ctx, c.ID(), p.Type(), phaseSkills)
 
+	// K.9: skills rendered inside PriorContext (D-M3-5); build a PriorContext
+	// that includes any matched skills so Render emits them.
+	pc := buildApplyPriorContext(enrichedContext, phaseSkills)
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
 		ChangeName:        c.Name(),
 		Project:           c.Project(),
-		PriorContext:      enrichedContext,
+		PriorContext:      pc.Render(discipline.RenderOpts{}),
 		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
 		PriorPhasesStatus: s.priorPhasesStatus,
-		Skills:            phaseSkills,
 	})
 	if err != nil {
 		return false, nil
@@ -483,20 +487,23 @@ func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *chang
 func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Board, group *apply.Group, task *apply.Task, sess *session.Session, priorContext string) (bool, *outbound.ProviderQuotaError) {
 	enrichedContext := s.refreshApplyProgress(ctx, c, priorContext)
 
-	// Hydrate skills fail-soft: nil provider, empty result, or error → nil Skills.
+	// Hydrate skills fail-soft: nil matcher, empty result, or error → nil Skills.
+	// K.7: hydrateSkills now calls SkillsForContext (D-M3-9 / PR3a).
 	phaseSkills := s.hydrateSkills(ctx, phase.PhaseApply)
 
 	// Record skill_usage rows at injection time (D-M2-2). Fail-soft.
 	s.recordSkillUsageInjection(ctx, c.ID(), p.Type(), phaseSkills)
 
+	// K.9: skills rendered inside PriorContext (D-M3-5).
+	pc := buildApplyPriorContext(enrichedContext, phaseSkills)
+
 	prompt, err := s.d.Prompts.Build(discipline.PromptInput{
 		Phase:             phase.PhaseApply,
 		ChangeName:        c.Name(),
 		Project:           c.Project(),
-		PriorContext:      enrichedContext,
+		PriorContext:      pc.Render(discipline.RenderOpts{}),
 		TaskDescription:   fmt.Sprintf("%s\n\nWorktree: %s\nFiles: %v", task.Description(), group.WorktreePath(), task.FilesPattern()),
 		PriorPhasesStatus: s.priorPhasesStatus,
-		Skills:            phaseSkills,
 	})
 	if err != nil {
 		return false, nil
@@ -593,13 +600,17 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 }
 
 // hydrateSkills returns the skills applicable to pt, or nil on any failure.
-// Fail-soft contract: a nil provider, empty result, or provider error all
+// Fail-soft contract: a nil matcher, empty result, or matcher error all
 // return nil so the prompt stays byte-identical to the pre-change baseline.
+// K.7: migrated from SkillsForPhase → SkillsForContext (D-M3-9 / PR3a).
 func (s *RunService) hydrateSkills(ctx context.Context, pt phase.PhaseType) []*skdomain.Skill {
 	if s.d.Skills == nil {
 		return nil
 	}
-	sk, err := s.d.Skills.SkillsForPhase(ctx, pt)
+	// ProjectID and StructuralContext are not available here without threading
+	// them through the apply RunService. Use zero-value SkillQuery: phase
+	// filter only, fail-open on structural (nil context).
+	sk, _, err := s.d.Skills.SkillsForContext(ctx, discipline.SkillQuery{Phase: pt})
 	if err != nil || len(sk) == 0 {
 		return nil
 	}
@@ -626,6 +637,22 @@ func (s *RunService) recordSkillUsageInjection(ctx context.Context, changeID ids
 				"skill_id", sk.ID().String(), "error", insertErr)
 		}
 	}
+}
+
+// buildApplyPriorContext assembles a PriorContext for the apply path.
+// The enrichedContext (PhaseIdentity: spec/design/progress string) is set
+// in PhaseIdentity. Matched skills are mapped to RenderedSkill and attached
+// to PriorContext.Skills so Render emits them (D-M3-5 / K.9).
+func buildApplyPriorContext(enrichedContext string, skills []*skdomain.Skill) discipline.PriorContext {
+	pc := discipline.PriorContext{PhaseIdentity: enrichedContext}
+	if len(skills) > 0 {
+		rendered := make([]discipline.RenderedSkill, 0, len(skills))
+		for _, sk := range skills {
+			rendered = append(rendered, discipline.ToRenderedSkill(sk))
+		}
+		pc.Skills = rendered
+	}
+	return pc
 }
 
 func (s *RunService) makeSession(ctx context.Context, c *change.Change, p *phase.Phase, _ *apply.Group, role session.AgentRole, command string) (*session.Session, error) {
