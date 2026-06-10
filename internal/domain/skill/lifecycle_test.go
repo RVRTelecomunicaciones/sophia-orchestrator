@@ -118,6 +118,42 @@ func TestAppliesWhen_JSONRoundTrip(t *testing.T) {
 	require.Equal(t, aw, got)
 }
 
+// ── AppliesWhen Framework/Language JSON round-trip (D.1 RED) ─────────────────
+
+// TestAppliesWhen_FrameworkLanguage_JSONRoundTrip asserts that Framework and
+// Language arrays marshal and unmarshal correctly (C-2 prerequisite for the
+// matcher filter). Written RED — fields do not exist until D.2 GREEN.
+func TestAppliesWhen_FrameworkLanguage_JSONRoundTrip(t *testing.T) {
+	aw := skill.AppliesWhen{
+		Framework: []string{"nextjs"},
+		Language:  []string{"typescript"},
+	}
+	data, err := json.Marshal(aw)
+	require.NoError(t, err)
+
+	var got skill.AppliesWhen
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.Equal(t, []string{"nextjs"}, got.Framework, "Framework must survive JSON round-trip")
+	require.Equal(t, []string{"typescript"}, got.Language, "Language must survive JSON round-trip")
+}
+
+// TestAppliesWhen_Framework_OmittedWhenEmpty verifies omitempty — Framework
+// and Language absent from JSON when empty (D.1 triangulation).
+func TestAppliesWhen_Framework_OmittedWhenEmpty(t *testing.T) {
+	aw := skill.AppliesWhen{FeatureType: []string{"bugfix"}}
+	data, err := json.Marshal(aw)
+	require.NoError(t, err)
+
+	raw := string(data)
+	require.NotContains(t, raw, "framework", "empty Framework must be omitted from JSON")
+	require.NotContains(t, raw, "language", "empty Language must be omitted from JSON")
+
+	var got skill.AppliesWhen
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.Nil(t, got.Framework, "Framework must be nil when omitted")
+	require.Nil(t, got.Language, "Language must be nil when omitted")
+}
+
 // ── Metrics JSON round-trip ───────────────────────────────────────────────────
 
 func TestMetrics_JSONRoundTrip(t *testing.T) {
