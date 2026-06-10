@@ -206,10 +206,8 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
 	}
 
-	// SkillMatcher wiring (M3 PR3a: Skills deps migrated from SkillProvider to SkillMatcher).
-	// PGSkillMatcher implements SkillMatcher (context-aware filtering: scope, applies_when,
-	// structural, risk_level sort). SkillProvider wrapper is kept for PR3b cleanup but
-	// is no longer wired into phase/apply services.
+	// SkillMatcher wiring (M3: PGSkillMatcher handles context-aware filtering:
+	// scope, applies_when, structural, risk_level sort).
 	// When SOPHIA_SKILLS_ENABLED=false, a nil matcher is passed to all services
 	// so prompts remain byte-identical to the pre-change baseline (fail-soft).
 	var skillMatcher discipline.SkillMatcher

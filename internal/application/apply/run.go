@@ -71,7 +71,6 @@ type RunDeps struct {
 	// prompts with runtime skill-guidance units. nil → prompts unchanged
 	// (byte-identical to pre-change baseline). Fail-soft: matcher error or
 	// empty result → nil Skills passed to PromptBuilder, phase continues.
-	// M3 D-M3-5: migrated from SkillProvider to SkillMatcher (PR3a).
 	Skills discipline.SkillMatcher
 
 	// SkillUsageRepo is the optional repository for recording skill injection

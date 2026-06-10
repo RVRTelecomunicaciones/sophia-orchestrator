@@ -9,13 +9,8 @@ import (
 )
 
 // PriorContext is the structured assembly of prior-context content fed to
-// LLM phase prompts. M0.5 introduces this struct as a refactor of inline
-// string concatenation; M3 enriches it with skills/episodes/digests/routines.
-//
-// Field order follows V4.1 §16 M0.5 milestone spec. RawMemoryBlob is an
-// M0.5-interim field appended last for the phase-service callsite;
-// M3 will decompose it into Episodes / ChangeDigests / BusinessRules and
-// remove the field.
+// LLM phase prompts. M3 enriches it with typed layers: skills, episodes,
+// change digests, business rules, structural context, and phase identity.
 type PriorContext struct {
 	// PhaseIdentity holds the apply-path assembled string:
 	// "## spec ...\n\n## design ..." (+ optional progress section).
@@ -52,14 +47,6 @@ type PriorContext struct {
 	// Nil in M0.5.
 	AuxiliaryMemory *AuxiliaryBlock
 
-	// RawMemoryBlob is the M0.5-interim unstructured memory bundle from the
-	// phase-service callsite. The phase/service.go:buildPriorContext path
-	// assembles memory-engine records into this field via a strings.Builder
-	// loop; Render emits it verbatim.
-	//
-	// M3 will decompose RawMemoryBlob into Episodes / ChangeDigests /
-	// BusinessRules and remove this field entirely.
-	RawMemoryBlob string
 }
 
 // RenderedSkill is a flattened, render-ready projection of a skill.Skill for
@@ -166,8 +153,7 @@ func ToRenderedSkill(s *skill.Skill) RenderedSkill {
 //
 //	Skills → StructuralCtx → Episodes → ChangeDigests → BusinessRules → PhaseIdentity
 //
-// Empty layers are skipped. RawMemoryBlob is emitted for backward-compat with
-// existing callsites that still set it; it is scheduled for deletion in K.5.
+// Empty layers are skipped.
 //
 // RenderOpts zero-value is a no-op: TokenBudget=0 means unlimited;
 // EnableAttribution=false means no attribution headers injected by Render.
@@ -185,7 +171,10 @@ func (pc PriorContext) Render(opts RenderOpts) string {
 	return b.String()
 }
 
-// collectLayers builds the ordered []layerBlock in canonical D-M3-11 order.
+// collectLayers builds the ordered []layerBlock in canonical D-M3-11 order:
+//
+//	Skills → StructuralCtx → Episodes → ChangeDigests → BusinessRules → PhaseIdentity
+//
 // Attribution headers are included in each block's body when attr=true.
 // Empty layers are skipped. Non-active skills are excluded (status gate).
 func (pc PriorContext) collectLayers(attr bool) []layerBlock {
@@ -221,12 +210,6 @@ func (pc PriorContext) collectLayers(attr bool) []layerBlock {
 	// Layer 6: PhaseIdentity (apply path spec/design/progress, verbatim).
 	if pc.PhaseIdentity != "" {
 		ls = append(ls, layerBlock{name: "phase_identity", body: pc.PhaseIdentity})
-	}
-
-	// RawMemoryBlob — M0.5-interim backward compat. Emitted verbatim after
-	// PhaseIdentity. Removed once all callsites stop setting it (K.5).
-	if pc.RawMemoryBlob != "" {
-		ls = append(ls, layerBlock{name: "raw_memory_blob", body: pc.RawMemoryBlob})
 	}
 
 	return ls

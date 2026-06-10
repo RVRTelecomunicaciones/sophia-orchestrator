@@ -8,7 +8,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 )
 
-// SkillMatcher is the M1 application port for context-aware skill selection.
+// SkillMatcher is the application port for context-aware skill selection.
 //
 // SkillsForContext returns the Skills that match the provided SkillQuery along
 // with a list of active skills that were explicitly skipped and the reason why.
@@ -23,8 +23,6 @@ import (
 //     critical), then last_validated_at descending (most recently validated first,
 //     NULLs last), then usage_count descending, then id ascending as stable
 //     tiebreaker.
-//
-// See SkillProvider for the legacy phase-only wrapper.
 type SkillMatcher interface {
 	SkillsForContext(ctx context.Context, q SkillQuery) ([]*skill.Skill, []SkippedSkill, error)
 }
