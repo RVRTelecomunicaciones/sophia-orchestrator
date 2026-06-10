@@ -55,13 +55,12 @@ func (r *applyFakeSkillUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) 
 
 var _ outbound.SkillUsageRepository = (*applyFakeSkillUsageRepo)(nil)
 
-// applyFakeSkillProvider implements discipline.SkillMatcher for apply skill_usage_test.go.
-// Updated in M3 PR3a (K.4 GREEN): SkillsForPhase → SkillsForContext.
-type applyFakeSkillProvider struct {
+// applyFakeSkillMatcher implements discipline.SkillMatcher for apply skill_usage_test.go.
+type applyFakeSkillMatcher struct {
 	skills []*skdomain.Skill
 }
 
-func (f *applyFakeSkillProvider) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+func (f *applyFakeSkillMatcher) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
 	return f.skills, nil, nil
 }
 
@@ -92,7 +91,7 @@ func buildApplyActiveSkill(t *testing.T) *skdomain.Skill {
 // skill_usage rows for the injected skills.
 func TestApply_SkillUsage_RowWrittenAtHydrateSkills(t *testing.T) {
 	activeSkill := buildApplyActiveSkill(t)
-	sp := &applyFakeSkillProvider{skills: []*skdomain.Skill{activeSkill}}
+	sp := &applyFakeSkillMatcher{skills: []*skdomain.Skill{activeSkill}}
 	usageRepo := &applyFakeSkillUsageRepo{}
 
 	svc, _, _, _, _, mem := newRunService(t, func(d *apply.RunDeps) {
@@ -126,7 +125,7 @@ func TestApply_SkillUsage_RowWrittenAtHydrateSkills(t *testing.T) {
 // When SkillUsageRepo is nil, apply phase must still run normally without panic.
 func TestApply_SkillUsage_NilRepo_PhaseRunsNormally(t *testing.T) {
 	activeSkill := buildApplyActiveSkill(t)
-	sp := &applyFakeSkillProvider{skills: []*skdomain.Skill{activeSkill}}
+	sp := &applyFakeSkillMatcher{skills: []*skdomain.Skill{activeSkill}}
 
 	svc, _, _, _, _, mem := newRunService(t, func(d *apply.RunDeps) {
 		d.Skills = sp

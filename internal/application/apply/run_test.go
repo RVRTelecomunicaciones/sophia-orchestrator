@@ -2577,14 +2577,13 @@ func TestBreaker_DefaultThreshold_IsThree(t *testing.T) {
 // Skill hydration fail-soft tests in apply.RunService (Slice 2, task 2.4b)
 // ---------------------------------------------------------------------------
 
-// fakeApplySkillProvider implements discipline.SkillMatcher for apply run_test.go.
-// Updated in M3 PR3a (K.4 GREEN): SkillsForPhase → SkillsForContext.
-type fakeApplySkillProvider struct {
+// fakeApplySkillMatcher implements discipline.SkillMatcher for apply run_test.go.
+type fakeApplySkillMatcher struct {
 	skills []*skdomain.Skill
 	err    error
 }
 
-func (f *fakeApplySkillProvider) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
+func (f *fakeApplySkillMatcher) SkillsForContext(_ context.Context, _ discipline.SkillQuery) ([]*skdomain.Skill, []discipline.SkippedSkill, error) {
 	return f.skills, nil, f.err
 }
 
@@ -2606,7 +2605,7 @@ func TestExecute_Skills_NilProvider_PhaseRunsNormally(t *testing.T) {
 // TestExecute_Skills_ProviderError_FailSoft verifies that when the SkillProvider
 // returns an error, the apply phase continues normally (fail-soft).
 func TestExecute_Skills_ProviderError_FailSoft(t *testing.T) {
-	sp := &fakeApplySkillProvider{err: errors.New("db timeout")}
+	sp := &fakeApplySkillMatcher{err: errors.New("db timeout")}
 	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
 		d.Skills = sp
 	})
@@ -2623,7 +2622,7 @@ func TestExecute_Skills_ProviderError_FailSoft(t *testing.T) {
 // TestExecute_Skills_ProviderEmpty_FailSoft verifies that when the SkillProvider
 // returns an empty slice, the apply phase continues normally (fail-soft).
 func TestExecute_Skills_ProviderEmpty_FailSoft(t *testing.T) {
-	sp := &fakeApplySkillProvider{skills: []*skdomain.Skill{}} // empty, no error
+	sp := &fakeApplySkillMatcher{skills: []*skdomain.Skill{}} // empty, no error
 	svc, _, _, _, _, _ := newRunService(t, func(d *apply.RunDeps) {
 		d.Skills = sp
 	})

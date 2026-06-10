@@ -8,4 +8,4 @@ Introduced PriorContext Render.
 Use pgx/v5.
 
 spec: defined Render contract
-design: layer-order canonicallegacy blob content
+design: layer-order canonical

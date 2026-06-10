@@ -124,8 +124,6 @@ type Deps struct {
 	// safe: the prompt is left unchanged (byte-identical to pre-change
 	// baseline). When SOPHIA_SKILLS_ENABLED=false or the matcher errors,
 	// the service passes nil Skills to PromptBuilder (fail-soft).
-	// M3 D-M3-5: migrated from SkillProvider to SkillMatcher so the callsite
-	// can pass StructuralContext for structural filtering (PR3a).
 	Skills discipline.SkillMatcher
 
 	// SkillUsageRepo is the optional repository for recording skill injection
@@ -427,7 +425,6 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 
 	// Hydrate skills fail-soft: if matcher is nil, flag off, returns empty,
 	// or errors → Skills stays nil so prompt is unchanged (byte-identical).
-	// K.6: callsite migrated from SkillsForPhase → SkillsForContext (D-M3-9).
 	var phaseSkills []*skdomain.Skill
 	if s.d.Skills != nil {
 		if sk, _, skErr := s.d.Skills.SkillsForContext(ctx, discipline.SkillQuery{

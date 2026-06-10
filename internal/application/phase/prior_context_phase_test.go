@@ -275,11 +275,11 @@ func TestD4_PhaseServiceGoldens_StillPassBeforeMigration(t *testing.T) {
 		"see discipline/prior_context_test.go TestPriorContext_Render_Goldens")
 
 	// Sanity: verify that the discipline package's PriorContext type is
-	// accessible and the phase-service path (RawMemoryBlob) produces the
+	// accessible and the phase-service path (PhaseIdentity) produces the
 	// exact byte sequence the goldens captured.
 	rec := "fix flaky test in apply phase \xe2\x80\x94 root cause: race condition in goroutine fan-out"
-	pc := discipline.PriorContext{RawMemoryBlob: rec + "\n\n"}
+	pc := discipline.PriorContext{PhaseIdentity: rec + "\n\n"}
 	got := pc.Render(discipline.RenderOpts{})
 	require.Equal(t, rec+"\n\n", got,
-		"D.4 isolation: phase-service RawMemoryBlob path must round-trip verbatim")
+		"D.4 isolation: phase-service PhaseIdentity path must round-trip verbatim")
 }
