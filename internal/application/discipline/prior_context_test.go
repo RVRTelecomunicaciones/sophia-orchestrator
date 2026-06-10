@@ -329,6 +329,96 @@ func TestPriorContext_Render_Goldens(t *testing.T) {
 			pc:   discipline.PriorContext{},
 			opts: discipline.RenderOpts{},
 		},
+
+		// --- Group L (M3 PR3a): enriched-layer golden fixtures ---
+		// Structural assertions are co-located with each case below.
+		{
+			name: "phase_with_skills",
+			pc: discipline.PriorContext{
+				Skills: []discipline.RenderedSkill{
+					{Name: "clean-arch", Version: "v2", Status: "active", Source: "manual",
+						Techniques: []string{"step-back"},
+						Content:    "Apply hexagonal architecture: ports+adapters boundary."},
+				},
+			},
+			opts: discipline.RenderOpts{},
+		},
+		{
+			name: "phase_with_episodes",
+			pc: discipline.PriorContext{
+				Episodes: []discipline.EpisodeRef{
+					{ID: "ep-001", Content: "Fixed N+1 query in phase service."},
+					{ID: "ep-002", Content: "Discovered advisory lock race on concurrent apply."},
+				},
+			},
+			opts: discipline.RenderOpts{},
+		},
+		{
+			name: "phase_with_digests",
+			pc: discipline.PriorContext{
+				ChangeDigests: []discipline.ChangeDigestRef{
+					{ChangeID: "skills-lifecycle-matcher", Content: "Added lifecycle fields to Skill aggregate."},
+				},
+			},
+			opts: discipline.RenderOpts{},
+		},
+		{
+			name: "phase_all_layers",
+			pc: discipline.PriorContext{
+				Skills: []discipline.RenderedSkill{
+					{Name: "tdd-always", Version: "v1", Status: "active", Source: "manual",
+						Content: "Write failing test first."},
+				},
+				Episodes: []discipline.EpisodeRef{
+					{ID: "ep-01", Content: "Found that testcontainers adds 4s cold-start."},
+				},
+				ChangeDigests: []discipline.ChangeDigestRef{
+					{ChangeID: "prior-context", Content: "Introduced PriorContext Render."},
+				},
+				BusinessRules: []discipline.RuleRef{
+					{ID: "rule-01", Kind: "decision", Content: "Use pgx/v5."},
+				},
+				PhaseIdentity: "spec: defined Render contract\ndesign: layer-order canonical",
+				RawMemoryBlob: "legacy blob content",
+			},
+			opts: discipline.RenderOpts{},
+		},
+		{
+			name: "render_attribution_on",
+			pc: discipline.PriorContext{
+				Skills: []discipline.RenderedSkill{
+					{Name: "attr-skill", Version: "v3", Status: "active", Source: "consolidation_worker",
+						Techniques: []string{"inline-why"},
+						Content:    "Attribution header content here."},
+				},
+			},
+			opts: discipline.RenderOpts{EnableAttribution: true},
+		},
+		{
+			name: "render_attribution_off",
+			pc: discipline.PriorContext{
+				Skills: []discipline.RenderedSkill{
+					{Name: "attr-skill", Version: "v3", Status: "active", Source: "consolidation_worker",
+						Techniques: []string{"inline-why"},
+						Content:    "Attribution header content here."},
+				},
+			},
+			opts: discipline.RenderOpts{EnableAttribution: false},
+		},
+		{
+			// render_budget_truncated: budget small enough to truncate skill content.
+			// TokenBudget:75 → skills alloc=30 bytes → first skill fits, second is truncated.
+			name: "render_budget_truncated",
+			pc: discipline.PriorContext{
+				Skills: []discipline.RenderedSkill{
+					{Name: "s1", Version: "v1", Status: "active", Source: "manual",
+						Content: "skill-one-content-here"},
+					{Name: "s2", Version: "v1", Status: "active", Source: "manual",
+						Content: "skill-two-content-here"},
+				},
+			},
+			opts: discipline.RenderOpts{TokenBudget: 75},
+		},
 	}
 
 	for _, tc := range cases {
@@ -343,6 +433,114 @@ func TestPriorContext_Render_Goldens(t *testing.T) {
 				"BYTE-EXACT GOLDEN MISMATCH for %s — Render output does not match pre-refactor baseline. Do NOT regenerate goldens.", tc.name)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Group L (M3 PR3a): structural assertions on enriched golden cases.
+// These complement the byte-exact capture above with semantic checks that
+// survive reformatting (D-M3-10: byte-exact contract retired for M3 goldens).
+// ---------------------------------------------------------------------------
+
+// TestRender_GroupL_StructuralAssertions verifies semantic properties of each
+// M3 enriched-layer golden case without relying on byte-exact matching.
+func TestRender_GroupL_StructuralAssertions(t *testing.T) {
+	t.Run("phase_with_skills", func(t *testing.T) {
+		pc := discipline.PriorContext{
+			Skills: []discipline.RenderedSkill{
+				{Name: "clean-arch", Version: "v2", Status: "active", Source: "manual",
+					Techniques: []string{"step-back"},
+					Content:    "Apply hexagonal architecture: ports+adapters boundary."},
+			},
+		}
+		out := pc.Render(discipline.RenderOpts{})
+		require.Contains(t, out, "clean-arch", "skill name must appear")
+		require.Contains(t, out, "Apply hexagonal architecture", "skill content must appear verbatim")
+		require.Contains(t, out, "step-back", "technique must appear")
+		require.NotContains(t, out, "## Skill: ", "no attribution header without EnableAttribution")
+	})
+
+	t.Run("phase_with_episodes", func(t *testing.T) {
+		pc := discipline.PriorContext{
+			Episodes: []discipline.EpisodeRef{
+				{ID: "ep-001", Content: "Fixed N+1 query in phase service."},
+				{ID: "ep-002", Content: "Discovered advisory lock race on concurrent apply."},
+			},
+		}
+		out := pc.Render(discipline.RenderOpts{})
+		require.Contains(t, out, "Fixed N+1 query", "first episode content must appear")
+		require.Contains(t, out, "advisory lock race", "second episode content must appear")
+	})
+
+	t.Run("phase_with_digests", func(t *testing.T) {
+		pc := discipline.PriorContext{
+			ChangeDigests: []discipline.ChangeDigestRef{
+				{ChangeID: "skills-lifecycle-matcher", Content: "Added lifecycle fields to Skill aggregate."},
+			},
+		}
+		out := pc.Render(discipline.RenderOpts{})
+		require.Contains(t, out, "lifecycle fields", "digest content must appear")
+	})
+
+	t.Run("phase_all_layers_ordering", func(t *testing.T) {
+		pc := discipline.PriorContext{
+			Skills: []discipline.RenderedSkill{
+				{Name: "tdd-always", Version: "v1", Status: "active", Source: "manual",
+					Content: "Write failing test first."},
+			},
+			Episodes: []discipline.EpisodeRef{
+				{ID: "ep-01", Content: "Found that testcontainers adds 4s cold-start."},
+			},
+			ChangeDigests: []discipline.ChangeDigestRef{
+				{ChangeID: "prior-context", Content: "Introduced PriorContext Render."},
+			},
+			BusinessRules: []discipline.RuleRef{
+				{ID: "rule-01", Kind: "decision", Content: "Use pgx/v5."},
+			},
+			PhaseIdentity: "spec: defined Render contract",
+		}
+		out := pc.Render(discipline.RenderOpts{})
+		skillIdx := strings.Index(out, "Write failing test first.")
+		epIdx := strings.Index(out, "testcontainers adds 4s")
+		digestIdx := strings.Index(out, "Introduced PriorContext")
+		ruleIdx := strings.Index(out, "Use pgx/v5")
+		identityIdx := strings.Index(out, "spec: defined Render contract")
+		require.Greater(t, skillIdx, -1, "skills must appear")
+		require.Greater(t, epIdx, -1, "episodes must appear")
+		require.Greater(t, digestIdx, -1, "digests must appear")
+		require.Greater(t, ruleIdx, -1, "rules must appear")
+		require.Greater(t, identityIdx, -1, "phase identity must appear")
+		// Canonical layer order (D-M3-11): Skills → Episodes → ChangeDigests → BusinessRules → PhaseIdentity
+		require.Less(t, skillIdx, epIdx, "skills before episodes")
+		require.Less(t, epIdx, digestIdx, "episodes before digests")
+		require.Less(t, digestIdx, ruleIdx, "digests before rules")
+		require.Less(t, ruleIdx, identityIdx, "rules before phase identity")
+	})
+
+	t.Run("render_attribution_on", func(t *testing.T) {
+		pc := discipline.PriorContext{
+			Skills: []discipline.RenderedSkill{
+				{Name: "attr-skill", Version: "v3", Status: "active", Source: "consolidation_worker",
+					Content: "Attribution header content here."},
+			},
+		}
+		out := pc.Render(discipline.RenderOpts{EnableAttribution: true})
+		require.Contains(t, out, "## Skill: attr-skill v3 (active, source=consolidation_worker)",
+			"attribution header must match D-M3-8 format")
+		require.Contains(t, out, "Attribution header content here.", "skill content must appear")
+	})
+
+	t.Run("render_attribution_off", func(t *testing.T) {
+		pc := discipline.PriorContext{
+			Skills: []discipline.RenderedSkill{
+				{Name: "attr-skill", Version: "v3", Status: "active", Source: "consolidation_worker",
+					Content: "Attribution header content here."},
+			},
+		}
+		out := pc.Render(discipline.RenderOpts{EnableAttribution: false})
+		require.NotContains(t, out, "## Skill: attr-skill", "no attribution header when disabled")
+		require.Contains(t, out, "## attr-skill", "simple header must appear")
+		require.Contains(t, out, "Attribution header content here.", "skill content must appear")
+	})
 }
 
 // ---------------------------------------------------------------------------

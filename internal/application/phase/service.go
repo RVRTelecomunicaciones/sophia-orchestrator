@@ -1423,5 +1423,8 @@ func skillUsageOutcomeFor(s envelope.Status) skillusage.Outcome {
 // parseJSON is a thin wrapper around encoding/json.Unmarshal for service-internal
 // use. Lives here to keep buildPriorContext readable without importing json twice.
 func parseJSON(content string, v any) error {
-	return json.Unmarshal([]byte(content), v)
+	if err := json.Unmarshal([]byte(content), v); err != nil {
+		return fmt.Errorf("parseJSON: %w", err)
+	}
+	return nil
 }

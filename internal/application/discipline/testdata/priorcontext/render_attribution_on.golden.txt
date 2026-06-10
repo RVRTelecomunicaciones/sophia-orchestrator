@@ -1,0 +1,4 @@
+## Skill: attr-skill v3 (active, source=consolidation_worker)
+Techniques: inline-why
+Attribution header content here.
+

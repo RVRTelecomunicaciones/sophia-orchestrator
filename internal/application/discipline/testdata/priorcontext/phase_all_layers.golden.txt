@@ -1,0 +1,11 @@
+## tdd-always
+Write failing test first.
+
+Found that testcontainers adds 4s cold-start.
+
+Introduced PriorContext Render.
+
+Use pgx/v5.
+
+spec: defined Render contract
+design: layer-order canonicallegacy blob content
