@@ -425,7 +425,6 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 
 	// Hydrate skills fail-soft: if matcher is nil, flag off, returns empty,
 	// or errors → Skills stays nil so prompt is unchanged (byte-identical).
-	// K.6: callsite migrated from SkillsForPhase → SkillsForContext (D-M3-9).
 	var phaseSkills []*skdomain.Skill
 	if s.d.Skills != nil {
 		if sk, _, skErr := s.d.Skills.SkillsForContext(ctx, discipline.SkillQuery{

@@ -602,7 +602,6 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 // hydrateSkills returns the skills applicable to pt, or nil on any failure.
 // Fail-soft contract: a nil matcher, empty result, or matcher error all
 // return nil so the prompt stays byte-identical to the pre-change baseline.
-// K.7: migrated from SkillsForPhase → SkillsForContext (D-M3-9 / PR3a).
 func (s *RunService) hydrateSkills(ctx context.Context, pt phase.PhaseType) []*skdomain.Skill {
 	if s.d.Skills == nil {
 		return nil
