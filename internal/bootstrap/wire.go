@@ -27,6 +27,7 @@ import (
 	graphifyadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/graphify"
 	httpbase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/memory"
+	webhookadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/webhook"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/pg"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/runtime"
 	gitrunneradapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/gitrunner"
@@ -316,22 +317,34 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		CacheTTL:  24 * time.Hour,
 	})
 
+	// Memory-engine webhook bridge (M2 D-M2-1): fire-and-forget POST after phase.archived.
+	// nil when SOPHIA_MEMORY_WEBHOOK_URL is empty (adapter disabled).
+	var webhookNotifier phase.WebhookNotifier
+	if cfg.MemoryWebhook.URL != "" {
+		wh := webhookadapter.New(webhookadapter.Config{
+			URL:     cfg.MemoryWebhook.URL,
+			APIKey:  cfg.MemoryWebhook.APIKey,
+			Timeout: time.Duration(cfg.MemoryWebhook.TimeoutMS) * time.Millisecond,
+		})
+		webhookNotifier = webhookadapter.NewPhaseBridge(wh)
+	}
+
 	phaseSvc := phase.New(phase.Deps{
-		ChangeRepo:     changeRepo,
-		PhaseRepo:      phaseRepo,
-		SessionRepo:    sessionRepo,
-		Governance:     govClient,
-		Memory:         memClient,
-		Dispatcher:     dispatcher,
-		SpawnGov:       spawnGov,
-		Validator:      validator,
-		IronLaw:        ironLaw,
-		Prompts:        prompts,
-		Audit:          auditLog,
-		Events:         events,
-		Clock:          clock,
-		IDGen:          idGen,
-		Scheduler:      phase.AsyncScheduler,
+		ChangeRepo:      changeRepo,
+		PhaseRepo:       phaseRepo,
+		SessionRepo:     sessionRepo,
+		Governance:      govClient,
+		Memory:          memClient,
+		Dispatcher:      dispatcher,
+		SpawnGov:        spawnGov,
+		Validator:       validator,
+		IronLaw:         ironLaw,
+		Prompts:         prompts,
+		Audit:           auditLog,
+		Events:          events,
+		Clock:           clock,
+		IDGen:           idGen,
+		Scheduler:       phase.AsyncScheduler,
 		Config: func() phase.ServiceConfig {
 			c := phase.DefaultServiceConfig()
 			// Tenant binding for memory-engine ingest. Empty in
@@ -341,11 +354,12 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			c.MemoryTenantID = cfg.Memory.TenantID
 			return c
 		}(),
-		ApplyExecutor:  applyExecutor,
-		Metrics:        metrics,
-		Skills:         skillProvider,    // nil when SOPHIA_SKILLS_ENABLED=false
-		SkillUsageRepo: skillUsageRepo,   // M2: track skill injection events
-		Init:           initSvc,          // INIT phase structural detection (D-INIT-3)
+		ApplyExecutor:   applyExecutor,
+		Metrics:         metrics,
+		Skills:          skillProvider,    // nil when SOPHIA_SKILLS_ENABLED=false
+		SkillUsageRepo:  skillUsageRepo,   // M2: track skill injection events
+		WebhookNotifier: webhookNotifier,  // M2: fire-and-forget phase.archived (nil = disabled)
+		Init:            initSvc,          // INIT phase structural detection (D-INIT-3)
 	})
 
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{

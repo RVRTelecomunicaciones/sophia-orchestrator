@@ -25,6 +25,23 @@ type Config struct {
 	Environment   string // dev | staging | prod
 	LogLevel      string // debug | info | warn | error
 	SkillsEnabled bool   // SOPHIA_SKILLS_ENABLED (default true)
+
+	// MemoryWebhook configures the outbound best-effort webhook from orch to
+	// memory-engine's /api/v1/worker/phase-archived endpoint (D-M2-1).
+	MemoryWebhook MemoryWebhookConfig
+}
+
+// MemoryWebhookConfig holds the outbound webhook parameters (M2 D-M2-1).
+type MemoryWebhookConfig struct {
+	// URL is the full POST endpoint. Empty = disabled (no call made).
+	// Loaded from SOPHIA_MEMORY_WEBHOOK_URL.
+	URL string
+	// APIKey is the X-API-Key header value for memory-engine auth.
+	// Loaded from SOPHIA_MEMORY_WEBHOOK_API_KEY.
+	APIKey string
+	// TimeoutMS is the per-request HTTP client timeout in milliseconds.
+	// Default 5000 (5s). Loaded from SOPHIA_MEMORY_WEBHOOK_TIMEOUT_MS.
+	TimeoutMS int
 }
 
 // ApplyConfig configures the apply-phase coordinator. Loaded from
@@ -396,6 +413,10 @@ func Load() (Config, error) {
 	}
 	c.Runtime.BaseURL = envStr("SOPHIA_RUNTIME_URL", "")
 	c.Runtime.APIKey = envStr("SOPHIA_RUNTIME_API_KEY", "")
+
+	c.MemoryWebhook.URL = envStr("SOPHIA_MEMORY_WEBHOOK_URL", "")
+	c.MemoryWebhook.APIKey = envStr("SOPHIA_MEMORY_WEBHOOK_API_KEY", "")
+	c.MemoryWebhook.TimeoutMS = envInt("SOPHIA_MEMORY_WEBHOOK_TIMEOUT_MS", 5000)
 
 	c.Apply.WorktreeRoot = envStr("SOPHIA_APPLY_WORKTREE_ROOT", c.Apply.WorktreeRoot)
 	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)
