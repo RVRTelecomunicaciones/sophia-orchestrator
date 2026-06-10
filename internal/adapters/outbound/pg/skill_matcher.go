@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
@@ -32,9 +33,10 @@ type PGSkillMatcher struct {
 	repo *SkillRepo
 }
 
-// NewPGSkillMatcher constructs a PGSkillMatcher. The pool parameter is accepted
-// for forward compatibility with M2 push-down queries but is unused in M1.
-func NewPGSkillMatcher(_ interface{}, repo *SkillRepo) *PGSkillMatcher {
+// NewPGSkillMatcher constructs a PGSkillMatcher. The pool parameter is typed as
+// *pgxpool.Pool per D-M2-13 fix S3; it is accepted for forward compatibility
+// with M2+ SQL push-down queries but remains unused in M1 in-memory filtering.
+func NewPGSkillMatcher(_ *pgxpool.Pool, repo *SkillRepo) *PGSkillMatcher {
 	if repo == nil {
 		panic("pg.PGSkillMatcher: nil repo")
 	}
@@ -100,11 +102,45 @@ func (m *PGSkillMatcher) SkillsForContext(ctx context.Context, q discipline.Skil
 			continue
 		}
 
+		// MaxRiskLevel filter (D-M2-13 M1 warning W1): skip skills whose
+		// risk_level exceeds the inclusive upper bound.
+		if q.MaxRiskLevel != "" {
+			if riskOrder[s.RiskLevel()] > riskOrder[q.MaxRiskLevel] {
+				skipped = append(skipped, discipline.SkippedSkill{
+					SkillID: s.ID().String(),
+					Reason:  discipline.SkipReasonRiskExceeded,
+				})
+				continue
+			}
+		}
+
 		matched = append(matched, s)
 	}
 
 	sortSkills(matched)
 	return matched, skipped, nil
+}
+
+// applyRiskFilter applies the MaxRiskLevel filter to a slice of skills.
+// It is extracted as a pure function for unit testing (no DB required).
+// When q.MaxRiskLevel is empty the filter is a no-op (all skills pass).
+func applyRiskFilter(candidates []*skill.Skill, q discipline.SkillQuery) ([]*skill.Skill, []discipline.SkippedSkill) {
+	if q.MaxRiskLevel == "" {
+		return candidates, nil
+	}
+	matched := make([]*skill.Skill, 0, len(candidates))
+	var skipped []discipline.SkippedSkill
+	for _, s := range candidates {
+		if riskOrder[s.RiskLevel()] > riskOrder[q.MaxRiskLevel] {
+			skipped = append(skipped, discipline.SkippedSkill{
+				SkillID: s.ID().String(),
+				Reason:  discipline.SkipReasonRiskExceeded,
+			})
+			continue
+		}
+		matched = append(matched, s)
+	}
+	return matched, skipped
 }
 
 // scopeMatches returns ("", true) when the skill's scope passes the query's
@@ -190,7 +226,8 @@ func anyGlobMatch(patterns []string, path string) bool {
 //
 //	primary:   risk_level asc  (low=0 < medium=1 < high=2 < critical=3)
 //	secondary: last_validated_at desc (NULLs last)
-//	tertiary:  id asc (stable tiebreaker)
+//	tertiary:  usage_count desc, NULL/zero last (D-M2-13 M1 warning S1)
+//	stable tiebreaker: id asc
 func sortSkills(skills []*skill.Skill) {
 	sort.SliceStable(skills, func(i, j int) bool {
 		ri, rj := riskOrder[skills[i].RiskLevel()], riskOrder[skills[j].RiskLevel()]
@@ -209,6 +246,18 @@ func sortSkills(skills []*skill.Skill) {
 			if !ti.Equal(*tj) {
 				return ti.After(*tj) // desc
 			}
+		}
+		// Tertiary: usage_count desc, zero sorts last (D-M2-13 S1 fix).
+		ui, uj := skills[i].Metrics().UsageCount, skills[j].Metrics().UsageCount
+		if ui != uj {
+			// Higher usage first; zero is treated as NULL (sorts last).
+			if ui == 0 {
+				return false // i has zero → sort after j
+			}
+			if uj == 0 {
+				return true // j has zero → sort after i
+			}
+			return ui > uj // desc
 		}
 		// Stable tiebreaker: id asc.
 		return skills[i].ID().String() < skills[j].ID().String()
