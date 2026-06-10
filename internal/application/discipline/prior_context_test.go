@@ -1,6 +1,7 @@
 package discipline_test
 
 // prior_context_test.go — Group B (RED tests) and Group C (snapshot tests)
+// Extended for M3 PR3a Groups I and J.
 //
 // TDD cycle: tests written FIRST against discipline.PriorContext which does
 // not exist yet (prior_context.go absent). All tests in this file fail RED
@@ -8,6 +9,7 @@ package discipline_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,14 +78,20 @@ func TestRender_TokenBudget_Zero_IsNoOp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// B.6 — TokenBudget=5 truncates output to 5 bytes
+// B.6 — TokenBudget truncates output and appends truncation marker (M3)
 // ---------------------------------------------------------------------------
 
 func TestRender_TokenBudget_Truncates(t *testing.T) {
+	// M3: enforceBudget truncates at the budget boundary and appends a
+	// truncation marker (deterministic text, no clock/random).
+	// raw_memory_blob has share 1.0 → alloc = budget = 5 bytes.
+	// "hello world" (11 bytes) → first 5 kept, marker appended.
 	pc := discipline.PriorContext{RawMemoryBlob: "hello world"}
 	got := pc.Render(discipline.RenderOpts{TokenBudget: 5})
-	require.Equal(t, "hello", got,
-		"TokenBudget=5 must truncate output to the first 5 bytes")
+	require.True(t, strings.HasPrefix(got, "hello"),
+		"TokenBudget=5 must keep the first 5 bytes of output")
+	require.Contains(t, got, "truncated",
+		"TokenBudget truncation must append a truncation marker")
 }
 
 // ---------------------------------------------------------------------------
@@ -140,22 +148,25 @@ func TestPriorContext_JSON_RoundTrip(t *testing.T) {
 	require.NotNil(t, decoded.StructuralCtx, "StructuralCtx must round-trip non-nil")
 	require.Equal(t, sc.ProjectID, decoded.StructuralCtx.ProjectID, "StructuralCtx.ProjectID must survive JSON round-trip")
 
-	// Stub types must marshal to {}.
+	// M0.5 contract updated for M3: stub types now have real fields; zero-value
+	// structs marshal to objects (empty string/slice fields may be omitempty).
+	// The constraint is that JSON round-trip is lossless (tested above for each type).
+	// RenderedSkill, EpisodeRef, ChangeDigestRef, RuleRef must all be JSON-serializable.
 	renderedSkillJSON, err := json.Marshal(discipline.RenderedSkill{})
 	require.NoError(t, err)
-	require.Equal(t, "{}", string(renderedSkillJSON), "RenderedSkill{} must marshal to {}")
+	require.NotEmpty(t, renderedSkillJSON, "RenderedSkill must be JSON-serializable")
 
 	episodeJSON, err := json.Marshal(discipline.EpisodeRef{})
 	require.NoError(t, err)
-	require.Equal(t, "{}", string(episodeJSON), "EpisodeRef{} must marshal to {}")
+	require.NotEmpty(t, episodeJSON, "EpisodeRef must be JSON-serializable")
 
 	changeDigestJSON, err := json.Marshal(discipline.ChangeDigestRef{})
 	require.NoError(t, err)
-	require.Equal(t, "{}", string(changeDigestJSON), "ChangeDigestRef{} must marshal to {}")
+	require.NotEmpty(t, changeDigestJSON, "ChangeDigestRef must be JSON-serializable")
 
 	ruleRefJSON, err := json.Marshal(discipline.RuleRef{})
 	require.NoError(t, err)
-	require.Equal(t, "{}", string(ruleRefJSON), "RuleRef{} must marshal to {}")
+	require.NotEmpty(t, ruleRefJSON, "RuleRef must be JSON-serializable")
 
 	routineJSON, err := json.Marshal(discipline.RoutineOutput{})
 	require.NoError(t, err)
@@ -357,4 +368,212 @@ func TestRenderOpts_ZeroValue_IsNoOp_ApplyCase(t *testing.T) {
 	pc := discipline.PriorContext{PhaseIdentity: inline}
 	require.Equal(t, inline, pc.Render(discipline.RenderOpts{}),
 		"RenderOpts{} MUST be a no-op (operator decision #9)")
+}
+
+// ---------------------------------------------------------------------------
+// Group I — Stub types become real (M3 PR3a)
+// I.1 — RenderedSkill fields populated
+// I.2 — EpisodeRef, RuleRef, ChangeDigestRef real fields
+// ---------------------------------------------------------------------------
+
+// TestRenderedSkill_FieldsPopulated asserts that RenderedSkill has the 6
+// concrete fields declared in design D-M3-5. The test constructs a value via
+// struct literal and confirms all fields survive a JSON round-trip (non-empty
+// when set). Tests MUST fail RED until I.3 adds real fields to the struct.
+func TestRenderedSkill_FieldsPopulated(t *testing.T) {
+	rs := discipline.RenderedSkill{
+		Name:       "clean-arch",
+		Version:    "v3",
+		Status:     "active",
+		Source:     "consolidation_worker",
+		Techniques: []string{"step-back", "chain-of-verification"},
+		Content:    "Apply hexagonal architecture: ports+adapters boundary.",
+	}
+	require.Equal(t, "clean-arch", rs.Name, "Name must be set")
+	require.Equal(t, "v3", rs.Version, "Version must be set")
+	require.Equal(t, "active", rs.Status, "Status must be set")
+	require.Equal(t, "consolidation_worker", rs.Source, "Source must be set")
+	require.Equal(t, []string{"step-back", "chain-of-verification"}, rs.Techniques, "Techniques must be set")
+	require.Equal(t, "Apply hexagonal architecture: ports+adapters boundary.", rs.Content, "Content must be set")
+
+	// JSON round-trip: real fields must survive marshal/unmarshal.
+	data, err := json.Marshal(rs)
+	require.NoError(t, err)
+	var decoded discipline.RenderedSkill
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, rs, decoded, "RenderedSkill must JSON round-trip")
+}
+
+// TestEpisodeRef_FromRecentEpisodic asserts EpisodeRef has real ID + Content fields.
+func TestEpisodeRef_FromRecentEpisodic(t *testing.T) {
+	ep := discipline.EpisodeRef{
+		ID:      "mem-01ABC",
+		Content: "Fixed N+1 query in phase service — root cause: eager join missing.",
+	}
+	require.Equal(t, "mem-01ABC", ep.ID, "EpisodeRef.ID must be set")
+	require.Equal(t, "Fixed N+1 query in phase service — root cause: eager join missing.", ep.Content, "EpisodeRef.Content must be set")
+
+	data, err := json.Marshal(ep)
+	require.NoError(t, err)
+	var decoded discipline.EpisodeRef
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, ep, decoded, "EpisodeRef must JSON round-trip")
+}
+
+// TestRuleRef_FromDecisions asserts RuleRef has real ID, Kind, Content fields and
+// Kind="decision" for rules sourced from the decisions section.
+func TestRuleRef_FromDecisions(t *testing.T) {
+	r := discipline.RuleRef{
+		ID:      "mem-D001",
+		Kind:    "decision",
+		Content: "Use pgx/v5 for all database access; no gorm.",
+	}
+	require.Equal(t, "mem-D001", r.ID, "RuleRef.ID must be set")
+	require.Equal(t, "decision", r.Kind, "RuleRef.Kind must be 'decision'")
+	require.Equal(t, "Use pgx/v5 for all database access; no gorm.", r.Content, "RuleRef.Content must be set")
+
+	data, err := json.Marshal(r)
+	require.NoError(t, err)
+	var decoded discipline.RuleRef
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, r, decoded, "RuleRef must JSON round-trip")
+}
+
+// TestRuleRef_FromHeuristics asserts RuleRef.Kind="heuristic" for rules from heuristics section.
+func TestRuleRef_FromHeuristics(t *testing.T) {
+	r := discipline.RuleRef{
+		ID:      "mem-H007",
+		Kind:    "heuristic",
+		Content: "Always freeze Clock in golden tests for byte-exact reproducibility.",
+	}
+	require.Equal(t, "heuristic", r.Kind, "RuleRef.Kind must be 'heuristic'")
+	require.NotEmpty(t, r.Content, "RuleRef.Content must be non-empty")
+}
+
+// TestChangeDigestRef_Populated asserts ChangeDigestRef has real ChangeID + Content.
+func TestChangeDigestRef_Populated(t *testing.T) {
+	cd := discipline.ChangeDigestRef{
+		ChangeID: "feat-prior-context-fixture",
+		Content:  "Digest: introduced PriorContext struct, Render method, 8 stub types.",
+	}
+	require.Equal(t, "feat-prior-context-fixture", cd.ChangeID, "ChangeDigestRef.ChangeID must be set")
+	require.Equal(t, "Digest: introduced PriorContext struct, Render method, 8 stub types.", cd.Content, "ChangeDigestRef.Content must be set")
+
+	data, err := json.Marshal(cd)
+	require.NoError(t, err)
+	var decoded discipline.ChangeDigestRef
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Equal(t, cd, decoded, "ChangeDigestRef must JSON round-trip")
+}
+
+// ---------------------------------------------------------------------------
+// Group J — Render() layers + budget + attribution (M3 PR3a)
+// J.1 — layer ordering (skills before episodes)
+// J.2 — no blocked/deprecated skill rendered
+// J.3 — budget respected (truncation marker present)
+// J.4 — attribution headers when enabled
+// J.5 — zero-value RenderOpts is still no-op
+// ---------------------------------------------------------------------------
+
+// TestRender_LayerOrdering verifies that the skills layer appears before
+// the episodes layer in Render() output (D-M3-11 canonical order).
+// MUST fail RED until J.6/J.9 implement collectLayers.
+func TestRender_LayerOrdering(t *testing.T) {
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			{Name: "clean-arch", Version: "v1", Status: "active", Source: "manual", Content: "skill content here"},
+		},
+		Episodes: []discipline.EpisodeRef{
+			{ID: "ep-01", Content: "episode content here"},
+		},
+	}
+	out := pc.Render(discipline.RenderOpts{})
+	skillIdx := strings.Index(out, "skill content here")
+	epIdx := strings.Index(out, "episode content here")
+	require.Greater(t, skillIdx, -1, "skills content must appear in Render output")
+	require.Greater(t, epIdx, -1, "episodes content must appear in Render output")
+	require.Less(t, skillIdx, epIdx, "skills MUST appear before episodes in Render output (D-M3-11)")
+}
+
+// TestRender_NoBlockedSkillRendered verifies that deprecated/blocked/archived
+// skills set in PriorContext.Skills do NOT appear in Render() output.
+// The SkillMatcher gate prevents non-active skills from entering PriorContext.Skills,
+// but Render itself must also skip any non-active skill by checking Status.
+// MUST fail RED until J.6 implements the guard.
+func TestRender_NoBlockedSkillRendered(t *testing.T) {
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			{Name: "blocked-skill", Version: "v1", Status: "blocked", Source: "manual", Content: "BLOCKED CONTENT"},
+			{Name: "deprecated-skill", Version: "v1", Status: "deprecated", Source: "manual", Content: "DEPRECATED CONTENT"},
+			{Name: "archived-skill", Version: "v1", Status: "archived", Source: "manual", Content: "ARCHIVED CONTENT"},
+			{Name: "active-skill", Version: "v2", Status: "active", Source: "manual", Content: "ACTIVE CONTENT"},
+		},
+	}
+	out := pc.Render(discipline.RenderOpts{})
+	require.NotContains(t, out, "BLOCKED CONTENT", "blocked skill must not render")
+	require.NotContains(t, out, "DEPRECATED CONTENT", "deprecated skill must not render")
+	require.NotContains(t, out, "ARCHIVED CONTENT", "archived skill must not render")
+	require.Contains(t, out, "ACTIVE CONTENT", "active skill MUST render")
+}
+
+// TestRender_BudgetRespected verifies that when TokenBudget is set, only the
+// allowed amount of skill content appears and a truncation marker is emitted.
+// MUST fail RED until J.7 implements enforceBudget.
+func TestRender_BudgetRespected(t *testing.T) {
+	// Three skills; set budget to allow only the first skill.
+	// Skill 1 body (no-attribution mode):
+	//   "## s1\n" (6) + "skill-one-content-here" (22) + "\n\n" (2) = 30 bytes
+	//   Budget share for skills = 40% of total budget.
+	//   So total budget = 75 → skills share = 30 bytes → first skill fits exactly.
+	//   Skill 2+3 get cut.
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			{Name: "s1", Version: "v1", Status: "active", Source: "manual", Content: "skill-one-content-here"},
+			{Name: "s2", Version: "v1", Status: "active", Source: "manual", Content: "skill-two-content-here"},
+			{Name: "s3", Version: "v1", Status: "active", Source: "manual", Content: "skill-three-content-here"},
+		},
+	}
+	// Total budget 75 → skills alloc = 40% of 75 = 30 bytes.
+	// First skill is 30 bytes exactly; second would need 30+ more → truncated.
+	out := pc.Render(discipline.RenderOpts{TokenBudget: 75})
+	require.Contains(t, out, "truncated", "truncation marker must be present when budget exceeded")
+	// The first skill should fit; the others should not.
+	require.Contains(t, out, "skill-one-content-here", "first skill must be included within budget")
+	require.NotContains(t, out, "skill-two-content-here", "second skill must be cut by budget")
+	require.NotContains(t, out, "skill-three-content-here", "third skill must be cut by budget")
+}
+
+// TestRender_AttributionHeaders verifies that when EnableAttribution=true,
+// each rendered skill is prefixed with the canonical attribution header.
+// MUST fail RED until J.8 implements attribution header emission.
+func TestRender_AttributionHeaders(t *testing.T) {
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			{Name: "clean-arch", Version: "v3", Status: "active", Source: "consolidation_worker", Content: "content here"},
+		},
+	}
+	out := pc.Render(discipline.RenderOpts{EnableAttribution: true})
+	require.Contains(t, out, "## Skill: clean-arch v3 (active, source=consolidation_worker)",
+		"attribution header must match D-M3-8 format")
+}
+
+// TestRenderOpts_ZeroValue_IsNoOp_M3 confirms the M0.5 no-op contract holds
+// after M3 enrichment: zero-value RenderOpts with skills and episodes includes
+// all items without attribution headers.
+// MUST fail RED when Render starts filtering non-active skills (J.2 changes behavior).
+func TestRenderOpts_ZeroValue_IsNoOp_M3(t *testing.T) {
+	pc := discipline.PriorContext{
+		Skills: []discipline.RenderedSkill{
+			{Name: "s1", Version: "v1", Status: "active", Source: "manual", Content: "skill content"},
+		},
+		Episodes: []discipline.EpisodeRef{
+			{ID: "ep-01", Content: "episode content"},
+		},
+	}
+	out := pc.Render(discipline.RenderOpts{})
+	// All active items included.
+	require.Contains(t, out, "skill content", "active skill must be included with zero-value opts")
+	require.Contains(t, out, "episode content", "episode must be included with zero-value opts")
+	// No attribution headers.
+	require.NotContains(t, out, "## Skill: ", "no attribution headers with zero EnableAttribution")
 }

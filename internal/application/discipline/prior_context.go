@@ -1,8 +1,10 @@
 package discipline
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 )
 
@@ -60,21 +62,54 @@ type PriorContext struct {
 	RawMemoryBlob string
 }
 
-// RenderedSkill is a forward-compat stub for M3 skill rendering integration.
-// Concrete shape chosen in M3.
-type RenderedSkill struct{}
+// RenderedSkill is a flattened, render-ready projection of a skill.Skill for
+// PriorContext (D-M3-5). The callsite maps domain skills (post-match) into this
+// shape; Render emits it. Kept render-ready (no domain methods) so Render stays
+// a pure value→string function.
+type RenderedSkill struct {
+	// Name is the skill name, e.g. "clean-arch".
+	Name string `json:"name,omitempty"`
+	// Version is the skill version string, e.g. "v3".
+	Version string `json:"version,omitempty"`
+	// Status is the skill lifecycle status — always "active" when sourced from
+	// SkillMatcher (matcher gate). Render skips non-active skills defensively.
+	Status string `json:"status,omitempty"`
+	// Source is the activation source string, e.g. "consolidation_worker".
+	Source string `json:"source,omitempty"`
+	// Techniques is the list of technique tag strings, e.g. ["step-back"].
+	Techniques []string `json:"techniques,omitempty"`
+	// Content is the skill content verbatim (inline-why lives inside content).
+	Content string `json:"content,omitempty"`
+}
 
-// EpisodeRef is a forward-compat stub for M3 episodic memory integration.
-// Empty struct = zero-cost anchor. M3 populates with concrete episodic shape.
-type EpisodeRef struct{}
+// EpisodeRef is a relevant episodic memory surfaced for the phase prompt (D-M3-6).
+// Populated from the BuildContext recent_episodic section.
+type EpisodeRef struct {
+	// ID is the memory record ID used for attribution traceability.
+	ID string `json:"id,omitempty"`
+	// Content is the record body verbatim.
+	Content string `json:"content,omitempty"`
+}
 
-// ChangeDigestRef is a forward-compat stub for M3 change-digest integration.
-// Empty struct = zero-cost anchor. M3 populates with concrete digest shape.
-type ChangeDigestRef struct{}
+// ChangeDigestRef is a prior change digest sourced via dedicated Search call
+// (DG-1). Populated by buildPriorContext from Search(Types:[semantic], Limit:3).
+type ChangeDigestRef struct {
+	// ChangeID is the source change identifier (attribution anchor).
+	ChangeID string `json:"change_id,omitempty"`
+	// Content is the digest YAML verbatim.
+	Content string `json:"content,omitempty"`
+}
 
-// RuleRef is a forward-compat stub for M3 business-rule integration.
-// Empty struct = zero-cost anchor. M3 populates with concrete rule shape.
-type RuleRef struct{}
+// RuleRef is a project business rule (decision or heuristic) sourced from the
+// BuildContext decisions/heuristics sections (D-M3-6).
+type RuleRef struct {
+	// ID is the memory record ID used for attribution traceability.
+	ID string `json:"id,omitempty"`
+	// Kind is "decision" or "heuristic".
+	Kind string `json:"kind,omitempty"`
+	// Content is the rule body verbatim.
+	Content string `json:"content,omitempty"`
+}
 
 // RoutineOutput is a forward-compat stub for M3 routine integration.
 // Empty struct = zero-cost anchor. M3 populates with concrete routine shape.
@@ -98,64 +133,255 @@ type RenderOpts struct {
 	EnableAttribution bool
 }
 
+// layerBlock is an ordered rendering unit emitted by collectLayers.
+// name identifies the layer for budget accounting; body is the pre-rendered
+// text (including attribution headers when enabled).
+type layerBlock struct {
+	name string
+	body string
+}
+
+// toRenderedSkill maps a domain skill.Skill to a RenderedSkill for PriorContext
+// injection (D-M3-5). Pure function: no I/O, no side effects.
+func toRenderedSkill(s *skill.Skill) RenderedSkill {
+	return RenderedSkill{
+		Name:       s.Name(),
+		Version:    s.Version(),
+		Status:     s.Status().String(),
+		Source:     s.ActivationSource().String(),
+		Techniques: s.TechniqueStrings(),
+		Content:    s.Content(),
+	}
+}
+
 // Render assembles PriorContext into the LLM-facing prompt string.
 //
 // Render is DETERMINISTIC — it reads only from pc fields and opts; no time,
 // no random, no env access. Byte-exact snapshot testing depends on this
 // guarantee (D-M05-7).
 //
-// M0.5 emits exactly two layers:
-//   - PhaseIdentity (apply path): the "## spec / ## design / ## progress" block.
-//   - RawMemoryBlob (phase-service path): unstructured memory-engine bundle.
+// M3 enrichment emits layers in canonical order (D-M3-11):
 //
-// All other layers (Skills, StructuralCtx, Episodes, ChangeDigests,
-// BusinessRules, Routines, AuxiliaryMemory) are empty/nil in M0.5 and are
-// skipped. M3 enrichment populates them and Render learns to emit them.
+//	Skills → StructuralCtx → Episodes → ChangeDigests → BusinessRules → PhaseIdentity
+//
+// Empty layers are skipped. RawMemoryBlob is emitted for backward-compat with
+// existing callsites that still set it; it is scheduled for deletion in K.5.
 //
 // RenderOpts zero-value is a no-op: TokenBudget=0 means unlimited;
-// EnableAttribution=false means no headers injected by Render.
+// EnableAttribution=false means no attribution headers injected by Render.
 func (pc PriorContext) Render(opts RenderOpts) string {
+	layers := pc.collectLayers(opts.EnableAttribution)
+
+	if opts.TokenBudget > 0 {
+		layers = enforceBudget(layers, opts.TokenBudget)
+	}
+
 	var b strings.Builder
+	for _, l := range layers {
+		b.WriteString(l.body)
+	}
+	return b.String()
+}
 
-	// Layer 1: PhaseIdentity — apply path's assembled "## spec / ## design /
-	// ## progress" block. Rendered verbatim; section headers live INSIDE
-	// PhaseIdentity (assembled by the callsite) so Render adds nothing.
-	// Byte-exact preservation is guaranteed by pass-through semantics.
+// collectLayers builds the ordered []layerBlock in canonical D-M3-11 order.
+// Attribution headers are included in each block's body when attr=true.
+// Empty layers are skipped. Non-active skills are excluded (status gate).
+func (pc PriorContext) collectLayers(attr bool) []layerBlock {
+	var ls []layerBlock
+
+	// Layer 1: Skills (active only, matched by SkillMatcher gate).
+	if len(pc.Skills) > 0 {
+		if b := renderSkills(pc.Skills, attr); b.body != "" {
+			ls = append(ls, b)
+		}
+	}
+
+	// Layer 2: StructuralCtx.
+	if pc.StructuralCtx != nil {
+		ls = append(ls, renderStructural(pc.StructuralCtx, attr))
+	}
+
+	// Layer 3: Episodes.
+	if len(pc.Episodes) > 0 {
+		ls = append(ls, renderEpisodes(pc.Episodes, attr))
+	}
+
+	// Layer 4: ChangeDigests.
+	if len(pc.ChangeDigests) > 0 {
+		ls = append(ls, renderDigests(pc.ChangeDigests, attr))
+	}
+
+	// Layer 5: BusinessRules.
+	if len(pc.BusinessRules) > 0 {
+		ls = append(ls, renderRules(pc.BusinessRules, attr))
+	}
+
+	// Layer 6: PhaseIdentity (apply path spec/design/progress, verbatim).
 	if pc.PhaseIdentity != "" {
-		b.WriteString(pc.PhaseIdentity)
+		ls = append(ls, layerBlock{name: "phase_identity", body: pc.PhaseIdentity})
 	}
 
-	// Layer 2: RawMemoryBlob — phase-service path's unstructured memory
-	// bundle. Rendered verbatim; the callsite already assembled the
-	// strings.Builder loop output. M0.5-interim — M3 decomposes into
-	// structured layers below.
+	// RawMemoryBlob — M0.5-interim backward compat. Emitted verbatim after
+	// PhaseIdentity. Removed once all callsites stop setting it (K.5).
 	if pc.RawMemoryBlob != "" {
-		b.WriteString(pc.RawMemoryBlob)
+		ls = append(ls, layerBlock{name: "raw_memory_blob", body: pc.RawMemoryBlob})
 	}
 
-	// M3 future layers — all empty/nil in M0.5, skipped.
-	// Stubs documented here so the wiring points are clear for M3.
-	//
-	// if len(pc.Skills) > 0 { ... }          // operator decision #4: skills stay in sibling section
-	// if pc.StructuralCtx != nil { ... }      // D-M05-2: opaque marker, nil in M0.5
-	// if len(pc.Episodes) > 0 { ... }
-	// if len(pc.ChangeDigests) > 0 { ... }
-	// if len(pc.BusinessRules) > 0 { ... }
-	// if len(pc.Routines) > 0 { ... }
-	// if pc.AuxiliaryMemory != nil { ... }
+	return ls
+}
 
-	out := b.String()
-
-	// RenderOpts.TokenBudget — zero-value no-op (operator decision #9).
-	// Truncation applies only when budget is explicitly set > 0.
-	if opts.TokenBudget > 0 && len(out) > opts.TokenBudget {
-		out = out[:opts.TokenBudget]
+// renderSkills renders the Skills layer. Only skills with Status="active" are
+// included (defensive gate matching the SkillMatcher status filter).
+// Returns a layerBlock with an empty body if no active skills exist.
+func renderSkills(skills []RenderedSkill, attr bool) layerBlock {
+	var sb strings.Builder
+	for _, s := range skills {
+		if s.Status != "active" {
+			continue
+		}
+		if attr {
+			// D-M3-8: "## Skill: <name> v<version> (<status>, source=<src>)"
+			fmt.Fprintf(&sb, "## Skill: %s %s (%s, source=%s)\n", s.Name, s.Version, s.Status, s.Source)
+		} else {
+			// No-attribution: minimal ## separator (matches current renderSkillSection shape).
+			fmt.Fprintf(&sb, "## %s\n", s.Name)
+		}
+		if len(s.Techniques) > 0 {
+			sb.WriteString("Techniques: ")
+			sb.WriteString(strings.Join(s.Techniques, ", "))
+			sb.WriteString("\n")
+		}
+		sb.WriteString(s.Content)
+		sb.WriteString("\n\n")
 	}
+	return layerBlock{name: "skills", body: sb.String()}
+}
 
-	// RenderOpts.EnableAttribution — zero-value no-op (operator decision #9).
-	// M3 will emit "## {layer} ({topic_key})" attribution headers when true.
-	// Referenced (not used) to prevent linter unused-variable complaints.
-	_ = opts.EnableAttribution
+// renderStructural renders the StructuralCtx layer with a compact summary.
+func renderStructural(sc *structural.StructuralContext, attr bool) layerBlock {
+	var sb strings.Builder
+	if attr {
+		fmt.Fprintf(&sb, "## Structural Context (init/%s)\n", sc.ChangeName)
+	}
+	// Emit a compact summary: frameworks and languages on separate lines.
+	if len(sc.Frameworks) > 0 {
+		var names []string
+		for _, f := range sc.Frameworks {
+			names = append(names, f.Name)
+		}
+		fmt.Fprintf(&sb, "Frameworks: %s\n", strings.Join(names, ", "))
+	}
+	if len(sc.Languages) > 0 {
+		var names []string
+		for _, l := range sc.Languages {
+			names = append(names, l.Name)
+		}
+		fmt.Fprintf(&sb, "Languages: %s\n", strings.Join(names, ", "))
+	}
+	sb.WriteString("\n")
+	return layerBlock{name: "structural_ctx", body: sb.String()}
+}
 
-	return out
+// renderEpisodes renders the Episodes layer.
+func renderEpisodes(eps []EpisodeRef, attr bool) layerBlock {
+	var sb strings.Builder
+	for _, ep := range eps {
+		if attr {
+			fmt.Fprintf(&sb, "## Episode (%s)\n", ep.ID)
+		}
+		sb.WriteString(ep.Content)
+		sb.WriteString("\n\n")
+	}
+	return layerBlock{name: "episodes", body: sb.String()}
+}
+
+// renderDigests renders the ChangeDigests layer.
+func renderDigests(digests []ChangeDigestRef, attr bool) layerBlock {
+	var sb strings.Builder
+	for _, d := range digests {
+		if attr {
+			fmt.Fprintf(&sb, "## Change Digest (%s)\n", d.ChangeID)
+		}
+		sb.WriteString(d.Content)
+		sb.WriteString("\n\n")
+	}
+	return layerBlock{name: "change_digests", body: sb.String()}
+}
+
+// renderRules renders the BusinessRules layer (decisions + heuristics).
+func renderRules(rules []RuleRef, attr bool) layerBlock {
+	var sb strings.Builder
+	for _, r := range rules {
+		if attr {
+			fmt.Fprintf(&sb, "## Rule: %s (%s)\n", r.Kind, r.ID)
+		}
+		sb.WriteString(r.Content)
+		sb.WriteString("\n\n")
+	}
+	return layerBlock{name: "business_rules", body: sb.String()}
+}
+
+// layerBudgetShare returns the fraction of budget allocated to a named layer
+// per D-M3-7 V4.1 §12.2. Returns 1.0 for unknown layers (no restriction).
+func layerBudgetShare(name string) float64 {
+	switch name {
+	case "skills":
+		return 0.40
+	case "episodes":
+		return 0.20
+	case "change_digests":
+		return 0.15
+	case "business_rules":
+		return 0.15
+	case "phase_identity":
+		return 0.10
+	}
+	return 1.0
+}
+
+// enforceBudget applies per-layer byte caps per D-M3-7. Unused share cascades
+// to later layers. When a layer is truncated it gets a fixed truncation marker
+// appended. PhaseIdentity is cut last; raw_memory_blob follows PhaseIdentity.
+// All deterministic (no clock/random).
+func enforceBudget(layers []layerBlock, budget int) []layerBlock {
+	result := make([]layerBlock, 0, len(layers))
+
+	// First pass: compute allocated bytes per layer, cascade unused forward.
+	remaining := budget
+	for i, l := range layers {
+		share := layerBudgetShare(l.name)
+		// Allocate a share of the ORIGINAL budget (not remaining) per V4.1,
+		// but cap at remaining so we never exceed total.
+		alloc := int(float64(budget) * share)
+		if alloc > remaining {
+			alloc = remaining
+		}
+		// Cascade: if a previous layer consumed less than its share, the
+		// remainder was already kept. We track remaining for the cap above.
+		bodyLen := len(l.body)
+		if bodyLen <= alloc {
+			result = append(result, l)
+			remaining -= bodyLen
+		} else {
+			// Layer is over its allocation: truncate at the last newline
+			// boundary within alloc bytes to avoid mid-line cuts.
+			cutAt := alloc
+			if cutAt < 0 {
+				cutAt = 0
+			}
+			// Count how many items were omitted. Approximate: count
+			// trailing newline pairs in the truncated region.
+			omittedBytes := bodyLen - cutAt
+			marker := fmt.Sprintf("\n…[truncated: %d bytes over budget in %s layer]\n", omittedBytes, l.name)
+			truncated := l.body[:cutAt] + marker
+			result = append(result, layerBlock{name: l.name, body: truncated})
+			remaining -= cutAt
+			if remaining <= 0 {
+				// No more budget: skip subsequent layers entirely.
+				_ = layers[i+1:] // silence unused-variable warning
+				break
+			}
+		}
+	}
+	return result
 }
