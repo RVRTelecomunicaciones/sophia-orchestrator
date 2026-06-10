@@ -170,11 +170,11 @@ func (s *Service) GetSkill(ctx context.Context, skillID string) (*inbound.GetSki
 func structToMap(v any) (map[string]any, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("structToMap: marshal: %w", err)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("structToMap: unmarshal: %w", err)
 	}
 	return m, nil
 }
