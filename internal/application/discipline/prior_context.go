@@ -98,9 +98,15 @@ type RuleRef struct {
 	Content string `json:"content,omitempty"`
 }
 
-// RoutineOutput is a forward-compat stub for M3 routine integration.
-// Empty struct = zero-cost anchor. M3 populates with concrete routine shape.
-type RoutineOutput struct{}
+// RoutineOutput is a deterministic routine output emitted by buildPriorContext
+// from persisted GraphSummary data (D-M4-6). Zero subprocess: reads already-
+// loaded values only.
+type RoutineOutput struct {
+	// Source identifies the routine, e.g. "graphify.graph_stats".
+	Source string `json:"source"`
+	// Content is the formatted routine value, e.g. "Graph: 50 nodes, 120 edges, 6 communities".
+	Content string `json:"content"`
+}
 
 // AuxiliaryBlock is a forward-compat stub for M3 auxiliary memory integration.
 // Empty struct = zero-cost anchor. M3 populates with concrete aux-memory shape.
@@ -207,6 +213,13 @@ func (pc PriorContext) collectLayers(attr bool) []layerBlock {
 		ls = append(ls, renderRules(pc.BusinessRules, attr))
 	}
 
+	// Layer 5.5: Routines (deterministic graph routines from GraphSummary, D-M4-6).
+	if len(pc.Routines) > 0 {
+		if b := renderRoutines(pc.Routines, attr); b.body != "" {
+			ls = append(ls, b)
+		}
+	}
+
 	// Layer 6: PhaseIdentity (apply path spec/design/progress, verbatim).
 	if pc.PhaseIdentity != "" {
 		ls = append(ls, layerBlock{name: "phase_identity", body: pc.PhaseIdentity})
@@ -304,6 +317,21 @@ func renderRules(rules []RuleRef, attr bool) layerBlock {
 		sb.WriteString("\n\n")
 	}
 	return layerBlock{name: "business_rules", body: sb.String()}
+}
+
+// renderRoutines renders the Routines layer (D-M4-6). Each routine is emitted
+// with an attribution header "## Routine: <source>" when attr=true, followed
+// by the content and a blank line separator. Empty body → layer skipped.
+func renderRoutines(routines []RoutineOutput, attr bool) layerBlock {
+	var sb strings.Builder
+	for _, r := range routines {
+		if attr {
+			fmt.Fprintf(&sb, "## Routine: %s\n", r.Source)
+		}
+		sb.WriteString(r.Content)
+		sb.WriteString("\n\n")
+	}
+	return layerBlock{name: "routines", body: sb.String()}
 }
 
 // layerBudgetShare returns the fraction of budget allocated to a named layer

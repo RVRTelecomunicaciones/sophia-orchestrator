@@ -421,7 +421,9 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 
 	// Build the enriched PriorContext (D-M3-5/6). StructuralContext is already
 	// fetched inside buildPriorContext so we can reuse it for SkillsForContext.
-	pc := s.buildPriorContext(ctx, c)
+	// D-M4-8: pass p.Type() so graph routines are phase-gated (god_nodes only
+	// for EXPLORE and APPLY).
+	pc := s.buildPriorContext(ctx, c, p.Type())
 
 	// Hydrate skills fail-soft: if matcher is nil, flag off, returns empty,
 	// or errors → Skills stays nil so prompt is unchanged (byte-identical).
@@ -1034,9 +1036,12 @@ func (s *Service) loadPriorPhases(ctx context.Context, changeID ids.ChangeID) (m
 // (D-M3-6), fetches change digests via a dedicated Search call (DG-1), and
 // fetches the StructuralContext for structural skill filtering (D-M3-3).
 //
+// phaseType is the type of the phase being built so that phase-gated routines
+// (e.g. god_nodes: EXPLORE+APPLY only, D-M4-8) can be filtered correctly.
+//
 // Returns an empty PriorContext on any error (fail-soft — enrichment is
 // best-effort; the phase must still run even if memory is unavailable).
-func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) discipline.PriorContext {
+func (s *Service) buildPriorContext(ctx context.Context, c *change.Change, phaseType phase.PhaseType) discipline.PriorContext {
 	scope := outbound.MemoryScope{
 		ProjectID: c.Project(),
 		TenantID:  s.d.Config.MemoryTenantID,
@@ -1108,11 +1113,30 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change) disci
 		}
 	}
 
+	// D-M4-7/8: populate Routines from GraphSummary (zero subprocess).
+	// nil GraphSummary or nil StructuralCtx → empty routines (degraded-INIT safe).
+	var routines []discipline.RoutineOutput
+	if structuralCtx != nil && structuralCtx.GraphSummary != nil {
+		gs := structuralCtx.GraphSummary
+		routines = append(routines, discipline.RoutineOutput{
+			Source:  "graphify.graph_stats",
+			Content: fmt.Sprintf("Graph: %d nodes, %d edges, %d communities", gs.TotalNodes, gs.TotalEdges, gs.CommunityCount),
+		})
+		// god_nodes: EXPLORE and APPLY phases only.
+		if (phaseType == phase.PhaseExplore || phaseType == phase.PhaseApply) && len(gs.GodNodes) > 0 {
+			routines = append(routines, discipline.RoutineOutput{
+				Source:  "graphify.god_nodes",
+				Content: "Top blast-radius nodes: " + strings.Join(gs.GodNodes, ", "),
+			})
+		}
+	}
+
 	return discipline.PriorContext{
 		StructuralCtx: structuralCtx,
 		Episodes:      episodes,
 		ChangeDigests: digests,
 		BusinessRules: rules,
+		Routines:      routines,
 	}
 }
 

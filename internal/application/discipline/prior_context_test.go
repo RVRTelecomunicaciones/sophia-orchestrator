@@ -147,7 +147,7 @@ func TestPriorContext_JSON_RoundTrip(t *testing.T) {
 
 	routineJSON, err := json.Marshal(discipline.RoutineOutput{})
 	require.NoError(t, err)
-	require.Equal(t, "{}", string(routineJSON), "RoutineOutput{} must marshal to {}")
+	require.Equal(t, `{"source":"","content":""}`, string(routineJSON), "RoutineOutput{} must marshal to {\"source\":\"\",\"content\":\"\"}")
 
 	auxBlockJSON, err := json.Marshal(discipline.AuxiliaryBlock{})
 	require.NoError(t, err)
@@ -752,4 +752,79 @@ func TestRenderOpts_ZeroValue_IsNoOp_M3(t *testing.T) {
 	require.Contains(t, out, "episode content", "episode must be included with zero-value opts")
 	// No attribution headers.
 	require.NotContains(t, out, "## Skill: ", "no attribution headers with zero EnableAttribution")
+}
+
+// ---------------------------------------------------------------------------
+// Group H (M4 PR2): RoutineOutput render layer (D-M4-6)
+// H-2a — routines layer with attribution header appears after BusinessRules, before PhaseIdentity
+// H-2b — empty routines produce no output
+// ---------------------------------------------------------------------------
+
+// TestRender_RoutinesLayer55_WithAttribution verifies that Routines with 2 entries
+// renders with "## Routine: <source>" headers when EnableAttribution=true, and
+// that the routines layer appears after BusinessRules but before PhaseIdentity.
+// RED: fails until H-3 implements renderRoutines + Layer 5.5 in collectLayers.
+func TestRender_RoutinesLayer55_WithAttribution(t *testing.T) {
+	pc := discipline.PriorContext{
+		BusinessRules: []discipline.RuleRef{
+			{ID: "rule-01", Kind: "decision", Content: "Use pgx/v5."},
+		},
+		Routines: []discipline.RoutineOutput{
+			{Source: "graphify.graph_stats", Content: "Graph: 10 nodes, 20 edges, 3 communities"},
+			{Source: "graphify.god_nodes", Content: "Top blast-radius nodes: pkg/core, pkg/domain"},
+		},
+		PhaseIdentity: "## spec\n\nFoo",
+	}
+	out := pc.Render(discipline.RenderOpts{EnableAttribution: true})
+
+	// Both attribution headers must appear.
+	require.Contains(t, out, "## Routine: graphify.graph_stats",
+		"graph_stats attribution header must appear with EnableAttribution=true")
+	require.Contains(t, out, "## Routine: graphify.god_nodes",
+		"god_nodes attribution header must appear with EnableAttribution=true")
+
+	// Content must appear.
+	require.Contains(t, out, "Graph: 10 nodes, 20 edges, 3 communities",
+		"graph_stats content must appear")
+	require.Contains(t, out, "Top blast-radius nodes: pkg/core, pkg/domain",
+		"god_nodes content must appear")
+
+	// Layer 5.5 ordering: BusinessRules < Routines < PhaseIdentity.
+	ruleIdx := strings.Index(out, "Use pgx/v5")
+	routineIdx := strings.Index(out, "## Routine: graphify.graph_stats")
+	identityIdx := strings.Index(out, "## spec")
+	require.Greater(t, ruleIdx, -1, "business rules must appear")
+	require.Greater(t, routineIdx, -1, "routines must appear")
+	require.Greater(t, identityIdx, -1, "phase identity must appear")
+	require.Less(t, ruleIdx, routineIdx, "business rules MUST appear before routines (Layer 5 < Layer 5.5)")
+	require.Less(t, routineIdx, identityIdx, "routines MUST appear before phase identity (Layer 5.5 < Layer 6)")
+}
+
+// TestRender_RoutinesLayer55_NoAttribution verifies that without EnableAttribution,
+// routines content is still emitted but without the "## Routine:" header.
+// RED: fails until H-3 implements renderRoutines.
+func TestRender_RoutinesLayer55_NoAttribution(t *testing.T) {
+	pc := discipline.PriorContext{
+		Routines: []discipline.RoutineOutput{
+			{Source: "graphify.graph_stats", Content: "Graph: 5 nodes, 8 edges, 2 communities"},
+		},
+	}
+	out := pc.Render(discipline.RenderOpts{EnableAttribution: false})
+	require.Contains(t, out, "Graph: 5 nodes, 8 edges, 2 communities",
+		"routine content must appear even without attribution")
+	require.NotContains(t, out, "## Routine: graphify.graph_stats",
+		"no attribution header when EnableAttribution=false")
+}
+
+// TestRender_EmptyRoutines_NoOutput verifies that an empty Routines slice
+// produces no "## Routine:" output and no panic.
+// RED: fails until H-3 adds the nil-guard to collectLayers.
+func TestRender_EmptyRoutines_NoOutput(t *testing.T) {
+	pc := discipline.PriorContext{
+		PhaseIdentity: "## spec\n\nBar",
+	}
+	out := pc.Render(discipline.RenderOpts{EnableAttribution: true})
+	require.NotContains(t, out, "## Routine:",
+		"empty Routines must produce no routine output")
+	require.Contains(t, out, "## spec", "PhaseIdentity must still render")
 }
