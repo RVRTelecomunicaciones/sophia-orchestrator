@@ -286,6 +286,10 @@ services:
       # NEVER use this key outside local dev. Rotate before any non-local
       # deployment: UPDATE api_keys SET status='revoked' WHERE id='01J0DEVKEY00000000000000XX'.
       SOPHIA_MEMORY_API_KEY: "memdev_a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef"
+      # Learning loop (M2): notify memory-engine's consolidation worker on
+      # every phase.archived. Fire-and-forget; failure never blocks orch.
+      SOPHIA_MEMORY_WEBHOOK_URL: "http://memory-engine:8080/api/v1/worker/phase-archived"
+      SOPHIA_MEMORY_WEBHOOK_API_KEY: "memdev_a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef"
       SOPHIA_GOVERNANCE_URL: "http://governance-core:8080"
       SOPHIA_RUNTIME_URL: "http://runtime-adapters:8080"
       # Observability
@@ -319,6 +323,13 @@ services:
       DB_NAME: memory_engine
       DB_SSLMODE: disable
       PORT: "8080"
+      # Learning loop (M2): enable the consolidation worker pipeline.
+      # The webhook receiver route is only registered when enabled, and the
+      # worker calls back into orch's skills API to update metrics/status.
+      SOPHIA_MEMORY_WORKER_ENABLED: "true"
+      SOPHIA_ORCH_BASE_URL: "http://orchestator:8080"
+      SOPHIA_ORCH_API_KEY: "full-stack-key"
+      SOPHIA_WORKER_PROJECT_ID: "local"
     ports:
       - "8081:8080"
     restart: unless-stopped
