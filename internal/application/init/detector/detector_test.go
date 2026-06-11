@@ -200,6 +200,49 @@ func TestDetect_NoManifests(t *testing.T) {
 	require.Empty(t, sc.Frameworks, "expected no frameworks")
 }
 
+// C.9 (T2.5 RED): Empty directory → Greenfield == true.
+func TestDetect_Greenfield_NoFrameworksNoLanguages(t *testing.T) {
+	d := newDetector(t)
+	ctx := context.Background()
+
+	sc, err := d.Detect(ctx, t.TempDir())
+	require.NoError(t, err)
+
+	require.Empty(t, sc.Frameworks, "expected no frameworks for empty dir")
+	require.Empty(t, sc.Languages, "expected no languages for empty dir")
+	require.True(t, sc.Greenfield, "Greenfield must be true when no frameworks and no languages detected")
+}
+
+// C.10 (T2.5 RED): Angular detected → Greenfield == false.
+func TestDetect_Greenfield_FrameworkDetected_False(t *testing.T) {
+	d := newDetector(t)
+	ctx := context.Background()
+
+	sc, err := d.Detect(ctx, fixtureDir("angular17-signals"))
+	require.NoError(t, err)
+
+	require.NotEmpty(t, sc.Frameworks, "expected frameworks for Angular fixture")
+	require.False(t, sc.Greenfield, "Greenfield must be false when a framework is detected")
+}
+
+// C.11 (T2.5 RED): Go only (language, no framework) → Greenfield == false.
+func TestDetect_Greenfield_LanguageOnly_False(t *testing.T) {
+	d := newDetector(t)
+	ctx := context.Background()
+
+	sc, err := d.Detect(ctx, fixtureDir("go-simple"))
+	require.NoError(t, err)
+
+	require.NotEmpty(t, sc.Languages, "expected Go language for go-simple fixture")
+	require.False(t, sc.Greenfield, "Greenfield must be false when a language is detected")
+}
+
+// C.12 (T2.5 RED): SophiaDetectorVer == "v1.1.0".
+func TestDetect_SophiaDetectorVer_V1_1_0(t *testing.T) {
+	require.Equal(t, "v1.1.0", detector.SophiaDetectorVer,
+		"SophiaDetectorVer must be v1.1.0 after the greenfield bump")
+}
+
 // containsAny returns true if s contains any of the substrings.
 func containsAny(s string, subs ...string) bool {
 	for _, sub := range subs {

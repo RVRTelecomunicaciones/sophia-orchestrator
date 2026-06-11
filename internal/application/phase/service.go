@@ -146,6 +146,15 @@ type Deps struct {
 	// to the standard single-agent flow (should not happen in production).
 	// Design: D-INIT-3 (branch at TOP of runAsync).
 	Init InitService
+
+	// Bootstrap is the optional async bootstrap trigger fired after a successful
+	// INIT phase (DG-C7-5). nil = disabled (no-op). Not included in the nil-guard
+	// in New() — it is an OPTIONAL dependency.
+	Bootstrap BootstrapDep
+
+	// BootstrapTimeout is the context timeout for the async bootstrap goroutine.
+	// Default 60s when zero. Configurable via bootstrap.timeout config key.
+	BootstrapTimeout time.Duration
 }
 
 // ApplyExecutor is the contract phase.Service uses to delegate apply-phase
@@ -176,6 +185,16 @@ type InitService interface {
 type SpawnGovernor interface {
 	Acquire(ctx context.Context) error
 	Release(ctx context.Context) error
+}
+
+// BootstrapDep is the optional async bootstrap trigger (DG-C7-5). Satisfied by
+// bootstrap.Service in production (PR3c-ii). nil → no-op. The method must not
+// return an error — callers discard it; implementations log internally.
+type BootstrapDep interface {
+	// TriggerIfNeeded checks greenfield/drift conditions and fires the bootstrap
+	// import flow if warranted. Called in a detached goroutine with a timeout
+	// context; panics are recovered by the caller (runInitPhase).
+	TriggerIfNeeded(ctx context.Context, sc structural.StructuralContext)
 }
 
 // ArchivedWebhookPayload is the outbound body for the memory-engine
@@ -688,7 +707,8 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 //  6. appendAudit + publishEvent          [SSE]
 func (s *Service) runInitPhase(ctx context.Context, c *change.Change, p *phase.Phase) {
 	// Step 1: run InitService (structural detection + dual persist inside).
-	_, env, err := s.d.Init.Run(ctx, c)
+	// sc is captured (previously discarded as _) for the async bootstrap (DG-C7-5).
+	sc, env, err := s.d.Init.Run(ctx, c)
 	if err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("init service: %v", err))
 		return
@@ -741,6 +761,28 @@ func (s *Service) runInitPhase(ctx context.Context, c *change.Change, p *phase.P
 		EnvelopeConfidence: validatedEnv.Confidence,
 	}
 	s.publishEvent(ctx, p.ID(), eventType, payload)
+
+	// Step 7: async bootstrap (DG-C7-5) — fires AFTER phase is persisted and
+	// advanced (Iron Law D1.2 already satisfied above). The Bootstrap dep is
+	// optional: nil means no bootstrap service is wired (no-op until PR3c-ii).
+	if s.d.Bootstrap != nil {
+		bgCtx := traceBackground(ctx) // detach from request ctx; trace propagated
+		bsTimeout := s.d.BootstrapTimeout
+		if bsTimeout == 0 {
+			bsTimeout = 60 * time.Second // default per DG-C7-5
+		}
+		capturedSC := sc // capture for goroutine closure
+		s.d.Scheduler(func() {
+			defer func() { // panic isolation — must not kill the goroutine/runner
+				if r := recover(); r != nil {
+					slog.Default().Error("bootstrap panic recovered", "panic", r)
+				}
+			}()
+			cctx, cancel := context.WithTimeout(bgCtx, bsTimeout)
+			defer cancel()
+			s.d.Bootstrap.TriggerIfNeeded(cctx, capturedSC)
+		})
+	}
 }
 
 // Resume re-launches an interrupted phase. V1: validates the phase is in

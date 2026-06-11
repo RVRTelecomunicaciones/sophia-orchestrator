@@ -13,6 +13,24 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
 )
 
+// manifestNames is the SORTED fixed set of manifest files whose content is
+// hashed for the 8th cache key component (DG-C7-2). This set MUST equal the
+// set Detector.Detect reads (detector.go:34-119) so the cache reflects exactly
+// the detection inputs.
+var manifestNames = []string{
+	"Cargo.toml",
+	"build.gradle",
+	"go.mod",
+	"package.json",
+	"pom.xml",
+	"pyproject.toml",
+	"requirements.txt",
+}
+
+// absentSentinel is written for each manifest file that does not exist so that
+// file creation/deletion also changes the key.
+const absentSentinel = "\x01<absent>"
+
 // KeyBuilder implements CacheKeyBuilder using a GitRunner and FileReader.
 type KeyBuilder struct {
 	git    GitRunner
@@ -24,9 +42,9 @@ func NewKeyBuilder(git GitRunner, reader FileReader) *KeyBuilder {
 	return &KeyBuilder{git: git, reader: reader}
 }
 
-// Build computes the 7-component cache key for repoRoot.
+// Build computes the 8-component cache key for repoRoot.
 // Components: graphify_version + repo_root + git_head + dirty_tree_hash +
-// sorted(include_globs) + config_hash + SophiaDetectorVer.
+// sorted(include_globs) + config_hash + SophiaDetectorVer + manifest_hash.
 //
 // include_globs default = ["**/*"] when .sophia.yaml absent (one-time rebuild
 // cost is acceptable per design D-INIT-7).
@@ -54,6 +72,9 @@ func (b *KeyBuilder) Build(ctx context.Context, repoRoot, graphifyVersion string
 	// TODO: parse include_globs from .sophia.yaml when present.
 	includeGlobs := []string{"**/*"}
 
+	// Manifest content hash (DG-C7-2): 8th component.
+	manifestHash := b.computeManifestHash(repoRoot)
+
 	return computeCacheKeyHash(
 		graphifyVersion,
 		repoRoot,
@@ -62,13 +83,40 @@ func (b *KeyBuilder) Build(ctx context.Context, repoRoot, graphifyVersion string
 		includeGlobs,
 		configHash,
 		detector.SophiaDetectorVer,
+		manifestHash,
 	), nil
 }
 
-// computeCacheKeyHash computes a sha256 over the 7 cache key components.
+// computeManifestHash computes the 8th cache key component: a 16-hex-char
+// truncated sha256 over the SORTED fixed manifest name set. For each name:
+//   - write name + NUL
+//   - if file exists: write file bytes; else write absentSentinel
+//   - write NUL
+//
+// The sentinel ensures that a file appearing or disappearing changes the key.
+func (b *KeyBuilder) computeManifestHash(repoRoot string) string {
+	h := sha256.New()
+	null := []byte{0}
+	for _, name := range manifestNames { // already sorted at init time
+		h.Write([]byte(name))
+		h.Write(null)
+		p := filepath.Join(repoRoot, name)
+		content, _ := b.reader.ReadIfExists(p)
+		if content != nil {
+			h.Write(content)
+		} else {
+			h.Write([]byte(absentSentinel))
+		}
+		h.Write(null)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8]) // 16 hex chars
+}
+
+// computeCacheKeyHash computes a sha256 over the 8 cache key components.
 // Null byte separator prevents component boundary ambiguity. IncludeGlobs are
 // sorted before joining so glob order does not affect the result.
-func computeCacheKeyHash(graphifyVersion, repoRoot, gitHead, dirtyTreeHash string, includeGlobs []string, configHash, sophiaDetectorVer string) string {
+// This function MUST agree with CacheKey.Hash() in cache/key.go.
+func computeCacheKeyHash(graphifyVersion, repoRoot, gitHead, dirtyTreeHash string, includeGlobs []string, configHash, sophiaDetectorVer, manifestHash string) string {
 	globs := make([]string, len(includeGlobs))
 	copy(globs, includeGlobs)
 	sort.Strings(globs)
@@ -83,6 +131,7 @@ func computeCacheKeyHash(graphifyVersion, repoRoot, gitHead, dirtyTreeHash strin
 		globsJoined,
 		configHash,
 		sophiaDetectorVer,
+		manifestHash,
 	}, sep)
 
 	sum := sha256.Sum256([]byte(components))
