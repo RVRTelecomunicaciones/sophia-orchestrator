@@ -14,7 +14,8 @@ const StructuralContextSchemaV1 = structural.SchemaV1
 // SophiaDetectorVer is the 7th cache key component. Bump this constant
 // whenever the detector parsing logic changes to ensure stale caches are
 // invalidated automatically.
-const SophiaDetectorVer = "v1.0.0"
+// v1.1.0: added Greenfield detection + ManifestHash 8th cache key component (DG-C7-2/3).
+const SophiaDetectorVer = "v1.1.0"
 
 // Type aliases — detector.StructuralContext is THE SAME TYPE as
 // structural.StructuralContext (type alias, not a new type). All existing

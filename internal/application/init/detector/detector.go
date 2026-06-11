@@ -121,6 +121,11 @@ func (d *Detector) Detect(_ context.Context, repoRoot string) (StructuralContext
 	// --- Architecture style heuristics ---
 	sc.ArchStyle = detectArchStyle(repoRoot)
 
+	// --- Greenfield detection (LAST step — DG-C7-3) ---
+	// Deterministic rule: no frameworks AND no languages detected.
+	// The matcher is NOT consulted; detector remains independent of matcher (D11).
+	sc.Greenfield = len(sc.Frameworks) == 0 && len(sc.Languages) == 0
+
 	return sc, nil
 }
 

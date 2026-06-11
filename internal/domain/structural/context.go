@@ -75,6 +75,12 @@ type StructuralContext struct {
 	// SophiaDetectorVer is the version of the detector logic used (7th
 	// cache key component — see detector.SophiaDetectorVer).
 	SophiaDetectorVer string `json:"sophia_detector_ver"`
+
+	// Greenfield is true when no frameworks AND no languages were detected.
+	// Set as the last step of Detector.Detect. omitempty keeps JSON additive —
+	// existing persisted INIT outputs without this key deserialize to false
+	// (zero value) with no schema version bump required (DG-C7-3).
+	Greenfield bool `json:"greenfield,omitempty"`
 }
 
 // LanguageInfo holds language detection evidence for a single language.

@@ -42,7 +42,7 @@ func TestStructuralContext_JSONRoundTrip(t *testing.T) {
 		DegradedReason:    "",
 		DetectedAt:        now,
 		GraphifyVersion:   "0.8.35",
-		SophiaDetectorVer: "v1.0.0",
+		SophiaDetectorVer: "v1.1.0",
 	}
 
 	raw, err := json.Marshal(orig)
@@ -71,6 +71,39 @@ func TestStructuralContext_JSONRoundTrip(t *testing.T) {
 	require.True(t, orig.DetectedAt.Equal(got.DetectedAt))
 	require.Equal(t, orig.GraphifyVersion, got.GraphifyVersion)
 	require.Equal(t, orig.SophiaDetectorVer, got.SophiaDetectorVer)
+}
+
+// B.3 (T2.5 RED): Greenfield=false is omitted in JSON (omitempty).
+func TestStructuralContext_Greenfield_FalseOmitted(t *testing.T) {
+	sc := detector.StructuralContext{
+		SchemaVersion: detector.StructuralContextSchemaV1,
+		Greenfield:    false,
+	}
+	raw, err := json.Marshal(sc)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), `"greenfield"`,
+		"Greenfield=false must be omitted from JSON (omitempty)")
+}
+
+// B.4 (T2.5 RED): Greenfield=true is present in JSON.
+func TestStructuralContext_Greenfield_TruePresent(t *testing.T) {
+	sc := detector.StructuralContext{
+		SchemaVersion: detector.StructuralContextSchemaV1,
+		Greenfield:    true,
+	}
+	raw, err := json.Marshal(sc)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"greenfield":true`,
+		"Greenfield=true must appear in JSON")
+}
+
+// B.5 (T2.5 RED): Backward compat — JSON without "greenfield" → Greenfield=false, no error.
+func TestStructuralContext_Greenfield_BackwardCompat(t *testing.T) {
+	oldJSON := `{"schema_version":1,"project_id":"p","change_id":"c","change_name":"n","graph_available":false,"detected_at":"2026-01-01T00:00:00Z","sophia_detector_ver":"v1.0.0"}`
+	var sc detector.StructuralContext
+	require.NoError(t, json.Unmarshal([]byte(oldJSON), &sc))
+	require.False(t, sc.Greenfield,
+		"Greenfield must be false (zero value) when key is absent in JSON")
 }
 
 // B.2: StructuralContextSchemaV1 constant equals 1.
