@@ -15,7 +15,7 @@ test-unit: ## Unit tests (race + count=1)
 	$(GO) test ./internal/... -race -count=1
 
 test-integration: ## Integration tests (testcontainers Postgres)
-	$(GO) test -tags=integration ./test/... -race -count=1 -timeout=5m
+	$(GO) test -tags=integration ./test/... ./internal/adapters/outbound/pg/... -race -count=1 -timeout=5m
 
 test-e2e: ## End-to-end SDD cycle test
 	$(GO) test -tags=e2e ./test/e2e/... -count=1 -timeout=10m
