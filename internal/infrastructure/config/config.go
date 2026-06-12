@@ -21,6 +21,7 @@ type Config struct {
 	Dispatcher    DispatcherConfig
 	Spawn         SpawnConfig
 	Apply         ApplyConfig
+	Bootstrap     BootstrapConfig
 	Obs           ObsConfig
 	Environment   string // dev | staging | prod
 	LogLevel      string // debug | info | warn | error
@@ -29,6 +30,27 @@ type Config struct {
 	// MemoryWebhook configures the outbound best-effort webhook from orch to
 	// memory-engine's /api/v1/worker/phase-archived endpoint (D-M2-1).
 	MemoryWebhook MemoryWebhookConfig
+}
+
+// BootstrapConfig holds parameters for BootstrapTriggerService (DG-C7-5/6).
+// All keys are loaded from SOPHIA_BOOTSTRAP_* env vars at boot.
+type BootstrapConfig struct {
+	// Timeout is the context deadline for the async bootstrap goroutine.
+	// Default 60s. Loaded from SOPHIA_BOOTSTRAP_TIMEOUT (duration string, e.g. "60s").
+	Timeout time.Duration
+
+	// MaxCallsPerProjectPerDay is the per-project sliding-window rate limit.
+	// Default 5. Loaded from SOPHIA_BOOTSTRAP_MAX_CALLS_PER_PROJECT_PER_DAY.
+	MaxCallsPerProjectPerDay int
+
+	// MinSnippets is the minimum snippet count for a library entry to be used
+	// without falling back to the main entry. Default 50.
+	// Loaded from SOPHIA_BOOTSTRAP_MIN_SNIPPETS.
+	MinSnippets int
+
+	// BodyBudget is the hard byte cap on the imported skill body (BodyBudget).
+	// Default 24576 (24 KiB). Loaded from SOPHIA_BOOTSTRAP_BODY_BUDGET.
+	BodyBudget int
 }
 
 // MemoryWebhookConfig holds the outbound webhook parameters (M2 D-M2-1).
@@ -379,6 +401,12 @@ func Default() Config {
 			WaitInterval: 250 * time.Millisecond,
 			MaxWait:      30 * time.Second,
 		},
+		Bootstrap: BootstrapConfig{
+			Timeout:                  60 * time.Second,
+			MaxCallsPerProjectPerDay: 5,
+			MinSnippets:              50,
+			BodyBudget:               24576,
+		},
 		Environment:   "dev",
 		LogLevel:      "info",
 		SkillsEnabled: true, // default ON
@@ -475,6 +503,17 @@ func Load() (Config, error) {
 	c.Environment = envStr("SOPHIA_ENV", c.Environment)
 	c.LogLevel = strings.ToLower(envStr("SOPHIA_LOG_LEVEL", c.LogLevel))
 	c.SkillsEnabled = envBool("SOPHIA_SKILLS_ENABLED", c.SkillsEnabled)
+
+	c.Bootstrap.Timeout = envDuration("SOPHIA_BOOTSTRAP_TIMEOUT", c.Bootstrap.Timeout)
+	if v := envInt("SOPHIA_BOOTSTRAP_MAX_CALLS_PER_PROJECT_PER_DAY", 0); v > 0 {
+		c.Bootstrap.MaxCallsPerProjectPerDay = v
+	}
+	if v := envInt("SOPHIA_BOOTSTRAP_MIN_SNIPPETS", 0); v > 0 {
+		c.Bootstrap.MinSnippets = v
+	}
+	if v := envInt("SOPHIA_BOOTSTRAP_BODY_BUDGET", 0); v > 0 {
+		c.Bootstrap.BodyBudget = v
+	}
 
 	if err := c.Validate(); err != nil {
 		return Config{}, err

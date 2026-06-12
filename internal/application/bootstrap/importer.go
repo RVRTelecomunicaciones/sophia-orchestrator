@@ -134,6 +134,17 @@ func (i *SkillImporter) ImportFromDocs(
 	return s, nil
 }
 
+// ImportDocs is a thin wrapper around ImportFromDocs that drops the *Skill
+// return value, satisfying the SkillImporterPort interface used by Service.
+func (i *SkillImporter) ImportDocs(
+	ctx context.Context,
+	name, version, fw string,
+	r outbound.DocsResult,
+) error {
+	_, err := i.ImportFromDocs(ctx, name, version, fw, r)
+	return err
+}
+
 // buildBody constructs the skill body string from all assembled parts.
 func buildBody(name, version, fw string, r outbound.DocsResult, sanitized, fetchedAt string) string {
 	var b strings.Builder
