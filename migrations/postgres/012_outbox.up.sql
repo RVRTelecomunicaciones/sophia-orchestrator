@@ -9,7 +9,11 @@
 -- Schema notes:
 --   id              — CHAR(26) ULID; primary key (repo convention, injectable IDGenerator).
 --   event_type      — logical event name (e.g. 'phase.archived').
---   payload         — JSONB body delivered verbatim (byte-identical to the legacy POST).
+--   payload         — BYTEA body delivered verbatim (byte-identical to the legacy
+--                      POST). BYTEA, not JSONB: JSONB normalizes whitespace and
+--                      reorders keys on storage, which would break the spec's
+--                      byte-identical contract. The outbox is a generic blob carrier;
+--                      it never interprets the payload, so opaque bytes are correct.
 --   status          — 'pending' | 'delivered' (closed enum via CHECK).
 --   attempts        — delivery attempt counter, bumped on each failed try.
 --   next_attempt_at — earliest time the relay may (re)claim this row.
@@ -28,7 +32,7 @@ BEGIN;
 CREATE TABLE webhook_outbox (
     id              CHAR(26)    PRIMARY KEY,
     event_type      TEXT        NOT NULL,
-    payload         JSONB       NOT NULL,
+    payload         BYTEA       NOT NULL,
     status          TEXT        NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending','delivered')),
     attempts        INT         NOT NULL DEFAULT 0,

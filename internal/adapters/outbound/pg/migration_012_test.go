@@ -94,13 +94,13 @@ func TestMigration012_PostUp(t *testing.T) {
 	// status CHECK accepts 'pending'/'delivered', rejects anything else.
 	_, okErr := pool.Exec(ctx, `
 		INSERT INTO webhook_outbox (id, event_type, payload, status, attempts, next_attempt_at, created_at)
-		VALUES ('01ARZ3NDEKTSV4RRFFQ69G5OB1', 'phase.archived', '{}'::jsonb, 'pending', 0, now(), now())
+		VALUES ('01ARZ3NDEKTSV4RRFFQ69G5OB1', 'phase.archived', '\x7b7d'::bytea, 'pending', 0, now(), now())
 	`)
 	require.NoError(t, okErr, "inserting row with status='pending' must succeed")
 
 	_, badErr := pool.Exec(ctx, `
 		INSERT INTO webhook_outbox (id, event_type, payload, status, attempts, next_attempt_at, created_at)
-		VALUES ('01ARZ3NDEKTSV4RRFFQ69G5OB2', 'phase.archived', '{}'::jsonb, 'bogus', 0, now(), now())
+		VALUES ('01ARZ3NDEKTSV4RRFFQ69G5OB2', 'phase.archived', '\x7b7d'::bytea, 'bogus', 0, now(), now())
 	`)
 	require.Error(t, badErr, "inserting row with invalid status must fail CHECK constraint")
 }
