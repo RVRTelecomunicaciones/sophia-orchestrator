@@ -1,23 +1,31 @@
-// Package webhook implements the outbound best-effort HTTP adapter that POSTs
-// a PhaseArchivedWebhookPayload to the configured memory-engine URL after
-// phase.archived is published. Per D-M2-1 and D-M2-14: fire-and-forget,
-// no retry in M2, failures logged at WARN level, orch never blocks or errors.
+// Package webhook implements the outbound HTTP transport that POSTs a
+// phase.archived payload to the configured memory-engine URL. Since
+// loop-hardening (D-LH-1) delivery is driven by the transactional outbox +
+// relay poller, not a fire-and-forget goroutine: the relay calls Deliver
+// synchronously and decides retry vs. mark-delivered from the returned error.
+// The POST body and X-API-Key header stay byte-identical to the legacy
+// contract so the ME receiver requires no change.
 package webhook
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 )
 
-// PhaseArchivedWebhookPayload mirrors inbound.PhaseArchivedPayload and is the
-// body posted to POST /api/v1/worker/phase-archived on the memory-engine.
+// ErrDisabled is returned by Deliver when the adapter has no URL configured.
+// The relay treats this as a delivery failure and keeps the row pending rather
+// than silently dropping the event.
+var ErrDisabled = errors.New("webhook: adapter disabled (empty URL)")
+
+// PhaseArchivedWebhookPayload mirrors inbound.PhaseArchivedPayload. It is the
+// body shape posted to POST /api/v1/worker/phase-archived on the memory-engine.
+// The relay delivers stored outbox bytes verbatim; this type documents the
+// contract and is used by tests.
 type PhaseArchivedWebhookPayload struct {
 	ChangeID   string    `json:"change_id"`
 	ChangeName string    `json:"change_name"`
@@ -26,23 +34,19 @@ type PhaseArchivedWebhookPayload struct {
 }
 
 // Config holds the runtime parameters for the webhook adapter.
-// URL is the full endpoint (e.g. "http://memory-engine:8080/api/v1/worker/phase-archived").
-// Empty URL disables the adapter entirely with a one-time debug log.
 type Config struct {
-	// URL is the full POST endpoint. Empty = adapter disabled.
+	// URL is the full POST endpoint. Empty = adapter disabled (Deliver errors).
 	URL string
-	// APIKey is the bearer/API-key value sent in the X-API-Key header.
+	// APIKey is the value sent in the X-API-Key header.
 	APIKey string
 	// Timeout is the per-request HTTP client timeout. Defaults to 5s.
 	Timeout time.Duration
 }
 
-// Adapter sends outbound webhook notifications. All methods are safe for
-// concurrent use.
+// Adapter sends outbound webhook deliveries. It is safe for concurrent use.
 type Adapter struct {
 	cfg    Config
 	client *http.Client
-	once   sync.Once // for the "disabled" one-time log
 }
 
 // New constructs an Adapter. A zero Timeout falls back to 5 seconds.
@@ -57,47 +61,19 @@ func New(cfg Config) *Adapter {
 	}
 }
 
-// Notify sends the webhook payload asynchronously. It is fire-and-forget: any
-// error (network, timeout, non-2xx) is logged at WARN with the change_id and
-// never propagated to the caller. A disabled adapter (empty URL) logs once at
-// DEBUG and returns immediately.
-//
-// Notify spawns a goroutine to perform the HTTP POST so the caller is never
-// blocked. The provided context is NOT forwarded to the HTTP request to prevent
-// the orch's request context cancellation from aborting the delivery.
-func (a *Adapter) Notify(_ context.Context, payload PhaseArchivedWebhookPayload) {
+// Deliver synchronously POSTs the raw payload bytes to the memory-engine and
+// returns nil on a 2xx response. Any disabled adapter, transport error,
+// timeout, or non-2xx status yields a non-nil error so the relay reschedules
+// the outbox row with backoff. The payload is written verbatim — the relay is
+// responsible for storing byte-identical JSON.
+func (a *Adapter) Deliver(ctx context.Context, payload []byte) error {
 	if a.cfg.URL == "" {
-		a.once.Do(func() {
-			slog.Debug("webhook adapter disabled: SOPHIA_MEMORY_WEBHOOK_URL is empty")
-		})
-		return
+		return ErrDisabled
 	}
 
-	// Copy payload to avoid data races in the goroutine closure.
-	// context.Background is intentional: fire-and-forget delivery must not be
-	// cancelled by the caller's request context. gosec G118 suppressed.
-	p := payload
-	go a.post(p) //nolint:gosec // G118: fire-and-forget delivery must not be cancelled by caller context
-}
-
-// post performs the synchronous HTTP POST. Called inside a goroutine by Notify.
-func (a *Adapter) post(payload PhaseArchivedWebhookPayload) {
-	body, err := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.URL, bytes.NewReader(payload))
 	if err != nil {
-		slog.Warn("webhook: marshal payload failed",
-			slog.String("change_id", payload.ChangeID),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, a.cfg.URL, bytes.NewReader(body))
-	if err != nil {
-		slog.Warn("webhook: build request failed",
-			slog.String("change_id", payload.ChangeID),
-			slog.String("error", err.Error()),
-		)
-		return
+		return fmt.Errorf("webhook: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if a.cfg.APIKey != "" {
@@ -106,33 +82,16 @@ func (a *Adapter) post(payload PhaseArchivedWebhookPayload) {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		slog.Warn("webhook: delivery failed",
-			slog.String("change_id", payload.ChangeID),
-			slog.String("error", err.Error()),
-			slog.String("webhook.delivery_status", "failed"),
-		)
-		return
+		return fmt.Errorf("webhook: deliver: %w", err)
 	}
 	defer func() {
 		// Drain before close to enable connection reuse; ignore read error.
 		_, _ = io.Copy(io.Discard, resp.Body)
-		if err := resp.Body.Close(); err != nil {
-			slog.Debug("webhook: close response body", slog.String("error", err.Error()))
-		}
+		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Warn("webhook: non-2xx response",
-			slog.String("change_id", payload.ChangeID),
-			slog.Int("status_code", resp.StatusCode),
-			slog.String("webhook.delivery_status", "failed"),
-		)
-		return
+		return fmt.Errorf("webhook: non-2xx response: status %d", resp.StatusCode)
 	}
-
-	slog.Debug("webhook: delivered",
-		slog.String("change_id", payload.ChangeID),
-		slog.Int("status_code", resp.StatusCode),
-		slog.String("webhook.delivery_status", fmt.Sprintf("%d", resp.StatusCode)),
-	)
+	return nil
 }

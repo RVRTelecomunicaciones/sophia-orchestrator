@@ -1,13 +1,14 @@
 package webhook_test
 
-// Group E — phase.archived outbound webhook (RED tests)
-// E.1 webhook POSTs correct payload + API-key header
-// E.2 network failure logged + orch continues (no panic)
-// E.3 configurable timeout — timeout logged at WARN + continues
-// E.4 non-2xx response logged at WARN + orch continues
+// adapter_test.go — synchronous Deliver transport (loop-hardening D-LH-1).
+//
+// The relay poller calls Deliver(ctx, payload) and decides retry vs. mark
+// based on the returned error. The fire-and-forget Notify goroutine path is
+// gone; the POST body and API-key header stay byte-identical to the legacy
+// contract so the ME receiver is untouched.
 
 import (
-	"encoding/json"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,20 +20,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// E.1 — Happy path: adapter POSTs correct payload + API-key header.
-func TestAdapter_Notify_PostsCorrectPayload(t *testing.T) {
-	done := make(chan struct{})
+// Deliver POSTs the raw payload bytes verbatim with the API-key + JSON headers
+// and returns nil on 2xx.
+func TestAdapter_Deliver_PostsPayloadAndHeaders(t *testing.T) {
 	var captured struct {
 		body    []byte
 		headers http.Header
 	}
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured.headers = r.Header.Clone()
 		body, _ := io.ReadAll(r.Body)
 		captured.body = body
 		w.WriteHeader(http.StatusAccepted)
-		close(done)
 	}))
 	defer srv.Close()
 
@@ -42,65 +41,30 @@ func TestAdapter_Notify_PostsCorrectPayload(t *testing.T) {
 		Timeout: 5 * time.Second,
 	})
 
-	payload := webhook.PhaseArchivedWebhookPayload{
-		ChangeID:   "change-123",
-		ChangeName: "my-change",
-		PhaseType:  "archive",
-		ArchivedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
+	// Byte-identical payload: the relay delivers stored outbox bytes verbatim.
+	payload := []byte(`{"change_id":"change-123","change_name":"my-change","phase_type":"archive","archived_at":"2026-01-01T00:00:00Z"}`)
 
-	adapter.Notify(t.Context(), payload)
+	err := adapter.Deliver(context.Background(), payload)
+	require.NoError(t, err)
 
-	select {
-	case <-done:
-		// request arrived at server
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("webhook POST did not arrive within 500ms")
-	}
-
-	require.Equal(t, "test-api-key", captured.headers.Get("X-API-Key"))
-	require.Equal(t, "application/json", captured.headers.Get("Content-Type"))
-
-	var decoded webhook.PhaseArchivedWebhookPayload
-	require.NoError(t, json.Unmarshal(captured.body, &decoded))
-	assert.Equal(t, "change-123", decoded.ChangeID)
-	assert.Equal(t, "my-change", decoded.ChangeName)
-	assert.Equal(t, "archive", decoded.PhaseType)
+	assert.Equal(t, "test-api-key", captured.headers.Get("X-API-Key"))
+	assert.Equal(t, "application/json", captured.headers.Get("Content-Type"))
+	assert.Equal(t, payload, captured.body, "POST body must be byte-identical to the stored payload")
 }
 
-// E.2 — Network failure: adapter logs WARN but orch continues without error/panic.
-func TestAdapter_Notify_NetworkFailure_LogsAndContinues(t *testing.T) {
+// Network failure → non-nil error (relay reschedules).
+func TestAdapter_Deliver_NetworkFailure_ReturnsError(t *testing.T) {
 	adapter := webhook.New(webhook.Config{
-		URL:     "http://127.0.0.1:1", // unreachable port
+		URL:     "http://127.0.0.1:1", // unreachable
 		APIKey:  "key",
 		Timeout: 100 * time.Millisecond,
 	})
-
-	payload := webhook.PhaseArchivedWebhookPayload{
-		ChangeID:   "ch-fail",
-		ChangeName: "fail-change",
-		PhaseType:  "archive",
-		ArchivedAt: time.Now(),
-	}
-
-	// Must not panic and must complete without blocking.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		adapter.Notify(t.Context(), payload)
-	}()
-
-	select {
-	case <-done:
-		// Pass — completed without blocking.
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Notify blocked when it should fire-and-forget")
-	}
+	err := adapter.Deliver(context.Background(), []byte(`{}`))
+	require.Error(t, err)
 }
 
-// E.3 — Timeout: adapter logs WARN and orch continues.
-func TestAdapter_Notify_Timeout_LogsAndContinues(t *testing.T) {
-	// Server that hangs long enough to trigger the client timeout.
+// Timeout → non-nil error.
+func TestAdapter_Deliver_Timeout_ReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
@@ -110,32 +74,14 @@ func TestAdapter_Notify_Timeout_LogsAndContinues(t *testing.T) {
 	adapter := webhook.New(webhook.Config{
 		URL:     srv.URL + "/api/v1/worker/phase-archived",
 		APIKey:  "key",
-		Timeout: 50 * time.Millisecond, // shorter than server sleep
+		Timeout: 50 * time.Millisecond,
 	})
-
-	payload := webhook.PhaseArchivedWebhookPayload{
-		ChangeID:   "ch-timeout",
-		ChangeName: "timeout-change",
-		PhaseType:  "archive",
-		ArchivedAt: time.Now(),
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		adapter.Notify(t.Context(), payload)
-	}()
-
-	select {
-	case <-done:
-		// Pass — completed without blocking.
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Notify blocked after timeout")
-	}
+	err := adapter.Deliver(context.Background(), []byte(`{}`))
+	require.Error(t, err)
 }
 
-// E.4 — Non-2xx response: adapter logs WARN but orch continues.
-func TestAdapter_Notify_Non2xx_LogsAndContinues(t *testing.T) {
+// Non-2xx → non-nil error (relay reschedules, row stays pending).
+func TestAdapter_Deliver_Non2xx_ReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -146,44 +92,14 @@ func TestAdapter_Notify_Non2xx_LogsAndContinues(t *testing.T) {
 		APIKey:  "key",
 		Timeout: 5 * time.Second,
 	})
-
-	payload := webhook.PhaseArchivedWebhookPayload{
-		ChangeID:   "ch-500",
-		ChangeName: "five-hundred",
-		PhaseType:  "archive",
-		ArchivedAt: time.Now(),
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		adapter.Notify(t.Context(), payload)
-	}()
-
-	select {
-	case <-done:
-		// Pass — non-2xx logged, orch continues.
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Notify blocked on non-2xx response")
-	}
+	err := adapter.Deliver(context.Background(), []byte(`{}`))
+	require.Error(t, err)
 }
 
-// E.5 — Empty URL disables webhook (no HTTP call, no panic).
-func TestAdapter_Notify_EmptyURL_Disabled(t *testing.T) {
-	adapter := webhook.New(webhook.Config{
-		URL:     "", // disabled
-		APIKey:  "key",
-		Timeout: 5 * time.Second,
-	})
-
-	payload := webhook.PhaseArchivedWebhookPayload{
-		ChangeID:  "ch-disabled",
-		PhaseType: "archive",
-		ArchivedAt: time.Now(),
-	}
-
-	// Must not panic.
-	require.NotPanics(t, func() {
-		adapter.Notify(t.Context(), payload)
-	})
+// Empty URL (disabled adapter) → error so the relay keeps the row pending
+// rather than silently dropping it.
+func TestAdapter_Deliver_EmptyURL_ReturnsError(t *testing.T) {
+	adapter := webhook.New(webhook.Config{URL: "", APIKey: "key", Timeout: 5 * time.Second})
+	err := adapter.Deliver(context.Background(), []byte(`{}`))
+	require.Error(t, err)
 }
