@@ -231,9 +231,10 @@ func TestSkillRepo_FindByPhase_MatchingRow(t *testing.T) {
 	repo := pg.NewSkillRepo(pool)
 	ctx := context.Background()
 
-	applySkill := newTestSkill(t, skillID1, "apply-implement-safely", []phase.PhaseType{phase.PhaseApply})
-	verifySkill := newTestSkill(t, skillID2, "verify-chain-validation", []phase.PhaseType{phase.PhaseVerify})
-	multiSkill := newTestSkill(t, skillID3, "multi-phase", []phase.PhaseType{phase.PhaseApply, phase.PhaseVerify})
+	// FindByPhase filters status='active' (D-M1-6); skills must be active to match.
+	applySkill := newActiveTestSkill(t, skillID1, "apply-implement-safely", []phase.PhaseType{phase.PhaseApply})
+	verifySkill := newActiveTestSkill(t, skillID2, "verify-chain-validation", []phase.PhaseType{phase.PhaseVerify})
+	multiSkill := newActiveTestSkill(t, skillID3, "multi-phase", []phase.PhaseType{phase.PhaseApply, phase.PhaseVerify})
 
 	require.NoError(t, repo.Upsert(ctx, applySkill))
 	require.NoError(t, repo.Upsert(ctx, verifySkill))
