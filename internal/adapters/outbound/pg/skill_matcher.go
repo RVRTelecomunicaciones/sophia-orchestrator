@@ -2,6 +2,7 @@ package pg
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -234,6 +235,11 @@ func appliesWhenMatches(aw skill.AppliesWhen, q discipline.SkillQuery) (string, 
 // of structural data must not silently hide skills.
 //
 // Matching is case-insensitive equality on the detected Name field.
+//
+// Optional version gate (DG-C7-9): when aw.FrameworkMinVersion is non-nil and
+// non-empty, each matched framework name additionally requires
+// detected_major >= min_major. Parse failures on either side are fail-open:
+// the skill is returned and a WARN is emitted to slog.Default().
 func structuralMatches(aw skill.AppliesWhen, q discipline.SkillQuery) (string, bool) {
 	if q.StructuralContext == nil {
 		return "", true // no structural data → no structural filtering
@@ -241,9 +247,10 @@ func structuralMatches(aw skill.AppliesWhen, q discipline.SkillQuery) (string, b
 	sc := q.StructuralContext
 
 	// Framework filter: if skill declares framework constraints, at least one
-	// declared framework must appear in sc.Frameworks.
+	// declared framework must appear in sc.Frameworks AND (when the version gate
+	// is active for that framework) satisfy the major-version requirement.
 	if len(aw.Framework) > 0 {
-		if !anyFrameworkPresent(aw.Framework, sc.Frameworks) {
+		if !anyFrameworkMatches(aw, sc.Frameworks) {
 			return discipline.SkipReasonStructuralMismatch, false
 		}
 	}
@@ -258,15 +265,57 @@ func structuralMatches(aw skill.AppliesWhen, q discipline.SkillQuery) (string, b
 	return "", true
 }
 
-// anyFrameworkPresent returns true when at least one of the declared framework
-// names (from applies_when.framework) appears in the detected frameworks list
-// (case-insensitive equality on Name).
-func anyFrameworkPresent(declared []string, detected []structural.FrameworkInfo) bool {
-	for _, d := range declared {
-		for _, f := range detected {
-			if strings.EqualFold(d, f.Name) {
+// anyFrameworkMatches returns true when at least one declared framework name
+// appears in the detected list AND passes the optional version gate from
+// aw.FrameworkMinVersion.
+//
+// Version gate rules (DG-C7-9):
+//   - Gate is inactive when aw.FrameworkMinVersion is nil or empty (name-only path).
+//   - Gate is inactive for a specific framework when that name has no entry in the map.
+//   - When active: detected_major >= min_major → passes; otherwise skipped.
+//   - Parse failure on either side → fail-open (pass) + slog WARN.
+func anyFrameworkMatches(aw skill.AppliesWhen, detected []structural.FrameworkInfo) bool {
+	for _, declaredName := range aw.Framework {
+		for _, fw := range detected {
+			if !strings.EqualFold(declaredName, fw.Name) {
+				continue
+			}
+			// Name match found. Check version gate if active for this framework.
+			if len(aw.FrameworkMinVersion) == 0 {
+				// Gate inactive globally — name match is sufficient.
 				return true
 			}
+			minVer, hasEntry := aw.FrameworkMinVersion[strings.ToLower(fw.Name)]
+			if !hasEntry {
+				// No gate entry for this specific framework — name match passes.
+				return true
+			}
+			// Gate is active: parse both sides and compare majors.
+			detectedMaj, detectedOK := skill.MajorOf(fw.Version)
+			minMaj, minOK := skill.MajorOf(minVer)
+			if !detectedOK {
+				slog.Default().Warn(
+					"skill version gate: cannot parse detected version, failing open",
+					"framework", fw.Name,
+					"detected_version", fw.Version,
+					"min_version", minVer,
+				)
+				return true
+			}
+			if !minOK {
+				slog.Default().Warn(
+					"skill version gate: cannot parse min version, failing open",
+					"framework", fw.Name,
+					"detected_version", fw.Version,
+					"min_version", minVer,
+				)
+				return true
+			}
+			if detectedMaj >= minMaj {
+				return true
+			}
+			// detected_major < min_major: this framework entry fails the gate.
+			// Continue to check if another declared framework name matches.
 		}
 	}
 	return false

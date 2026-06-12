@@ -126,6 +126,12 @@ type AppliesWhen struct {
 	// "typescript", "go"). Matched case-insensitively against
 	// StructuralContext.Languages. Empty = unconstrained.
 	Language []string `json:"language,omitempty"`
+	// FrameworkMinVersion maps lowercased framework names to their minimum
+	// required version string (e.g. {"angular": "22.0.0"}). When nil or
+	// empty the version gate is inactive — skills match by name only
+	// (backward compatible). No DB migration: serialised into the existing
+	// applies_when JSONB column (DG-C7-4).
+	FrameworkMinVersion map[string]string `json:"framework_min_version,omitempty"`
 }
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
