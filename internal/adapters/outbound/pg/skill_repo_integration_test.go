@@ -511,3 +511,218 @@ func TestSkillRepo_Upsert_HydrationRoundtrip_WithLifecycle(t *testing.T) {
 	require.NotNil(t, got.LastValidatedAt(), "last_validated_at must round-trip")
 	require.True(t, got.LastValidatedAt().Equal(lastVal), "last_validated_at value must round-trip")
 }
+
+// ── T4.6: Idempotent candidate/imported rows (DG-C7-7) ───────────────────────
+//
+// These tests verify that InsertIfAbsent correctly handles the lifecycle fields
+// used by SkillImporter: status=candidate, activation_source=imported, plus
+// FrameworkMinVersion in the applies_when JSONB column.
+
+const (
+	importedSkillID1 = "01ARZ3NDEKTSV4RRFFQ69G5IA1"
+	importedSkillID2 = "01ARZ3NDEKTSV4RRFFQ69G5IA2"
+	importedSkillID3 = "01ARZ3NDEKTSV4RRFFQ69G5IA3"
+	importedSkillID4 = "01ARZ3NDEKTSV4RRFFQ69G5IA4"
+)
+
+// newImportedCandidateSkill creates a skill modelling what SkillImporter produces:
+// status=candidate, activation_source=imported, FrameworkMinVersion in AppliesWhen.
+func newImportedCandidateSkill(
+	t *testing.T,
+	rawID, name, version, fw string,
+	phases []phase.PhaseType,
+) *skill.Skill {
+	t.Helper()
+	major := version
+	if dot := len(version); dot > 0 {
+		for i, c := range version {
+			if c == '.' {
+				major = version[:i]
+				break
+			}
+		}
+	}
+	s, err := skill.New(
+		mustSkillIDInteg(t, rawID),
+		name,
+		phases,
+		"# "+name+"  (imported, candidate)\n\n## Best practices\n\nImported best practices for "+fw+".\n\n## Provenance\n\n- framework: "+fw+" v"+version+"\n- activation_source: imported ; status: candidate\n",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{
+			Status:           skill.StatusCandidate,
+			Version:          version,
+			RiskLevel:        skill.RiskMedium,
+			ActivationSource: skill.SourceImported,
+			AppliesWhen: skill.AppliesWhen{
+				Framework: []string{fw},
+				FrameworkMinVersion: map[string]string{
+					fw: major,
+				},
+			},
+		},
+		integNow,
+	)
+	require.NoError(t, err)
+	return s
+}
+
+// T4.6 (a): insert stack/angular-22 candidate/imported → row present with
+// correct lifecycle fields, NOT returned by active-only FindByPhase queries.
+func TestSkillRepo_ImportedCandidate_InsertAndNotVisibleToMatcher(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	candidate := newImportedCandidateSkill(
+		t, importedSkillID1,
+		"stack/angular-22", "22.0.0", "angular",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+	)
+	require.NoError(t, repo.InsertIfAbsent(ctx, candidate))
+
+	// Row must be present in List (all-rows query).
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+
+	got := list[0]
+	require.Equal(t, "stack/angular-22", got.Name())
+	require.Equal(t, "22.0.0", got.Version())
+	require.Equal(t, skill.StatusCandidate, got.Status())
+	require.Equal(t, skill.SourceImported, got.ActivationSource())
+	require.Equal(t, skill.RiskMedium, got.RiskLevel())
+
+	// AppliesWhen with FrameworkMinVersion must round-trip through JSONB.
+	aw := got.AppliesWhen()
+	require.Equal(t, []string{"angular"}, aw.Framework)
+	require.NotNil(t, aw.FrameworkMinVersion)
+	require.Equal(t, "22", aw.FrameworkMinVersion["angular"])
+
+	// Candidate rows MUST NOT be returned by active-only FindByPhase queries.
+	activeSkills, err := repo.FindByPhase(ctx, phase.PhaseApply)
+	require.NoError(t, err)
+	require.Empty(t, activeSkills,
+		"candidate/imported skill must NOT appear in active-only matcher results")
+}
+
+// T4.6 (b): second identical InsertIfAbsent → no-op, row unchanged.
+func TestSkillRepo_ImportedCandidate_IdempotentSecondInsert(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	candidate := newImportedCandidateSkill(
+		t, importedSkillID1,
+		"stack/angular-22", "22.0.0", "angular",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+	)
+	require.NoError(t, repo.InsertIfAbsent(ctx, candidate))
+
+	// Second call with same (name, version) but different ID must be a no-op.
+	duplicate := newImportedCandidateSkill(
+		t, importedSkillID2, // different ID
+		"stack/angular-22", "22.0.0", "angular",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+	)
+	require.NoError(t, repo.InsertIfAbsent(ctx, duplicate),
+		"second InsertIfAbsent must return nil (no-op)")
+
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "exactly one row must exist after idempotent second insert")
+	// Original ID must be preserved.
+	require.Equal(t, candidate.ID(), list[0].ID(),
+		"original row must not be overwritten by second InsertIfAbsent")
+}
+
+// T4.6 (c): concurrent double-insert same (name, version) → exactly one row.
+func TestSkillRepo_ImportedCandidate_ConcurrentInsert_ExactlyOneRow(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	const goroutines = 5
+	errs := make(chan error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			rawIDs := []string{
+				importedSkillID1,
+				importedSkillID2,
+				importedSkillID3,
+				importedSkillID4,
+				"01ARZ3NDEKTSV4RRFFQ69G5IA5",
+			}
+			s := newImportedCandidateSkill(
+				t, rawIDs[idx],
+				"stack/angular-22", "22.0.0", "angular",
+				[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+			)
+			errs <- repo.InsertIfAbsent(ctx, s)
+		}(i)
+	}
+
+	for i := 0; i < goroutines; i++ {
+		err := <-errs
+		require.NoError(t, err, "all concurrent InsertIfAbsent calls must return nil")
+	}
+
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1,
+		"exactly one row must exist after %d concurrent inserts", goroutines)
+}
+
+// T4.6 (d): drift row stack/angular-23 coexists with stack/angular-22;
+// the angular-22 row is unchanged when pre-seeded as active.
+func TestSkillRepo_ImportedCandidate_DriftRowCoexistsWithActive(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	// Pre-seed an ACTIVE angular-22 skill (simulates a previously promoted candidate).
+	active22, err := skill.New(
+		mustSkillIDInteg(t, importedSkillID1),
+		"stack/angular-22",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+		"Active angular-22 best practices.",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{
+			Status:           skill.StatusActive,
+			Version:          "22.0.0",
+			RiskLevel:        skill.RiskMedium,
+			ActivationSource: skill.SourceImported,
+		},
+		integNow,
+	)
+	require.NoError(t, err)
+	require.NoError(t, repo.Upsert(ctx, active22))
+
+	// Insert drift candidate for angular-23.
+	candidate23 := newImportedCandidateSkill(
+		t, importedSkillID2,
+		"stack/angular-23", "23.0.0", "angular",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+	)
+	require.NoError(t, repo.InsertIfAbsent(ctx, candidate23))
+
+	// Both rows must coexist.
+	list, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 2, "angular-22 active and angular-23 candidate must coexist")
+
+	names := make(map[string]skill.Status, 2)
+	for _, s := range list {
+		names[s.Name()] = s.Status()
+	}
+	require.Equal(t, skill.StatusActive, names["stack/angular-22"],
+		"stack/angular-22 must remain active")
+	require.Equal(t, skill.StatusCandidate, names["stack/angular-23"],
+		"stack/angular-23 must be candidate")
+
+	// Active-only query must return only angular-22.
+	activeSkills, err := repo.FindByPhase(ctx, phase.PhaseApply)
+	require.NoError(t, err)
+	require.Len(t, activeSkills, 1)
+	require.Equal(t, "stack/angular-22", activeSkills[0].Name())
+}
