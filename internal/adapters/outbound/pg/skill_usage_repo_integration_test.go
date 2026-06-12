@@ -68,7 +68,7 @@ func newTestUsage(t *testing.T, rawID, rawChangeID, phaseType, rawSkillID, versi
 // TestSkillUsageRepo_Insert verifies that Insert writes a row with outcome=pending
 // and that the row can be read back via FindByChange.
 func TestSkillUsageRepo_Insert(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t) // applies all migrations including 011
+	pool := setupSkillPG(t)
 	ctx := context.Background()
 	repo := pg.NewSkillUsageRepo(pool)
 
@@ -90,7 +90,7 @@ func TestSkillUsageRepo_Insert(t *testing.T) {
 // TestSkillUsageRepo_Insert_Idempotent verifies that inserting the same
 // (change_id, phase_type, skill_id, skill_version) tuple twice is a no-op.
 func TestSkillUsageRepo_Insert_Idempotent(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t)
+	pool := setupSkillPG(t)
 	ctx := context.Background()
 	repo := pg.NewSkillUsageRepo(pool)
 
@@ -110,7 +110,7 @@ func TestSkillUsageRepo_Insert_Idempotent(t *testing.T) {
 // TestSkillUsageRepo_UpdateOutcome verifies that UpdateOutcome changes the
 // outcome of an existing row.
 func TestSkillUsageRepo_UpdateOutcome(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t)
+	pool := setupSkillPG(t)
 	ctx := context.Background()
 	repo := pg.NewSkillUsageRepo(pool)
 
@@ -127,7 +127,7 @@ func TestSkillUsageRepo_UpdateOutcome(t *testing.T) {
 
 // TestSkillUsageRepo_FindByChange_MultiRow verifies filter by change_id.
 func TestSkillUsageRepo_FindByChange_MultiRow(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t)
+	pool := setupSkillPG(t)
 	ctx := context.Background()
 	repo := pg.NewSkillUsageRepo(pool)
 
@@ -151,7 +151,7 @@ func TestSkillUsageRepo_FindByChange_MultiRow(t *testing.T) {
 
 // TestSkillUsageRepo_FindBySkill verifies filter by skill_id.
 func TestSkillUsageRepo_FindBySkill(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t)
+	pool := setupSkillPG(t)
 	ctx := context.Background()
 	repo := pg.NewSkillUsageRepo(pool)
 

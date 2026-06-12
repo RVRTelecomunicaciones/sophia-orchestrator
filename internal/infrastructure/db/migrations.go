@@ -39,3 +39,20 @@ func MigrateDown(sourceDir, databaseURL string, steps int) error {
 	}
 	return nil
 }
+
+// MigrateToVersion applies migrations up to and including the given version
+// number. Used by integration tests that need a specific baseline schema
+// (e.g. pre-010 state to verify the 010 up/down round-trip).
+func MigrateToVersion(sourceDir, databaseURL string, version uint) error {
+	m, err := migrate.New("file://"+sourceDir, databaseURL)
+	if err != nil {
+		return fmt.Errorf("db.migrations: open: %w", err)
+	}
+	defer func() {
+		_, _ = m.Close()
+	}()
+	if err := m.Migrate(version); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("db.migrations: migrate to %d: %w", version, err)
+	}
+	return nil
+}
