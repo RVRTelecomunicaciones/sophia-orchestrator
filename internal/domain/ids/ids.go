@@ -32,6 +32,8 @@ type (
 	SkillID struct{ raw string }
 	// SkillUsageID identifies a SkillUsage record.
 	SkillUsageID struct{ raw string }
+	// OutboxID identifies a webhook_outbox event row (migration 012).
+	OutboxID struct{ raw string }
 )
 
 func parseULID(raw string) (string, error) {
@@ -98,6 +100,12 @@ func ParseSkillUsageID(raw string) (SkillUsageID, error) {
 	return SkillUsageID{r}, err
 }
 
+// ParseOutboxID validates and constructs an OutboxID.
+func ParseOutboxID(raw string) (OutboxID, error) {
+	r, err := parseULID(raw)
+	return OutboxID{r}, err
+}
+
 // String implementations for each ID type.
 func (i ChangeID) String() string   { return i.raw }
 func (i PhaseID) String() string    { return i.raw }
@@ -108,6 +116,7 @@ func (i SessionID) String() string  { return i.raw }
 func (i WorktreeID) String() string { return i.raw }
 func (i SkillID) String() string      { return i.raw }
 func (i SkillUsageID) String() string { return i.raw }
+func (i OutboxID) String() string     { return i.raw }
 
 // IsZero reports whether the ID is the zero value.
 func (i ChangeID) IsZero() bool { return i.raw == "" }
@@ -135,3 +144,6 @@ func (i SkillID) IsZero() bool { return i.raw == "" }
 
 // IsZero reports whether the ID is the zero value.
 func (i SkillUsageID) IsZero() bool { return i.raw == "" }
+
+// IsZero reports whether the ID is the zero value.
+func (i OutboxID) IsZero() bool { return i.raw == "" }
