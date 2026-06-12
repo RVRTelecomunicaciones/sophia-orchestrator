@@ -118,9 +118,19 @@ func TestAdvanceChange_Archive_EnqueuesOutbox_NoFireAndForget(t *testing.T) {
 		PhaseType:  string(phase.PhaseArchive),
 		ArchivedAt: clock.Now(),
 	})
-	assert.JSONEq(t, string(want), string(completion.event.Payload()))
+	assert.Equal(t, want, completion.event.Payload())
 
 	notifier.mu.Lock()
 	defer notifier.mu.Unlock()
 	assert.Equal(t, 0, notifier.called, "legacy fire-and-forget Notify must NOT be called")
+
+	// Loop-hardening D-LH-1: the change-row write and the outbox enqueue must
+	// land in ONE transaction. On the archive path with an enqueuer wired,
+	// ChangeRepo.Save must NOT be called separately — only
+	// SaveCompletedWithOutbox writes the (now-completed) change row. A separate
+	// pre-save would reopen a death-between-writes window that drops the event.
+	h.changeRepo.mu.Lock()
+	defer h.changeRepo.mu.Unlock()
+	assert.Equal(t, 0, h.changeRepo.saveCalls,
+		"archive path must not call ChangeRepo.Save; the completion tx writes the change row")
 }

@@ -28,10 +28,11 @@ import (
 // --- fakes ---
 
 type fakeChangeRepo struct {
-	mu      sync.Mutex
-	byID    map[string]*domainchange.Change
-	saveErr error
-	findErr error
+	mu        sync.Mutex
+	byID      map[string]*domainchange.Change
+	saveErr   error
+	findErr   error
+	saveCalls int
 }
 
 func newFakeChangeRepo() *fakeChangeRepo {
@@ -41,6 +42,7 @@ func newFakeChangeRepo() *fakeChangeRepo {
 func (r *fakeChangeRepo) Save(_ context.Context, c *domainchange.Change) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.saveCalls++
 	if r.saveErr != nil {
 		return r.saveErr
 	}

@@ -1225,14 +1225,28 @@ func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed
 	// Advance CurrentPhase pointer to the just-completed phase. The next
 	// orchestrator call validates that any new phase is in
 	// completed.NextValid().
-	if err := c.AdvancePhase(completed, s.d.Clock.Now()); err == nil {
-		_ = s.d.ChangeRepo.Save(ctx, c)
+	//
+	// Loop-hardening D-LH-1: on the archive path the change-row write is folded
+	// into the completion transaction below (SaveCompletedWithOutbox upserts
+	// current_phase = EXCLUDED.current_phase), so we MUST NOT pre-save here —
+	// a separate write reopens a death-between-writes window that can leave
+	// current_phase=archive with no outbox row. Non-archive phases keep their
+	// existing single-Save behavior.
+	advanceErr := c.AdvancePhase(completed, s.d.Clock.Now())
+	if completed != phase.PhaseArchive {
+		if advanceErr == nil {
+			_ = s.d.ChangeRepo.Save(ctx, c)
+		}
+		return
+	}
+	if advanceErr != nil {
+		return
 	}
 	// Archive is terminal — once it completes, mark the Change Completed and
 	// emit the phase.archived event (Iron Law D1.2: envelope already persisted
 	// upstream by runPhaseCompletion; terminal state durable after the
 	// completion write below).
-	if completed == phase.PhaseArchive {
+	{
 		if err := c.MarkCompleted(s.d.Clock.Now()); err != nil {
 			return
 		}
