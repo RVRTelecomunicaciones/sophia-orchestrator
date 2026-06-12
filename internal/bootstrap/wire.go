@@ -42,6 +42,7 @@ import (
 	initcache "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/cache"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
 	initpersister "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/persister"
+	outboxapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/outbox"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/recovery"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
@@ -59,6 +60,7 @@ type App struct {
 	pool   *pgxpool.Pool
 	server *http.Server
 	tracer *obs.Tracer
+	relay  *outboxapp.Relay // nil when the memory-engine webhook is disabled
 }
 
 // Wire constructs the App by composing every concrete dependency.
@@ -348,16 +350,28 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		})
 	}
 
-	// Memory-engine webhook bridge (M2 D-M2-1): fire-and-forget POST after phase.archived.
-	// nil when SOPHIA_MEMORY_WEBHOOK_URL is empty (adapter disabled).
-	var webhookNotifier phase.WebhookNotifier
+	// Memory-engine delivery (loop-hardening D-LH-1): durable transactional
+	// outbox + relay poller replaces the legacy fire-and-forget POST. The
+	// outbox repo enlists the phase.archived INSERT in the change-completion
+	// transaction; the relay drains pending rows and delivers via the webhook
+	// adapter's synchronous Deliver. All disabled when the URL is empty.
+	outboxRepo := pg.NewOutboxRepo(pool)
+	var outboxEnqueuer phase.OutboxEnqueuer
+	var relay *outboxapp.Relay
 	if cfg.MemoryWebhook.URL != "" {
 		wh := webhookadapter.New(webhookadapter.Config{
 			URL:     cfg.MemoryWebhook.URL,
 			APIKey:  cfg.MemoryWebhook.APIKey,
 			Timeout: time.Duration(cfg.MemoryWebhook.TimeoutMS) * time.Millisecond,
 		})
-		webhookNotifier = webhookadapter.NewPhaseBridge(wh)
+		outboxEnqueuer = outboxRepo
+		relay = outboxapp.New(outboxapp.Deps{
+			Repo:       outboxRepo,
+			Clock:      clock,
+			Deliver:    wh.Deliver,
+			Interval:   outboxPollInterval(cfg),
+			BatchLimit: 50,
+		})
 	}
 
 	phaseSvc := phase.New(phase.Deps{
@@ -389,7 +403,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		Metrics:         metrics,
 		Skills:          skillMatcher,     // nil when SOPHIA_SKILLS_ENABLED=false (M3: SkillMatcher)
 		SkillUsageRepo:  skillUsageRepo,   // M2: track skill injection events
-		WebhookNotifier: webhookNotifier,  // M2: fire-and-forget phase.archived (nil = disabled)
+		OutboxEnqueuer:  outboxEnqueuer,   // loop-hardening: txn-bound phase.archived outbox (nil = disabled)
 		Init:            initSvc,          // INIT phase structural detection (D-INIT-3)
 		Bootstrap:       bootstrapSvc,     // PR3c-ii: async bootstrap trigger after INIT (DG-C7-5)
 		BootstrapTimeout: func() time.Duration {
@@ -483,13 +497,30 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		logger.Error("bootstrap: recovery scan returned error", slog.String("err", err.Error()), slog.Int("marked", marked))
 	}
 
-	return &App{cfg: cfg, logger: logger, pool: pool, server: srv, tracer: tracer}, nil
+	return &App{cfg: cfg, logger: logger, pool: pool, server: srv, tracer: tracer, relay: relay}, nil
+}
+
+// outboxPollInterval resolves the relay poll cadence from config, defaulting to
+// 5s (loop-hardening D-LH-1). The config key is outbox.poll_interval, sourced
+// from SOPHIA_OUTBOX_POLL_INTERVAL.
+func outboxPollInterval(cfg config.Config) time.Duration {
+	if cfg.Outbox.PollInterval > 0 {
+		return cfg.Outbox.PollInterval
+	}
+	return 5 * time.Second
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled or the server
 // returns an unrecoverable error.
 func (a *App) Run(ctx context.Context) error {
 	a.logger.Info("sophia-orchestator starting", slog.String("addr", a.cfg.HTTP.Addr), slog.String("env", a.cfg.Environment))
+
+	// Loop-hardening D-LH-1: start the outbox relay poller under the request
+	// ctx, mirroring the HTTP server goroutine lifecycle. ctx.Done() stops the
+	// ticker. nil when the memory-engine webhook is disabled.
+	if a.relay != nil {
+		go a.relay.Start(ctx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
