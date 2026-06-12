@@ -13,16 +13,10 @@ import (
 	dbpkg "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/db"
 )
 
-// setupMigration009OnlyPG spins a Postgres 16 container but applies only
-// migrations up to and including 009 (all migrations currently on the branch
-// before 010 is written). After 010_skills_lifecycle.up.sql is added, this
-// helper still gives the pre-010 baseline because we always apply all existing
-// migrations — but in the RED phase, 010 does not exist yet, so setup applies
-// up to 009 naturally.
-//
-// We reuse the standard setupSkillPG helper (applies all migrations). Since
-// this test file exercises the migration itself, we need direct control.
-// setupMigration009OnlyPG uses a fresh container each time.
+// setupMigration009OnlyPG spins a Postgres 16 container and applies migrations
+// up to and including version 009 only, giving the pre-010 baseline regardless
+// of how many migrations exist on the branch. Tests that verify 010 up/down
+// behaviour call MigrateUp / MigrateDown on the returned DSN after this setup.
 func setupMigration009OnlyPG(t *testing.T) (pool *pgxpool.Pool, dsn string) {
 	t.Helper()
 	skipIfNoDocker(t)
@@ -41,7 +35,9 @@ func setupMigration009OnlyPG(t *testing.T) (pool *pgxpool.Pool, dsn string) {
 	dsn, err = container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 
-	require.NoError(t, dbpkg.MigrateUp(migrationsDir(t), dsn))
+	// Apply exactly up to migration 009 so the pre-010 baseline is stable
+	// regardless of how many later migrations exist in the directory.
+	require.NoError(t, dbpkg.MigrateToVersion(migrationsDir(t), dsn, 9))
 
 	pool, err = dbpkg.Open(ctx, dbpkg.DefaultConfig(dsn))
 	require.NoError(t, err)
@@ -119,10 +115,12 @@ func TestMigration010_PreState(t *testing.T) {
 //   - The skills_name_unique constraint is gone.
 //   - The 3 new indexes are present.
 func TestMigration010_PostUp(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t)
+	pool, dsn := setupMigration009OnlyPG(t)
 	ctx := context.Background()
 
-	// After setupMigration009OnlyPG, migration 010 is applied (if it exists).
+	// Apply exactly migration 010 on top of the 009 baseline.
+	require.NoError(t, dbpkg.MigrateToVersion(migrationsDir(t), dsn, 10))
+
 	// Count total columns: should be 16 after 010 (7 original + 9 new).
 	var totalCols int
 	err := pool.QueryRow(ctx, `
@@ -195,7 +193,10 @@ func TestMigration010_RoundTrip(t *testing.T) {
 	_, dsn := setupMigration009OnlyPG(t)
 	ctx := context.Background()
 
-	// Down migration: roll back one step.
+	// Apply exactly up to migration 010 on the 009 baseline (not 011+).
+	require.NoError(t, dbpkg.MigrateToVersion(migrationsDir(t), dsn, 10))
+
+	// Down migration: roll back one step (010 → 009).
 	require.NoError(t, dbpkg.MigrateDown(migrationsDir(t), dsn, 1))
 
 	pool, err := dbpkg.Open(ctx, dbpkg.DefaultConfig(dsn))
@@ -259,7 +260,10 @@ func TestMigration010_RoundTrip(t *testing.T) {
 func TestMigration010_IdempotentDown(t *testing.T) {
 	_, dsn := setupMigration009OnlyPG(t)
 
-	// First down: normal rollback.
+	// Apply exactly up to migration 010 on the 009 baseline.
+	require.NoError(t, dbpkg.MigrateToVersion(migrationsDir(t), dsn, 10))
+
+	// First down: normal rollback (010 → 009).
 	require.NoError(t, dbpkg.MigrateDown(migrationsDir(t), dsn, 1),
 		"first down migration must succeed")
 
@@ -277,8 +281,11 @@ func TestMigration010_IdempotentDown(t *testing.T) {
 // TestMigration010_CheckConstraints asserts that V4.1 §5.2 CHECK constraints
 // accept all valid enum values and reject invalid ones. (C.7 GREEN gate)
 func TestMigration010_CheckConstraints(t *testing.T) {
-	pool, _ := setupMigration009OnlyPG(t)
+	pool, dsn := setupMigration009OnlyPG(t)
 	ctx := context.Background()
+
+	// Apply exactly up to migration 010 to get the CHECK constraints.
+	require.NoError(t, dbpkg.MigrateToVersion(migrationsDir(t), dsn, 10))
 
 	// Helper to attempt an INSERT with specific enum values.
 	// Each call uses a unique id/name derived from the subtest index.
