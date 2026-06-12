@@ -517,9 +517,34 @@ func (a *App) Run(ctx context.Context) error {
 
 	// Loop-hardening D-LH-1: start the outbox relay poller under the request
 	// ctx, mirroring the HTTP server goroutine lifecycle. ctx.Done() stops the
-	// ticker. nil when the memory-engine webhook is disabled.
+	// ticker. nil when the memory-engine webhook is disabled. relayDone closes
+	// when Start returns so Run can await an in-flight Tick before the deferred
+	// Close() tears down the pgx pool — otherwise a mid-Tick delivery races the
+	// pool teardown, producing noisy conn-closed errors and abandoned work.
+	// Derive a cancellable ctx so the relay is stopped on EVERY Run exit path —
+	// including a server ListenAndServe error where the parent ctx is not
+	// cancelled — not just on external shutdown.
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	defer relayCancel()
+
+	var relayDone chan struct{}
 	if a.relay != nil {
-		go a.relay.Start(ctx)
+		relayDone = make(chan struct{})
+		go func() {
+			defer close(relayDone)
+			a.relay.Start(relayCtx)
+		}()
+	}
+
+	// awaitRelay stops the relay and blocks until its goroutine has fully
+	// exited (after any in-flight Tick drains) so the caller's deferred Close()
+	// never tears down the pgx pool mid-delivery. No-op when the relay is
+	// disabled. Safe to call on any Run exit path; relayCancel is idempotent.
+	awaitRelay := func() {
+		relayCancel()
+		if relayDone != nil {
+			<-relayDone
+		}
 	}
 
 	errCh := make(chan error, 1)
@@ -536,6 +561,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.logger.Info("shutdown signal received")
 	case err := <-errCh:
 		if err != nil {
+			awaitRelay()
 			return err
 		}
 	}
@@ -543,8 +569,10 @@ func (a *App) Run(ctx context.Context) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), a.cfg.HTTP.ShutdownTimeout)
 	defer cancel()
 	if err := a.server.Shutdown(shutCtx); err != nil {
+		awaitRelay()
 		return fmt.Errorf("bootstrap: shutdown: %w", err)
 	}
+	awaitRelay()
 	return nil
 }
 
