@@ -131,9 +131,10 @@ func TestMigration011_PostUp(t *testing.T) {
 func TestMigration011_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 
-	// Apply all migrations (through 011), then roll back one step to reach 010.
+	// Apply migrations up to exactly 011, then roll back one step to reach 010.
+	// Pinning the version keeps this test stable as later migrations are added.
 	_, dsn := setupMigration009OnlyPG(t)
-	require.NoError(t, dbpkg.MigrateUp(migrationsDir(t), dsn))
+	require.NoError(t, dbpkg.MigrateToVersion(migrationsDir(t), dsn, 11))
 
 	// Down one step: removes migration 011.
 	require.NoError(t, dbpkg.MigrateDown(migrationsDir(t), dsn, 1))
