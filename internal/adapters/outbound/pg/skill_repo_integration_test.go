@@ -726,3 +726,121 @@ func TestSkillRepo_ImportedCandidate_DriftRowCoexistsWithActive(t *testing.T) {
 	require.Len(t, activeSkills, 1)
 	require.Equal(t, "stack/angular-22", activeSkills[0].Name())
 }
+
+// ── T5.9: ActiveByName (SkillLookup port for drift detection) ─────────────────
+//
+// These tests verify the new ActiveByName method used by BootstrapTriggerService.
+
+const (
+	activeByNameID1 = "01ARZ3NDEKTSV4RRFFQ69G5AN1"
+	activeByNameID2 = "01ARZ3NDEKTSV4RRFFQ69G5AN2"
+	activeByNameID3 = "01ARZ3NDEKTSV4RRFFQ69G5AN3"
+)
+
+// T5.9 (a): ActiveByName returns the active skill with the exact name.
+func TestSkillRepo_ActiveByName_ReturnsMatchingActiveSkill(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	active, err := skill.New(
+		mustSkillIDInteg(t, activeByNameID1),
+		"stack/angular-22",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+		"Angular 22 best practices.",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{
+			Status:           skill.StatusActive,
+			Version:          "22.0.0",
+			ActivationSource: skill.SourceImported,
+			AppliesWhen: skill.AppliesWhen{
+				Framework:           []string{"angular"},
+				FrameworkMinVersion: map[string]string{"angular": "22"},
+			},
+		},
+		integNow,
+	)
+	require.NoError(t, err)
+	require.NoError(t, repo.Upsert(ctx, active))
+
+	got, err := repo.ActiveByName(ctx, "stack/angular-22")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "stack/angular-22", got[0].Name())
+	require.Equal(t, skill.StatusActive, got[0].Status())
+	require.Equal(t, map[string]string{"angular": "22"}, got[0].AppliesWhen().FrameworkMinVersion)
+}
+
+// T5.9 (b): ActiveByName does NOT return candidate/deprecated skills.
+func TestSkillRepo_ActiveByName_ExcludesNonActiveSkills(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	// Insert a candidate skill with the target name.
+	candidate := newImportedCandidateSkill(
+		t, activeByNameID1,
+		"stack/angular-22", "22.0.0", "angular",
+		[]phase.PhaseType{phase.PhaseExplore, phase.PhaseProposal, phase.PhaseApply},
+	)
+	require.NoError(t, repo.InsertIfAbsent(ctx, candidate))
+
+	got, err := repo.ActiveByName(ctx, "stack/angular-22")
+	require.NoError(t, err)
+	require.Empty(t, got, "candidate skill must NOT be returned by ActiveByName")
+}
+
+// T5.9 (c): ActiveByName returns empty when no skill with that name exists.
+func TestSkillRepo_ActiveByName_ReturnsEmptyWhenNoMatch(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	got, err := repo.ActiveByName(ctx, "stack/nonexistent-99")
+	require.NoError(t, err)
+	require.Empty(t, got, "must return empty slice when no skill matches the name")
+	require.NotNil(t, got, "must return non-nil empty slice, not nil")
+}
+
+// T5.9 (d): ActiveByName with two active skills of the same name (unlikely but safe).
+func TestSkillRepo_ActiveByName_ReturnsMultipleActiveSkillsIfPresent(t *testing.T) {
+	pool := setupSkillPG(t)
+	repo := pg.NewSkillRepo(pool)
+	ctx := context.Background()
+
+	// Upsert two active skills with the same name but different versions.
+	// This simulates a dual-active scenario (governance edge case).
+	s1, err := skill.New(
+		mustSkillIDInteg(t, activeByNameID1),
+		"stack/angular-22",
+		[]phase.PhaseType{phase.PhaseExplore},
+		"Angular v22.0.0 content.",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{
+			Status:  skill.StatusActive,
+			Version: "22.0.0",
+		},
+		integNow,
+	)
+	require.NoError(t, err)
+	require.NoError(t, repo.Upsert(ctx, s1))
+
+	s2, err := skill.New(
+		mustSkillIDInteg(t, activeByNameID2),
+		"stack/angular-22",
+		[]phase.PhaseType{phase.PhaseExplore},
+		"Angular v22.1.0 content.",
+		[]skill.Technique{skill.TechniqueInlineWhy},
+		skill.LifecycleInput{
+			Status:  skill.StatusActive,
+			Version: "22.1.0",
+		},
+		integNow,
+	)
+	require.NoError(t, err)
+	require.NoError(t, repo.Upsert(ctx, s2))
+
+	got, err := repo.ActiveByName(ctx, "stack/angular-22")
+	require.NoError(t, err)
+	require.Len(t, got, 2, "both active rows must be returned when two active skills share a name")
+}

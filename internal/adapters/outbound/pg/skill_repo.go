@@ -286,6 +286,32 @@ WHERE  id = $1`
 	return scanSkill(rows)
 }
 
+// ActiveByName returns all skills with the given name whose status = 'active'.
+// Returns an empty (non-nil) slice when none match; never returns ErrNotFound.
+// Used by BootstrapTriggerService for drift detection (T5.9, DG-C7-9).
+func (r *SkillRepo) ActiveByName(ctx context.Context, name string) ([]*skill.Skill, error) {
+	q := `SELECT ` + selectColumns + `
+FROM   skills
+WHERE  name   = $1
+  AND  status = 'active'`
+
+	rows, err := r.pool.Query(ctx, q, name)
+	if err != nil {
+		return nil, wrapErr("SkillRepo.ActiveByName", err)
+	}
+	defer rows.Close()
+
+	out := make([]*skill.Skill, 0)
+	for rows.Next() {
+		s, err := scanSkill(rows)
+		if err != nil {
+			return nil, wrapErr("SkillRepo.ActiveByName.scan", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // PatchMetrics atomically applies additive integer deltas and overwrites
 // avg_retry_reduction to the metrics JSONB column, and sets last_used_at to now.
 // Uses SELECT FOR UPDATE within an explicit transaction to prevent lost updates
