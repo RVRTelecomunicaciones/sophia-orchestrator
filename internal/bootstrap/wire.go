@@ -22,6 +22,7 @@ import (
 	mcpdispatcher "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/mcp"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/ollama"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/opencode"
+	context7adapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/docs/context7"
 	execadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/exec"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/governance"
 	graphifyadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/graphify"
@@ -32,6 +33,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/runtime"
 	gitrunneradapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/gitrunner"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/apply"
+	bootstrapapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/bootstrap"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/change"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/discipline"
 	skillapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/skill"
@@ -314,6 +316,38 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		CacheTTL:  24 * time.Hour,
 	})
 
+	// Bootstrap trigger service (PR3c-ii, DG-C7-5/6/8/10).
+	// Degraded-first: when BridgeURL or Token are absent, the context7 adapter
+	// returns ErrDocsUnavailable on every call → bootstrap.Service logs WARN and
+	// skips, so the init phase is never blocked (DG-C7-5 nil-safe design).
+	var bootstrapSvc phase.BootstrapDep
+	{
+		bsCfg := cfg.Bootstrap
+		docsClient := context7adapter.New(context7adapter.Config{
+			BridgeURL: cfg.Dispatcher.MCP.BridgeURL,
+			Token:     cfg.Dispatcher.MCP.Token,
+			Origin:    cfg.Dispatcher.MCP.Origin,
+		})
+		rateGuard := bootstrapapp.NewMemoryRateGuard(
+			bsCfg.MaxCallsPerProjectPerDay,
+			24*time.Hour,
+			clock,
+		)
+		budget := bsCfg.BodyBudget
+		if budget <= 0 {
+			budget = bootstrapapp.DefaultBodyBudget
+		}
+		skillImporter := bootstrapapp.NewSkillImporter(skillRepo, clock, idGen, budget)
+		bootstrapSvc = bootstrapapp.NewService(bootstrapapp.ServiceDeps{
+			Docs:        docsClient,
+			Skills:      skillRepo,
+			Importer:    skillImporter,
+			Rate:        rateGuard,
+			Logger:      logger,
+			MinSnippets: bsCfg.MinSnippets,
+		})
+	}
+
 	// Memory-engine webhook bridge (M2 D-M2-1): fire-and-forget POST after phase.archived.
 	// nil when SOPHIA_MEMORY_WEBHOOK_URL is empty (adapter disabled).
 	var webhookNotifier phase.WebhookNotifier
@@ -357,6 +391,13 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		SkillUsageRepo:  skillUsageRepo,   // M2: track skill injection events
 		WebhookNotifier: webhookNotifier,  // M2: fire-and-forget phase.archived (nil = disabled)
 		Init:            initSvc,          // INIT phase structural detection (D-INIT-3)
+		Bootstrap:       bootstrapSvc,     // PR3c-ii: async bootstrap trigger after INIT (DG-C7-5)
+		BootstrapTimeout: func() time.Duration {
+			if cfg.Bootstrap.Timeout > 0 {
+				return cfg.Bootstrap.Timeout
+			}
+			return 60 * time.Second
+		}(),
 	})
 
 	tracer, err := obs.NewTracer(ctx, obs.TraceConfig{
