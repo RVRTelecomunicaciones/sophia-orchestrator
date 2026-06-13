@@ -30,6 +30,17 @@ type Config struct {
 	// MemoryWebhook configures the outbound best-effort webhook from orch to
 	// memory-engine's /api/v1/worker/phase-archived endpoint (D-M2-1).
 	MemoryWebhook MemoryWebhookConfig
+
+	// Outbox configures the transactional outbox relay poller (loop-hardening
+	// D-LH-1) that durably delivers phase.archived to memory-engine.
+	Outbox OutboxConfig
+}
+
+// OutboxConfig holds the outbox relay poller parameters (loop-hardening D-LH-1).
+type OutboxConfig struct {
+	// PollInterval is the relay tick cadence. Default 5s. Loaded from
+	// SOPHIA_OUTBOX_POLL_INTERVAL (duration string, e.g. "5s").
+	PollInterval time.Duration
 }
 
 // BootstrapConfig holds parameters for BootstrapTriggerService (DG-C7-5/6).
@@ -445,6 +456,8 @@ func Load() (Config, error) {
 	c.MemoryWebhook.URL = envStr("SOPHIA_MEMORY_WEBHOOK_URL", "")
 	c.MemoryWebhook.APIKey = envStr("SOPHIA_MEMORY_WEBHOOK_API_KEY", "")
 	c.MemoryWebhook.TimeoutMS = envInt("SOPHIA_MEMORY_WEBHOOK_TIMEOUT_MS", 5000)
+
+	c.Outbox.PollInterval = envDuration("SOPHIA_OUTBOX_POLL_INTERVAL", 5*time.Second)
 
 	c.Apply.WorktreeRoot = envStr("SOPHIA_APPLY_WORKTREE_ROOT", c.Apply.WorktreeRoot)
 	c.Apply.SourceRepoPath = envStr("SOPHIA_APPLY_SOURCE_REPO_PATH", c.Apply.SourceRepoPath)

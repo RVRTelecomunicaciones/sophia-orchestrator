@@ -32,6 +32,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/structural"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/envelope"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/outbox"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
@@ -134,7 +135,20 @@ type Deps struct {
 	// WebhookNotifier is the optional outbound webhook adapter that posts a
 	// ArchivedWebhookPayload to memory-engine after phase.archived is
 	// published (D-M2-1). nil = disabled; the callsite is nil-tolerant.
+	//
+	// Deprecated: superseded by OutboxEnqueuer (loop-hardening D-LH-1). The
+	// fire-and-forget POST is no longer issued at completion time; the relay
+	// poller delivers from the outbox. Retained only as a nil-tolerant field
+	// for transitional wiring/tests and is never invoked by advanceChange.
 	WebhookNotifier WebhookNotifier
+
+	// OutboxEnqueuer durably enqueues the phase.archived event in the SAME
+	// transaction that completes the change (loop-hardening D-LH-1). When
+	// non-nil and the archive phase completes, advanceChange writes the
+	// completed change + a pending outbox row atomically; the relay poller
+	// then delivers at-least-once. nil = disabled (no outbox), in which case
+	// completion falls back to the plain ChangeRepo.Save (no webhook).
+	OutboxEnqueuer OutboxEnqueuer
 
 	// Metrics is the optional Prometheus instrument set. When nil, all
 	// metric record calls are no-ops.
@@ -211,8 +225,21 @@ type ArchivedWebhookPayload struct {
 // WebhookNotifier is the outbound port for fire-and-forget phase.archived
 // notification to memory-engine. Implementations must be nil-safe callers can
 // skip the nil check at callsites.
+//
+// Deprecated: superseded by OutboxEnqueuer (loop-hardening D-LH-1). Kept as a
+// type only for transitional wiring; advanceChange no longer calls it.
 type WebhookNotifier interface {
 	Notify(ctx context.Context, payload ArchivedWebhookPayload)
+}
+
+// OutboxEnqueuer persists a completed change and a pending phase.archived
+// outbox event atomically (loop-hardening D-LH-1). The single method runs both
+// writes in one transaction so the outbox row commits if and only if change
+// completion commits — closing the data-loss window the fire-and-forget POST
+// left open. The implementation owns the transaction boundary; the application
+// layer stays free of pgx.
+type OutboxEnqueuer interface {
+	SaveCompletedWithOutbox(ctx context.Context, c *change.Change, ev *outbox.Event) error
 }
 
 // Service implements inbound.PhaseService.
@@ -1198,42 +1225,80 @@ func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed
 	// Advance CurrentPhase pointer to the just-completed phase. The next
 	// orchestrator call validates that any new phase is in
 	// completed.NextValid().
-	if err := c.AdvancePhase(completed, s.d.Clock.Now()); err == nil {
-		_ = s.d.ChangeRepo.Save(ctx, c)
+	//
+	// Loop-hardening D-LH-1: on the archive path the change-row write is folded
+	// into the completion transaction below (SaveCompletedWithOutbox upserts
+	// current_phase = EXCLUDED.current_phase), so we MUST NOT pre-save here —
+	// a separate write reopens a death-between-writes window that can leave
+	// current_phase=archive with no outbox row. Non-archive phases keep their
+	// existing single-Save behavior.
+	advanceErr := c.AdvancePhase(completed, s.d.Clock.Now())
+	if completed != phase.PhaseArchive {
+		if advanceErr == nil {
+			_ = s.d.ChangeRepo.Save(ctx, c)
+		}
+		return
+	}
+	if advanceErr != nil {
+		return
 	}
 	// Archive is terminal — once it completes, mark the Change Completed and
 	// emit the phase.archived event (Iron Law D1.2: envelope already persisted
-	// upstream by runPhaseCompletion; terminal state durable after Save below).
-	if completed == phase.PhaseArchive {
-		if err := c.MarkCompleted(s.d.Clock.Now()); err == nil {
-			if saveErr := s.d.ChangeRepo.Save(ctx, c); saveErr == nil {
-				// Resolve the archive phase ID via the phase repo so we can
-				// correlate the SSE event with the phase row. Failure to look
-				// up is non-fatal — emit with a zero PhaseID rather than
-				// dropping the event entirely.
-				var archivePhaseID ids.PhaseID
-				if p, lookupErr := s.d.PhaseRepo.FindByChangeAndType(ctx, c.ID(), phase.PhaseArchive); lookupErr == nil {
-					archivePhaseID = p.ID()
-				}
-				archivedAt := s.d.Clock.Now()
-				s.publishEvent(ctx, archivePhaseID, inbound.EventPhaseArchived, inbound.PhaseArchivedPayload{
-					ChangeID:   c.ID().String(),
-					ChangeName: c.Name(),
-					PhaseType:  string(phase.PhaseArchive),
-					ArchivedAt: archivedAt,
-				})
-				// Fire-and-forget webhook to memory-engine after publishEvent succeeds
-				// (D-M2-1 / D-M2-14). Non-nil guard: adapter may be disabled.
-				if s.d.WebhookNotifier != nil {
-					s.d.WebhookNotifier.Notify(ctx, ArchivedWebhookPayload{
-						ChangeID:   c.ID().String(),
-						ChangeName: c.Name(),
-						PhaseType:  string(phase.PhaseArchive),
-						ArchivedAt: archivedAt,
-					})
-				}
-			}
+	// upstream by runPhaseCompletion; terminal state durable after the
+	// completion write below).
+	{
+		if err := c.MarkCompleted(s.d.Clock.Now()); err != nil {
+			return
 		}
+		archivedAt := s.d.Clock.Now()
+		payload := inbound.PhaseArchivedPayload{
+			ChangeID:   c.ID().String(),
+			ChangeName: c.Name(),
+			PhaseType:  string(phase.PhaseArchive),
+			ArchivedAt: archivedAt,
+		}
+
+		// Loop-hardening D-LH-1: persist the completed change and a pending
+		// phase.archived outbox row in ONE transaction. The relay poller
+		// delivers at-least-once; the legacy fire-and-forget POST is gone.
+		// When no enqueuer is wired, fall back to a plain Save (no webhook).
+		if s.d.OutboxEnqueuer != nil {
+			body, marshalErr := jsonMarshal(payload)
+			if marshalErr != nil {
+				slog.Error("advanceChange: marshal phase.archived payload",
+					slog.String("change_id", c.ID().String()),
+					slog.String("error", marshalErr.Error()),
+				)
+				return
+			}
+			evID, idErr := ids.ParseOutboxID(s.d.IDGen.NewID())
+			if idErr != nil {
+				slog.Error("advanceChange: mint outbox id",
+					slog.String("change_id", c.ID().String()),
+					slog.String("error", idErr.Error()),
+				)
+				return
+			}
+			ev := outbox.New(evID, outbox.EventPhaseArchived, body, archivedAt)
+			if enqErr := s.d.OutboxEnqueuer.SaveCompletedWithOutbox(ctx, c, ev); enqErr != nil {
+				slog.Error("advanceChange: enqueue phase.archived outbox",
+					slog.String("change_id", c.ID().String()),
+					slog.String("error", enqErr.Error()),
+				)
+				return
+			}
+		} else if saveErr := s.d.ChangeRepo.Save(ctx, c); saveErr != nil {
+			return
+		}
+
+		// Resolve the archive phase ID via the phase repo so we can correlate
+		// the SSE event with the phase row. Failure to look up is non-fatal —
+		// emit with a zero PhaseID rather than dropping the event entirely.
+		var archivePhaseID ids.PhaseID
+		if p, lookupErr := s.d.PhaseRepo.FindByChangeAndType(ctx, c.ID(), phase.PhaseArchive); lookupErr == nil {
+			archivePhaseID = p.ID()
+		}
+		s.publishEvent(ctx, archivePhaseID, inbound.EventPhaseArchived, payload)
 	}
 }
 
