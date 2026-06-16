@@ -53,6 +53,10 @@ func (r *applyFakeSkillUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) 
 	return nil, nil
 }
 
+func (r *applyFakeSkillUsageRepo) SumApplyAttemptsByChange(_ context.Context, _ ids.ChangeID) (int, error) {
+	return 0, nil
+}
+
 var _ outbound.SkillUsageRepository = (*applyFakeSkillUsageRepo)(nil)
 
 // applyFakeSkillMatcher implements discipline.SkillMatcher for apply skill_usage_test.go.

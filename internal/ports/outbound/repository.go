@@ -90,11 +90,14 @@ type WorktreeRepository interface {
 // UpdateOutcome sets the outcome column for a specific row.
 // FindByChange returns all rows for a given change_id (ordered by injected_at asc).
 // FindBySkill returns all rows for a given skill_id (ordered by injected_at desc).
+// SumApplyAttemptsByChange returns SUM(tasks.attempts) for the change's apply
+// tasks (joined tasks→groups→apply_boards→phases), 0 when none (D-LH-2).
 type SkillUsageRepository interface {
 	Insert(ctx context.Context, su *skillusage.SkillUsage) error
 	UpdateOutcome(ctx context.Context, id ids.SkillUsageID, outcome skillusage.Outcome) error
 	FindByChange(ctx context.Context, changeID ids.ChangeID) ([]*skillusage.SkillUsage, error)
 	FindBySkill(ctx context.Context, skillID ids.SkillID) ([]*skillusage.SkillUsage, error)
+	SumApplyAttemptsByChange(ctx context.Context, changeID ids.ChangeID) (int, error)
 }
 
 // SkillRepository persists Skill aggregates with V4.1 §5.2 lifecycle fields.

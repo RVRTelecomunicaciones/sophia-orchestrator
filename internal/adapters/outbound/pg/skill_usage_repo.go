@@ -78,6 +78,27 @@ ORDER  BY injected_at DESC`
 	return r.query(ctx, q, skillID.String())
 }
 
+// SumApplyAttemptsByChange returns the total tasks.attempts recorded for the
+// change's apply tasks, joined tasks→groups→apply_boards→phases filtered by
+// change_id (D-LH-2). Per-change granularity: tasks carry no skill_id, so this
+// is the finest honest aggregation without a schema change. Returns 0 when the
+// change has no apply tasks (COALESCE).
+func (r *SkillUsageRepo) SumApplyAttemptsByChange(ctx context.Context, changeID ids.ChangeID) (int, error) {
+	const q = `
+SELECT COALESCE(SUM(t.attempts), 0)
+FROM   tasks t
+JOIN   groups g       ON g.id = t.group_id
+JOIN   apply_boards b ON b.id = g.board_id
+JOIN   phases p       ON p.id = b.phase_id
+WHERE  p.change_id = $1`
+
+	var sum int
+	if err := r.pool.QueryRow(ctx, q, changeID.String()).Scan(&sum); err != nil {
+		return 0, wrapErr("SkillUsageRepo.SumApplyAttemptsByChange", err)
+	}
+	return sum, nil
+}
+
 // query is the shared scan helper for FindByChange and FindBySkill.
 func (r *SkillUsageRepo) query(ctx context.Context, q string, arg string) ([]*skillusage.SkillUsage, error) {
 	rows, err := r.pool.Query(ctx, q, arg)
