@@ -1,4 +1,4 @@
-//go:build integration
+//go:build contract
 
 // governance_contract_lock_test.go — GAP A cross-repo contract-lock e2e test
 // (spec: governance-integration-contract).
@@ -15,19 +15,28 @@
 // the test FAILS if either side's wire shape drifts — that failure is a real
 // contract incompatibility, not flakiness.
 //
-// CI CAVEAT: this test imports github.com/russellcxl/agent-governance-core via
-// the public govhttptest seam. orch's production code never imports govcore.
-// Resolution is provided ENTIRELY by the go.work workspace `use
-// ./agent-governance-core` directive — there is intentionally NO require in
-// orch's go.mod. govcore's module path has no public remote yet, so adding a
-// go.mod require forces a failing VCS lookup of the pseudo-version; the
-// workspace `use` target supplies the seam source directly and that require is
-// unnecessary. Consequence: this test runs ONLY with the go.work workspace
-// active. In CI it REQUIRES either go.work active OR (once published) a tagged
-// govcore version containing govhttptest, at which point a go.mod require can be
-// added. The standard unit build (`go test ./internal/...`) is unaffected
-// because the test is gated behind the `integration` build tag and the seam
-// import lives only here.
+// BUILD TAG: this test is gated behind the dedicated `contract` tag (NOT
+// `integration`). It is intentionally EXCLUDED from orch's standard
+// `integration` CI job, which checks out only orch (no go.work, no govcore
+// sibling) and would fail to resolve the cross-repo seam import below.
+// Instead it runs in the dedicated, workspace-aware `contract` CI job
+// (.github/workflows/ci.yaml → job `contract`), which checks out orch AND
+// govcore side-by-side and generates a go.work linking them before running
+// `go test -tags=contract ./test/integration/...`.
+//
+// CROSS-REPO RESOLUTION: this test imports
+// github.com/russellcxl/agent-governance-core via the public govhttptest seam.
+// orch's production code never imports govcore. Resolution is provided ENTIRELY
+// by a go.work workspace `use ./agent-governance-core` directive — there is
+// intentionally NO require in orch's go.mod. govcore's module path has no public
+// remote, so adding a go.mod require forces a failing VCS lookup of the
+// pseudo-version; the workspace `use` target supplies the seam source directly
+// and that require is unnecessary. Consequence: this test compiles+runs ONLY
+// with the go.work workspace active (locally via /2026/go.work, in CI via the
+// generated workspace in the `contract` job). The standard unit build
+// (`go test ./internal/...`) and the `integration` job are unaffected because
+// the test is gated behind the `contract` build tag and the seam import lives
+// only here.
 package integration_test
 
 import (
