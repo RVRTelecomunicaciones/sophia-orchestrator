@@ -228,18 +228,45 @@ type skillUsageRowDTO struct {
 	ApplyAttempts int   `json:"apply_attempts"`
 }
 
-// GetUsage handles GET /api/v1/skills/usage?change_id=...
+// GetUsage handles GET /api/v1/skills/usage with the optional, mutually exclusive
+// filters change_id and skill_id (spec skill-usage-tracking "GET /api/v1/skills/usage
+// endpoint"). Semantics:
+//   - change_id only → rows for that change (unchanged legacy behavior).
+//   - skill_id only   → rows for that skill across all changes.
+//   - both supplied   → 400 conflicting_filters (alternative filters; combining is
+//     ambiguous and unsupported by the read model).
+//   - neither         → 400 missing_filter (at least one filter is required; the
+//     full table is never returned unbounded).
+//
+// The JSON envelope ({"items":[...]}) and per-row fields are identical on every path.
 func (h *SkillsHandler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	changeID := r.URL.Query().Get("change_id")
-	if changeID == "" {
+	skillID := r.URL.Query().Get("skill_id")
+
+	switch {
+	case changeID != "" && skillID != "":
 		h.writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "change_id query parameter is required",
-			"code":  "missing_change_id",
+			"error": "change_id and skill_id are mutually exclusive filters",
+			"code":  "conflicting_filters",
+		})
+		return
+	case changeID == "" && skillID == "":
+		h.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "one of change_id or skill_id query parameters is required",
+			"code":  "missing_filter",
 		})
 		return
 	}
 
-	rows, err := h.svc.GetUsage(r.Context(), changeID)
+	var (
+		rows []inbound.SkillUsageRow
+		err  error
+	)
+	if skillID != "" {
+		rows, err = h.svc.GetUsageBySkill(r.Context(), skillID)
+	} else {
+		rows, err = h.svc.GetUsage(r.Context(), changeID)
+	}
 	if err != nil {
 		h.writeErr(w, err)
 		return

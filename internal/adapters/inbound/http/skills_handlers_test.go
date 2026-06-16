@@ -46,6 +46,12 @@ type fakeSkillSvc struct {
 	// GetUsage control
 	getUsageRows []inbound.SkillUsageRow
 	getUsageErr  error
+
+	// GetUsageBySkill control
+	getUsageBySkillRows  []inbound.SkillUsageRow
+	getUsageBySkillErr   error
+	getUsageBySkillID    string
+	getUsageBySkillCalls int
 }
 
 func (f *fakeSkillSvc) PatchMetrics(_ context.Context, skillID string, delta inbound.MetricsDelta) error {
@@ -64,6 +70,12 @@ func (f *fakeSkillSvc) PatchStatus(_ context.Context, skillID string, status, _ 
 
 func (f *fakeSkillSvc) GetUsage(_ context.Context, _ string) ([]inbound.SkillUsageRow, error) {
 	return f.getUsageRows, f.getUsageErr
+}
+
+func (f *fakeSkillSvc) GetUsageBySkill(_ context.Context, skillID string) ([]inbound.SkillUsageRow, error) {
+	f.getUsageBySkillCalls++
+	f.getUsageBySkillID = skillID
+	return f.getUsageBySkillRows, f.getUsageBySkillErr
 }
 
 // GetSkill — not exercised by Group D tests; returns nil to satisfy SkillService.
@@ -247,6 +259,85 @@ func TestSkills_GetUsage_FilteredRows(t *testing.T) {
 	item := items[0].(map[string]any)
 	require.Equal(t, changeIDStr, item["change_id"])
 	require.Equal(t, float64(2), item["apply_attempts"])
+}
+
+// D.7c — GET /skills/usage?skill_id=X routes to GetUsageBySkill and returns its rows.
+func TestSkills_GetUsage_BySkillID_FilteredRows(t *testing.T) {
+	changeIDStr := "01ARZ3NDEKTSV4RRFFQ69G5CH1"
+	skillIDParsed, _ := ids.ParseSkillID(testSkillID)
+	cid, _ := ids.ParseChangeID(changeIDStr)
+	now := time.Now().UTC().Truncate(time.Second)
+	suID, _ := ids.ParseSkillUsageID("01ARZ3NDEKTSV4RRFFQ69G5SU1")
+
+	su := skillusage.Hydrate(suID, cid, "apply", skillIDParsed, "v1", now, skillusage.OutcomeSuccess)
+
+	svc := &fakeSkillSvc{
+		getUsageBySkillRows: []inbound.SkillUsageRow{
+			{SkillUsage: su, ApplyAttempts: 3},
+		},
+	}
+	srv := skillSrv(t, svc, false)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/skills/usage?skill_id="+testSkillID, nil)
+	req.Header.Set("X-Sophia-API-Key", "valid-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 1, svc.getUsageBySkillCalls, "skill_id must route to GetUsageBySkill")
+	require.Equal(t, testSkillID, svc.getUsageBySkillID)
+
+	var result map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+
+	items, ok := result["items"].([]any)
+	require.True(t, ok, "response must have items array")
+	require.Len(t, items, 1)
+
+	item := items[0].(map[string]any)
+	require.Equal(t, testSkillID, item["skill_id"])
+	require.Equal(t, float64(3), item["apply_attempts"])
+}
+
+// D.7d — Both change_id and skill_id supplied → 400 (alternative filters, ambiguous).
+func TestSkills_GetUsage_BothFilters_400(t *testing.T) {
+	svc := &fakeSkillSvc{}
+	srv := skillSrv(t, svc, false)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/skills/usage?change_id=01ARZ3NDEKTSV4RRFFQ69G5CH1&skill_id="+testSkillID, nil)
+	req.Header.Set("X-Sophia-API-Key", "valid-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, 0, svc.getUsageBySkillCalls, "no service call when filters conflict")
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.NotEmpty(t, body["code"], "400 response must carry a code")
+}
+
+// D.7e — Neither filter supplied → 400 (at least one filter required).
+func TestSkills_GetUsage_NeitherFilter_400(t *testing.T) {
+	svc := &fakeSkillSvc{}
+	srv := skillSrv(t, svc, false)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/skills/usage", nil)
+	req.Header.Set("X-Sophia-API-Key", "valid-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.NotEmpty(t, body["code"], "400 response must carry a code")
 }
 
 // D.7b — GET /skills/usage without valid auth → 401.

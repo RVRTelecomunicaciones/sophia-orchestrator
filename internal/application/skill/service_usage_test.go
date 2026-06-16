@@ -190,3 +190,41 @@ func TestGetUsage_ZeroAttemptsStillZero(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, 0, rows[0].ApplyAttempts)
 }
+
+// TestGetUsageBySkill_EnrichesPerRowChange verifies that GetUsageBySkill returns
+// the rows for a skill (which may span multiple changes) and enriches each row
+// with the per-change SUM(tasks.attempts) for that row's own change_id (spec
+// skill-usage-tracking "Filter by skill_id").
+func TestGetUsageBySkill_EnrichesPerRowChange(t *testing.T) {
+	const otherChangeID = "01ARZ3NDEKTSV4RRFFQ69G5UC2"
+
+	usageRepo := newFakeUsageRepo()
+	usageRepo.bySkill[testSkillID1] = []*skillusage.SkillUsage{
+		skillusage.New(mustUsageID(t, testUsageID1), mustChangeID(t, testChangeID), "apply", mustSkillID(t, testSkillID1), "v1", testNow),
+		skillusage.New(mustUsageID(t, testUsageID2), mustChangeID(t, otherChangeID), "verify", mustSkillID(t, testSkillID1), "v1", testNow),
+	}
+	usageRepo.attemptsSum[testChangeID] = 4
+	usageRepo.attemptsSum[otherChangeID] = 7
+
+	svc := newService(usageRepo, newFakeSkillRepo())
+
+	rows, err := svc.GetUsageBySkill(context.Background(), testSkillID1)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	got := map[string]int{}
+	for _, row := range rows {
+		got[row.ChangeID().String()] = row.ApplyAttempts
+	}
+	assert.Equal(t, 4, got[testChangeID], "row's apply_attempts must match its own change sum")
+	assert.Equal(t, 7, got[otherChangeID], "row's apply_attempts must match its own change sum")
+	assert.Equal(t, 2, usageRepo.sumCalls, "per-row change sum: one query per distinct change")
+}
+
+// TestGetUsageBySkill_InvalidSkillID returns an error for an unparseable skill_id.
+func TestGetUsageBySkill_InvalidSkillID(t *testing.T) {
+	svc := newService(newFakeUsageRepo(), newFakeSkillRepo())
+
+	_, err := svc.GetUsageBySkill(context.Background(), "not-a-ulid")
+	require.Error(t, err)
+}

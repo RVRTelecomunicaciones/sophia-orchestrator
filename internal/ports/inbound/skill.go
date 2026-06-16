@@ -67,11 +67,15 @@ type GetSkillResult struct {
 // GetUsage returns all skill_usage rows for the given change_id enriched with
 // apply_attempts from the apply phase envelope.
 //
+// GetUsageBySkill returns all skill_usage rows for the given skill_id (across all
+// changes) enriched with the per-change apply_attempts for each row's change_id.
+//
 // GetSkill returns the current skill snapshot for GET /api/v1/skills/{id}.
 // Returns outbound.ErrNotFound when the skill does not exist.
 type SkillService interface {
 	PatchMetrics(ctx context.Context, skillID string, delta MetricsDelta) error
 	PatchStatus(ctx context.Context, skillID string, status, reason string) error
 	GetUsage(ctx context.Context, changeID string) ([]SkillUsageRow, error)
+	GetUsageBySkill(ctx context.Context, skillID string) ([]SkillUsageRow, error)
 	GetSkill(ctx context.Context, skillID string) (*GetSkillResult, error)
 }
