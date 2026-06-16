@@ -121,5 +121,27 @@ func TestStubCritic_Review_NilEnvelope(t *testing.T) {
 	require.Empty(t, got)
 }
 
+// TestStubCritic_Review_NeverProducesGovernanceConcern locks GAP-A
+// independence: the advisory critic derives concerns purely from the
+// envelope and NEVER emits a governance category or touches governance. Even
+// a maximally dirty envelope yields only risk/confidence categories — the
+// critic can never escalate to a governance/policy concern (design hard
+// constraint: strictly advisory, never escalates).
+func TestStubCritic_Review_NeverProducesGovernanceConcern(t *testing.T) {
+	stub := critic.NewStub()
+	env := &envelope.Envelope{
+		Status:     envelope.StatusDone,
+		Confidence: 0.1,
+		Risks:      []envelope.Risk{{Description: "x", Level: "high"}},
+	}
+	got, err := stub.Review(context.Background(), mkInput(env))
+	require.NoError(t, err)
+	for _, c := range got {
+		require.NotEqual(t, "governance", c.Category)
+		require.NotEqual(t, "policy", c.Category)
+		require.Contains(t, []string{"risk", "confidence"}, c.Category)
+	}
+}
+
 // Compile-time assertion that StubCritic satisfies the outbound port.
 var _ outbound.CriticPort = critic.NewStub()
