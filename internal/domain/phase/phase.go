@@ -22,6 +22,7 @@ type Phase struct {
 	attempts    int
 	startedAt   *time.Time
 	completedAt *time.Time
+	concerns    []Concern
 }
 
 // New constructs a Phase in PhaseStatusPending.
@@ -89,6 +90,17 @@ func (p *Phase) StartedAt() *time.Time { return p.startedAt }
 
 // CompletedAt returns the completion timestamp or nil.
 func (p *Phase) CompletedAt() *time.Time { return p.completedAt }
+
+// Concerns returns the advisory concerns attached to this phase (design
+// GAP B / D-GA-2). Empty when no critic ran or the critic raised none —
+// the opted-out path is byte-identical to today.
+func (p *Phase) Concerns() []Concern { return p.concerns }
+
+// SetConcerns attaches advisory concerns to the phase. Strictly advisory:
+// it does NOT change the phase status. The done_with_concerns status is
+// derived by Complete from a DONE_WITH_CONCERNS envelope via the existing
+// switch; concerns ride alongside for post-hoc operator review and SSE.
+func (p *Phase) SetConcerns(concerns []Concern) { p.concerns = concerns }
 
 // Start moves the phase to PhaseStatusRunning and increments attempts. Fails
 // if the phase is terminal or the retry budget is exhausted.
