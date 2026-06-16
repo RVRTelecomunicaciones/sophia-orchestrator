@@ -68,6 +68,55 @@ jobs:
       - name: Run integration tests
         run: go test -tags=integration ./test/integration/... ./internal/adapters/outbound/pg/... -count=1 -timeout=10m
 
+  contract:
+    name: Contract lock (cross-repo workspace)
+    runs-on: ubuntu-latest
+    # Dedicated workspace-aware job for the cross-repo contract-lock e2e test
+    # (test/integration/governance_contract_lock_test.go, build tag `contract`).
+    # It is SEPARATE from the `integration` job on purpose: that job checks out
+    # only orch, with no go.work and no govcore sibling, so it cannot resolve
+    # the github.com/russellcxl/agent-governance-core/govhttptest seam import.
+    # This job checks out BOTH repos side-by-side and generates a go.work that
+    # links them, then runs only the `contract`-tagged test.
+    #
+    # MERGE-ORDER DEPENDENCY: this job checks out govcore `main`, where the
+    # public `govhttptest` seam only exists AFTER the govcore seam PR (#10)
+    # merges. Until #10 lands on govcore main, this job CANNOT resolve the seam
+    # and will fail. Therefore PR-A must merge AFTER the govcore seam (#10) is
+    # on govcore main.
+    steps:
+      # orch into a named sibling dir so the generated go.work can `use` both
+      # checkouts with stable relative paths (mirrors the local /2026/go.work
+      # layout where orch and govcore are siblings).
+      - name: Checkout orch
+        uses: actions/checkout@v4
+        with:
+          path: sophia-orchestator
+      # govcore is a separate (private) repo: cross-repo checkout needs a token
+      # with read access to RVRTelecomunicaciones/agent-governance-core.
+      # ECOSYSTEM_REPO_TOKEN is a placeholder secret that MUST be configured in
+      # the orch repo settings with govcore read scope before this job is green.
+      - name: Checkout govcore (provides the govhttptest seam)
+        uses: actions/checkout@v4
+        with:
+          repository: RVRTelecomunicaciones/agent-governance-core
+          ref: main
+          token: ${{ secrets.ECOSYSTEM_REPO_TOKEN }}
+          path: agent-governance-core
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+          cache-dependency-path: sophia-orchestator/go.sum
+      # Link both checkouts into one workspace so the seam import resolves
+      # without a go.mod require (govcore has no public remote — a require would
+      # force a failing VCS lookup). This mirrors the local /2026/go.work.
+      - name: Generate cross-repo go.work
+        run: go work init ./sophia-orchestator ./agent-governance-core
+      - name: Run contract-lock test
+        working-directory: sophia-orchestator
+        run: go test -tags=contract -race -count=1 -timeout=10m ./test/integration/...
+
   build:
     name: Build binary
     runs-on: ubuntu-latest
