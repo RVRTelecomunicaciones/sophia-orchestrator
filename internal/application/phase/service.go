@@ -169,6 +169,15 @@ type Deps struct {
 	// BootstrapTimeout is the context timeout for the async bootstrap goroutine.
 	// Default 60s when zero. Configurable via bootstrap.timeout config key.
 	BootstrapTimeout time.Duration
+
+	// Critic is the OPTIONAL strictly-advisory critic (design GAP B / D-GA-4).
+	// nil-tolerant: when nil — or when the change does not opt in via
+	// ContextOverrides["scope"]["critic_enabled"] (DEFAULT OFF) — the critic
+	// is never invoked and the phase-completion path is byte-identical to
+	// today. Concerns it raises are advisory only: they never block a phase,
+	// never escalate to governance, and never force a HARD-GATE. Not part of
+	// the New() nil-guard — like Skills, it is optional.
+	Critic outbound.CriticPort
 }
 
 // ApplyExecutor is the contract phase.Service uses to delegate apply-phase
@@ -614,6 +623,22 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		Confidence: env.Confidence,
 	})
 
+	// Step 12b: advisory critic (design GAP B / D-GA-5). Strictly advisory,
+	// per-change opt-in, DEFAULT OFF, NEVER blocking/escalating. Runs only on
+	// single-agent enveloped phases (this path); runApplyPhase is deferred.
+	// On a Review error → log + SWALLOW (an advisory critic must never break a
+	// phase). On concerns → upgrade a DONE envelope to DONE_WITH_CONCERNS
+	// (only an upgrade; BLOCKED/NEEDS_CONTEXT are NEVER downgraded) and attach
+	// the concerns to the phase. p.Complete then derives
+	// PhaseStatusDoneWithConcerns via the existing status switch, and
+	// AdvanceAllowed() already returns true for done_with_concerns so the
+	// cycle keeps progressing.
+	concerns := s.reviewConcerns(ctx, c, p, env, in.ContextOverrides)
+	if len(concerns) > 0 && env.Status == envelope.StatusDone {
+		env.Status = envelope.StatusDoneWithConcerns
+		p.SetConcerns(concerns)
+	}
+
 	// Step 13: complete phase + persist (Iron Law #1: persisted-before-return).
 	if err := p.Complete(env, s.d.Clock.Now()); err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("phase complete: %v", err))
@@ -664,7 +689,30 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	}
+	// D-GA-6: attach advisory concerns ONLY on phase.completed_with_concerns.
+	// The omitempty tag keeps a plain phase.completed byte-identical to today.
+	if eventType == contract.EventPhaseCompletedWithConcerns {
+		payload.Concerns = toConcernPayloads(p.Concerns())
+	}
 	s.publishEvent(ctx, p.ID(), eventType, payload)
+}
+
+// toConcernPayloads maps domain concerns into their SSE wire shape (D-GA-6).
+// Returns nil for an empty slice so omitempty drops the field entirely.
+func toConcernPayloads(concerns []phase.Concern) []inbound.ConcernPayload {
+	if len(concerns) == 0 {
+		return nil
+	}
+	out := make([]inbound.ConcernPayload, 0, len(concerns))
+	for _, c := range concerns {
+		out = append(out, inbound.ConcernPayload{
+			Severity: c.Severity,
+			Category: c.Category,
+			Message:  c.Message,
+			Evidence: c.Evidence,
+		})
+	}
+	return out
 }
 
 // runApplyPhase delegates apply-phase coordination to the injected
@@ -1459,6 +1507,63 @@ func eventTypeForStatus(s phase.PhaseStatus) string {
 func hashPrompt(p string) string {
 	sum := sha256.Sum256([]byte(p))
 	return hex.EncodeToString(sum[:])
+}
+
+// reviewConcerns runs the optional advisory critic and returns its concerns
+// (design GAP B / D-GA-5). It is a no-op — returning nil — when no critic is
+// wired or the change has not opted in (DEFAULT OFF). A Review error is logged
+// and swallowed: an advisory critic must NEVER break a phase. The caller
+// decides how to apply non-empty concerns (only ever upgrading DONE to
+// DONE_WITH_CONCERNS; never downgrading other statuses).
+func (s *Service) reviewConcerns(
+	ctx context.Context,
+	c *change.Change,
+	p *phase.Phase,
+	env *envelope.Envelope,
+	overrides map[string]any,
+) []phase.Concern {
+	if s.d.Critic == nil || !parseScopeCriticEnabled(overrides) {
+		return nil
+	}
+	concerns, err := s.d.Critic.Review(ctx, outbound.CriticInput{
+		ChangeID:  c.ID(),
+		PhaseType: p.Type(),
+		Envelope:  env,
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "advisory critic review failed; swallowing (non-blocking)",
+			"change_id", c.ID().String(),
+			"phase_id", p.ID().String(),
+			"phase_type", string(p.Type()),
+			"error", err,
+		)
+		return nil
+	}
+	return concerns
+}
+
+// parseScopeCriticEnabled reads ContextOverrides["scope"]["critic_enabled"]
+// and returns the boolean value. Any missing key or type mismatch defaults to
+// false (DEFAULT OFF, design D-GA-4) so the advisory critic only runs on
+// changes that explicitly opt in. Mirrors parseScopeTestsRequired.
+func parseScopeCriticEnabled(overrides map[string]any) bool {
+	if overrides == nil {
+		return false
+	}
+	scopeRaw, ok := overrides["scope"]
+	if !ok {
+		return false
+	}
+	scope, ok := scopeRaw.(map[string]any)
+	if !ok {
+		return false
+	}
+	v, ok := scope["critic_enabled"]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
 }
 
 // parseScopeTestsRequired reads ContextOverrides["scope"]["tests_required"]

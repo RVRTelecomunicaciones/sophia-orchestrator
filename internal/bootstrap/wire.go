@@ -17,6 +17,7 @@ import (
 
 	httpinbound "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/inbound/http/middleware"
+	criticadapter "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/critic"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/aider"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/factory"
 	mcpdispatcher "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/dispatcher/mcp"
@@ -411,6 +412,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		OutboxEnqueuer:  outboxEnqueuer,   // loop-hardening: txn-bound phase.archived outbox (nil = disabled)
 		Init:            initSvc,          // INIT phase structural detection (D-INIT-3)
 		Bootstrap:       bootstrapSvc,     // PR3c-ii: async bootstrap trigger after INIT (DG-C7-5)
+		Critic:          criticadapter.NewStub(), // GAP B advisory critic (D-GA-4); per-change opt-in, DEFAULT OFF
 		BootstrapTimeout: func() time.Duration {
 			if cfg.Bootstrap.Timeout > 0 {
 				return cfg.Bootstrap.Timeout
