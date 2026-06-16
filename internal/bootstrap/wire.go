@@ -55,13 +55,18 @@ import (
 // App is the wired application. main.go calls Run; tests can call Close
 // directly to exercise teardown.
 type App struct {
-	cfg    config.Config
-	logger *slog.Logger
-	pool   *pgxpool.Pool
-	server *http.Server
-	tracer *obs.Tracer
-	relay  *outboxapp.Relay // nil when the memory-engine webhook is disabled
+	cfg      config.Config
+	logger   *slog.Logger
+	pool     *pgxpool.Pool
+	server   *http.Server
+	tracer   *obs.Tracer
+	relay    *outboxapp.Relay      // nil when the memory-engine webhook is disabled
+	skillSvc *skillapp.Service     // nil when SOPHIA_SKILLS_ENABLED=false
 }
+
+// SkillService returns the wired skill service, or nil when skills are disabled
+// (SOPHIA_SKILLS_ENABLED=false). Used by the reeval CLI subcommand.
+func (a *App) SkillService() *skillapp.Service { return a.skillSvc }
 
 // Wire constructs the App by composing every concrete dependency.
 func Wire(ctx context.Context, cfg config.Config) (*App, error) {
@@ -497,7 +502,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		logger.Error("bootstrap: recovery scan returned error", slog.String("err", err.Error()), slog.Int("marked", marked))
 	}
 
-	return &App{cfg: cfg, logger: logger, pool: pool, server: srv, tracer: tracer, relay: relay}, nil
+	return &App{cfg: cfg, logger: logger, pool: pool, server: srv, tracer: tracer, relay: relay, skillSvc: skillSvc}, nil
 }
 
 // outboxPollInterval resolves the relay poll cadence from config, defaulting to
