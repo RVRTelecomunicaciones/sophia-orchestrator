@@ -57,14 +57,23 @@ func (f *fakeAuditRepo) FindLatest(_ context.Context) (outbound.ReevalRun, error
 type chainPatcher struct {
 	status map[string]domainskill.Status
 	calls  []patchCall
+	// failOn forces an error when a hop targets the given status, simulating a
+	// mid-chain failure so partial-walk auditing can be exercised.
+	failOn map[domainskill.Status]error
 }
 
 func newChainPatcher(initial map[string]domainskill.Status) *chainPatcher {
-	cp := &chainPatcher{status: map[string]domainskill.Status{}}
+	cp := &chainPatcher{status: map[string]domainskill.Status{}, failOn: map[domainskill.Status]error{}}
 	for k, v := range initial {
 		cp.status[k] = v
 	}
 	return cp
+}
+
+// CurrentStatus exposes the live tracked status so revert can compute the path
+// from the skill's actual current status (idempotency), not the recorded one.
+func (c *chainPatcher) CurrentStatus(_ context.Context, skillID string) (domainskill.Status, error) {
+	return c.status[skillID], nil
 }
 
 // allowed mirrors service.go allowedTransitions for the test guard.
@@ -80,6 +89,9 @@ var allowed = map[domainskill.Status]map[domainskill.Status]bool{
 func (c *chainPatcher) PatchStatus(_ context.Context, skillID, status, _ string) error {
 	cur := c.status[skillID]
 	next := domainskill.Status(status)
+	if err := c.failOn[next]; err != nil {
+		return err
+	}
 	if !allowed[cur][next] {
 		return skillapp.ErrForbiddenStatusTransition
 	}
@@ -140,12 +152,12 @@ func TestApply_NoConfirmRecordsNoAudit(t *testing.T) {
 	assert.ErrorIs(t, err, outbound.ErrNotFound, "dry-run must not persist an audit run")
 }
 
-// K.1 RED — revert reverses to the prior status (single-hop).
+// K.1 RED — revert reverses to the prior status (multi-hop).
 
-// TestRevert_ReversesToPriorStatusSingleHop verifies a recorded promotion
+// TestRevert_ReversesToPriorStatusMultiHop verifies a recorded promotion
 // (validated→active) is reversed back to validated. validated→active inverse is
 // active→validated which is multi-hop (active→blocked→candidate→validated).
-func TestRevert_ReversesToPriorStatusSingleHop(t *testing.T) {
+func TestRevert_ReversesToPriorStatusMultiHop(t *testing.T) {
 	audit := newFakeAuditRepo()
 	// Seed an apply run: skill1 promoted validated→active.
 	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
@@ -310,4 +322,98 @@ func TestRevertLast_UsesLatestRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	assert.Equal(t, domainskill.StatusValidated, patcher.status[testSkillID1])
+}
+
+// MEDIUM-2 RED — reverting the same run twice is idempotent (no churn).
+
+// TestRevert_DoubleRevertIsIdempotent verifies that reverting a run a second time,
+// when the skill already sits at the prior status, performs zero PatchStatus calls
+// and reports a no-op rather than re-walking a spurious full lifecycle.
+func TestRevert_DoubleRevertIsIdempotent(t *testing.T) {
+	audit := newFakeAuditRepo()
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID: "RUN0000000000000000000001", Mode: "apply",
+		CreatedAt: time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC),
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+		},
+	}))
+
+	patcher := newChainPatcher(map[string]domainskill.Status{testSkillID1: domainskill.StatusDeprecated})
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{
+			"RUN0000000000000000000002", "ITEM000000000000000000002",
+			"RUN0000000000000000000003", "ITEM000000000000000000003",
+		}),
+	)
+
+	// First revert: deprecated → active via the legal chain.
+	first, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	assert.True(t, first[0].Reverted)
+	assert.Equal(t, domainskill.StatusActive, patcher.status[testSkillID1])
+	firstCalls := len(patcher.calls)
+	require.NotZero(t, firstCalls)
+
+	// Second revert of the SAME run: skill is already at the prior status (active),
+	// so it must be a no-op — zero additional PatchStatus calls, reported skipped.
+	second, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	assert.False(t, second[0].Reverted, "already at target → not a fresh revert")
+	assert.True(t, second[0].Skipped, "no-op idempotent revert is reported as skipped")
+	assert.Equal(t, firstCalls, len(patcher.calls), "second revert must not churn the lifecycle")
+	assert.Equal(t, domainskill.StatusActive, patcher.status[testSkillID1], "status unchanged")
+}
+
+// MEDIUM-1 RED — a mid-chain walk failure is auditable (stranded state visible).
+
+// TestRevert_PartialWalkFailureIsAudited verifies that when a multi-hop walk fails
+// on a later hop, the revert audit run records the actual intermediate status the
+// skill was stranded at, plus the error — never silence.
+func TestRevert_PartialWalkFailureIsAudited(t *testing.T) {
+	audit := newFakeAuditRepo()
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID: "RUN0000000000000000000001", Mode: "apply",
+		CreatedAt: time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC),
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+		},
+	}))
+
+	// Revert path is deprecated→blocked→candidate→validated→active. Fail on the
+	// 2nd hop (candidate) so the skill is stranded at blocked.
+	patcher := newChainPatcher(map[string]domainskill.Status{testSkillID1: domainskill.StatusDeprecated})
+	patcher.failOn[domainskill.StatusCandidate] = errors.New("simulated hop failure")
+
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{"RUN0000000000000000000002", "ITEM000000000000000000002"}),
+	)
+
+	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.False(t, result[0].Reverted, "partial walk did not reach the target")
+	assert.True(t, result[0].Skipped)
+	require.Error(t, result[0].RevertErr)
+
+	// Only the first hop (blocked) succeeded before the failure.
+	assert.Equal(t, domainskill.StatusBlocked, patcher.status[testSkillID1],
+		"skill is stranded at the intermediate status")
+
+	// The revert audit run must capture the partial walk: the item reflects the
+	// ACTUAL final status reached (blocked), not the intended target (active).
+	revRun, err := audit.FindLatest(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "revert", revRun.Mode)
+	require.Len(t, revRun.Items, 1, "the partial walk must produce an audit item, not silence")
+	assert.Equal(t, "deprecated", revRun.Items[0].PriorStatus,
+		"prior is where the skill started this revert")
+	assert.Equal(t, "blocked", revRun.Items[0].NewStatus,
+		"new status reflects the actual stranded intermediate status")
 }

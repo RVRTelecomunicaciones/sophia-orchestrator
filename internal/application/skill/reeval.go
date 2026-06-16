@@ -57,6 +57,15 @@ type StatusPatcher interface {
 	PatchStatus(ctx context.Context, skillID, status, reason string) error
 }
 
+// StatusReader reads a skill's live current lifecycle status. Revert uses it to
+// compute the revert path from where the skill ACTUALLY sits now (idempotency and
+// drift-correctness), not from the status recorded at apply time. It is satisfied
+// by *Service.CurrentStatus. When the patcher does not also implement it, revert
+// falls back to the recorded status (the pre-fix behavior).
+type StatusReader interface {
+	CurrentStatus(ctx context.Context, skillID string) (domainskill.Status, error)
+}
+
 // ReevalRow is one line of the re-evaluation report.
 type ReevalRow struct {
 	SkillID        string
@@ -92,6 +101,7 @@ type ReevalRow struct {
 type Reevaluator struct {
 	evidence EvidenceProvider
 	patcher  StatusPatcher
+	reader   StatusReader // optional; set when patcher also reads live status
 	audit    outbound.ReevalAuditRepository
 	clock    shared.Clock
 	idgen    shared.IDGenerator
@@ -101,7 +111,8 @@ type Reevaluator struct {
 // applies transitions, but it does not record a revertible snapshot. Used by the
 // dry-run path and unit tests that do not exercise revert.
 func NewReevaluator(evidence EvidenceProvider, patcher StatusPatcher) *Reevaluator {
-	return &Reevaluator{evidence: evidence, patcher: patcher}
+	reader, _ := patcher.(StatusReader)
+	return &Reevaluator{evidence: evidence, patcher: patcher, reader: reader}
 }
 
 // NewReevaluatorWithAudit constructs a Reevaluator with audit persistence so
@@ -113,9 +124,11 @@ func NewReevaluatorWithAudit(
 	clock shared.Clock,
 	idgen shared.IDGenerator,
 ) *Reevaluator {
+	reader, _ := patcher.(StatusReader)
 	return &Reevaluator{
 		evidence: evidence,
 		patcher:  patcher,
+		reader:   reader,
 		audit:    audit,
 		clock:    clock,
 		idgen:    idgen,
@@ -272,6 +285,17 @@ func (r *Reevaluator) Revert(ctx context.Context, runID string) ([]RevertRow, er
 }
 
 // revertRun executes the inverse of every item in run and records the revert.
+//
+// The revert path is computed from the skill's LIVE current status (when a
+// StatusReader is available), not from the status recorded at apply time. This
+// makes revert idempotent and correct under drift: if the skill already sits at
+// the target prior status, the item is a no-op (no PatchStatus calls, no audit
+// item, reported skipped) instead of re-walking a spurious full lifecycle.
+//
+// A walk that fails mid-chain strands the skill at an intermediate status; that
+// partial mutation is auditable. The revert audit item records the ACTUAL final
+// status the skill reached (not the intended target) plus the error, so the
+// stranded state is visible in the audit trail and to a subsequent --revert.
 func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]RevertRow, error) {
 	result := make([]RevertRow, 0, len(run.Items))
 	revertItems := make([]outbound.ReevalRunItem, 0, len(run.Items))
@@ -280,8 +304,31 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 	revRunID := r.idgen.NewID()
 
 	for _, item := range run.Items {
-		from := domainskill.Status(item.NewStatus) // where the skill currently sits
 		to := domainskill.Status(item.PriorStatus) // where we want it back
+
+		// Observe where the skill ACTUALLY sits now. Fall back to the recorded
+		// new_status when no live reader is wired (pre-fix behavior).
+		from := domainskill.Status(item.NewStatus)
+		if r.reader != nil {
+			live, err := r.reader.CurrentStatus(ctx, item.SkillID)
+			if err != nil {
+				return result, fmt.Errorf("skill.Reevaluator.revertRun: %s: read status: %w", item.SkillID, err)
+			}
+			from = live
+		}
+
+		// Idempotent no-op: already at the target. No churn, no audit item.
+		if from == to {
+			result = append(result, RevertRow{
+				SkillID:    item.SkillID,
+				FromStatus: from,
+				ToStatus:   to,
+				Skipped:    true,
+				RevertErr:  fmt.Errorf("already at prior status %s; no-op", to),
+			})
+			continue
+		}
+
 		path, ok := transitionPath(from, to)
 		row := RevertRow{SkillID: item.SkillID, FromStatus: from, ToStatus: to, Path: path}
 
@@ -294,10 +341,21 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 			continue
 		}
 
-		if err := r.walk(ctx, item.SkillID, path); err != nil {
+		reached, walkErr := r.walk(ctx, item.SkillID, from, path)
+		if walkErr != nil {
 			row.Skipped = true
-			row.RevertErr = err
+			row.RevertErr = walkErr
 			result = append(result, row)
+			// Record the partial walk so the stranded intermediate status is
+			// auditable. new_status is where the skill actually ended up.
+			if reached != from {
+				revertItems = append(revertItems, outbound.ReevalRunItem{
+					ID:          r.idgen.NewID(),
+					SkillID:     item.SkillID,
+					PriorStatus: from.String(),
+					NewStatus:   reached.String(),
+				})
+			}
 			continue
 		}
 
@@ -306,8 +364,8 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 		revertItems = append(revertItems, outbound.ReevalRunItem{
 			ID:          r.idgen.NewID(),
 			SkillID:     item.SkillID,
-			PriorStatus: item.NewStatus, // inverse: prior of the revert IS the recorded new_status
-			NewStatus:   item.PriorStatus,
+			PriorStatus: from.String(), // inverse: prior of the revert IS where it started
+			NewStatus:   to.String(),
 		})
 	}
 
@@ -326,14 +384,20 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 }
 
 // walk applies each step of a legal transition chain through PatchStatus, so the
-// 6-enum guard validates every hop and no raw status write ever bypasses it.
-func (r *Reevaluator) walk(ctx context.Context, skillID string, path []domainskill.Status) error {
+// 6-enum guard validates every hop and no raw status write ever bypasses it. It
+// returns the last status actually reached (the start status when the first hop
+// fails) so a mid-chain failure leaves an auditable record of the stranded state.
+func (r *Reevaluator) walk(
+	ctx context.Context, skillID string, start domainskill.Status, path []domainskill.Status,
+) (domainskill.Status, error) {
+	reached := start
 	for _, step := range path {
 		if err := r.patcher.PatchStatus(ctx, skillID, step.String(), "reeval revert"); err != nil {
-			return fmt.Errorf("skill.Reevaluator.walk: %s→%s: %w", skillID, step, err)
+			return reached, fmt.Errorf("skill.Reevaluator.walk: %s→%s: %w", skillID, step, err)
 		}
+		reached = step
 	}
-	return nil
+	return reached, nil
 }
 
 // CountChanges returns the number of rows whose status would change.

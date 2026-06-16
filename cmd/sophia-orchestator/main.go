@@ -91,6 +91,11 @@ func dispatch(ctx context.Context, args []string, reeval reevalRunner, revert re
 			"  deprecated->blocked->candidate->validated->active. Where no legal path exists",
 			"  the skill is skipped and reported for manual intervention. The revert is itself",
 			"  recorded as an immutable audit run.",
+			"  NOTE: --revert/--revert-last MUTATE IMMEDIATELY and do NOT require --confirm",
+			"  (the revert flag itself is the confirmation). This is intentionally asymmetric",
+			"  with --apply, which requires an explicit --confirm to mutate. The revert path",
+			"  is computed from each skill's LIVE current status, so re-running the same",
+			"  --revert is idempotent (a skill already at its prior status is a no-op).",
 			"",
 		}, "\n"))
 	}

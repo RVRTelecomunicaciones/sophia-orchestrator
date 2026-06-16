@@ -68,6 +68,13 @@ func (p *RepoEvidenceProvider) Rows(ctx context.Context) ([]Evidence, error) {
 // Verify RepoEvidenceProvider satisfies the EvidenceProvider contract.
 var _ EvidenceProvider = (*RepoEvidenceProvider)(nil)
 
+// Verify *Service satisfies both the patcher and the live-status reader contracts
+// so Reevaluator() wires an idempotent, drift-correct revert path.
+var (
+	_ StatusPatcher = (*Service)(nil)
+	_ StatusReader  = (*Service)(nil)
+)
+
 // Reevaluator builds a Reevaluator wired to this Service's repositories. Evidence
 // is read from the skills + skill_usage tables and transitions are applied through
 // the Service's own PatchStatus, so the 6-enum allowedTransitions guard is reused.

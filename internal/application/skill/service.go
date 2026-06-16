@@ -110,6 +110,22 @@ func (s *Service) PatchStatus(ctx context.Context, skillID string, status, _ str
 	return s.skillRepo.PatchStatus(ctx, id, newStatus, s.clock.Now())
 }
 
+// CurrentStatus returns the skill's live lifecycle status. Revert uses it to
+// compute the revert path from where the skill actually sits now (idempotency and
+// drift-correctness) rather than from the status recorded at apply time. It is a
+// read-only path and never mutates; it satisfies the StatusReader contract.
+func (s *Service) CurrentStatus(ctx context.Context, skillID string) (skill.Status, error) {
+	id, err := ids.ParseSkillID(skillID)
+	if err != nil {
+		return "", fmt.Errorf("skill.CurrentStatus: %w", outbound.ErrNotFound)
+	}
+	current, err := s.skillRepo.FindByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return current.Status(), nil
+}
+
 // GetUsage returns all skill_usage rows for the given change_id, enriching each
 // with the real per-change apply_attempts (D-LH-2): SUM(tasks.attempts) for the
 // change's apply tasks, applied identically to every row of that change. Tasks
