@@ -58,6 +58,18 @@ The combination `(skill_id, change_id, phase_type)` MUST be unique — re-inject
 
 Orch MUST expose `GET /api/v1/skills/usage` with optional query parameters `skill_id` and `change_id`. The endpoint MUST require API-key authentication. The response MUST be a JSON array of skill_usage objects, filtered by the supplied parameters.
 
+The `apply_attempts` field on each returned object MUST be sourced from the real `tasks.attempts` values for the relevant change — it MUST NOT be hardcoded to `0`. The response JSON shape MUST remain unchanged (same fields, same types); only the `apply_attempts` value changes from a constant `0` to real per-change data.
+(Previously: `apply_attempts` was hardcoded to `0`, forcing `avg_retry_reduction` to a constant `0.333`.)
+
+> Spec reconciliation note (loop-hardening archive, 2026-06-16): `apply_attempts` is computed as `SUM(tasks.attempts)` per change (joined `tasks→groups→apply_boards→phases→change_id`) and applied uniformly to every `SkillUsageRow` of that change, because `tasks` has no `skill_id` column. Per-skill attribution is NOT achievable without a schema change and is recorded as tracked FOLLOW-UP-2 (see the loop-hardening archive report). The per-change basis is the finest honest granularity and satisfies the "real tasks.attempts basis for that change" scenario.
+
+#### Scenario: apply_attempts reflects real tasks.attempts
+
+- GIVEN a change whose apply tasks recorded non-zero `tasks.attempts`
+- WHEN a caller sends `GET /api/v1/skills/usage?change_id={id}` with a valid API key
+- THEN the returned objects' `apply_attempts` equals the real `tasks.attempts` basis for that change (not `0`)
+- AND the JSON shape is otherwise identical to the prior contract
+
 #### Scenario: Filter by change_id
 
 - GIVEN skill_usage rows exist for multiple changes
