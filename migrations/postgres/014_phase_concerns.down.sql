@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE phases DROP COLUMN IF EXISTS concerns;
+
+COMMIT;
