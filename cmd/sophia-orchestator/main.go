@@ -74,7 +74,11 @@ func dispatch(ctx context.Context, args []string, reeval reevalRunner) (bool, er
 			"Usage: sophia-orchestator reeval [--dry-run | --apply --confirm]",
 			"  Re-evaluates skill promotion/demotion against real apply_attempts.",
 			"  Default is dry-run (no mutation). --apply --confirm applies transitions.",
-			"  To reverse an applied change, use the admin PATCH /api/v1/skills/{id}/status endpoint.",
+			"  An explicit --dry-run always wins and forces no mutation.",
+			"  Reversal is NOT single-step: status transitions are constrained. A demotion",
+			"  (active->deprecated) cannot return to active in one PATCH; you must walk the",
+			"  allowed chain via admin PATCH /api/v1/skills/{id}/status:",
+			"  deprecated->blocked->candidate->validated->active.",
 			"",
 		}, "\n"))
 	}
@@ -82,10 +86,10 @@ func dispatch(ctx context.Context, args []string, reeval reevalRunner) (bool, er
 		return true, fmt.Errorf("reeval: parse flags: %w", err)
 	}
 
-	// --dry-run is the default behavior; it is accepted explicitly for clarity.
-	_ = dryRun
-	// Mutation requires BOTH --apply and --confirm. Anything less is a dry-run.
-	wantConfirm := *apply && *confirm
+	// Mutation requires BOTH --apply and --confirm. An explicit --dry-run always
+	// wins: it forces no-mutation even alongside --apply --confirm, so operators
+	// scripting `--dry-run` as a safety guard never accidentally mutate.
+	wantConfirm := *apply && *confirm && !*dryRun
 
 	if err := reeval(ctx, wantConfirm); err != nil {
 		return true, fmt.Errorf("reeval: %w", err)
@@ -151,7 +155,10 @@ func formatReevalReport(report []skillapp.ReevalRow, confirm bool) string {
 		}
 	}
 	if confirm {
-		b.WriteString("\nTo reverse a change, use admin PATCH /api/v1/skills/{id}/status.\n")
+		b.WriteString("\nReversal is NOT single-step. Promotions step back one hop, but a demotion\n")
+		b.WriteString("(active->deprecated) cannot return to active in one PATCH. Walk the allowed\n")
+		b.WriteString("chain via admin PATCH /api/v1/skills/{id}/status:\n")
+		b.WriteString("  deprecated->blocked->candidate->validated->active.\n")
 	}
 	return b.String()
 }

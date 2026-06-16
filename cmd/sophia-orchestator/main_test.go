@@ -64,6 +64,13 @@ func TestDispatch_ReevalModes(t *testing.T) {
 			wantConfirm: true,
 		},
 		{
+			name:        "reeval --apply --dry-run --confirm stays dry-run (dry-run wins)",
+			args:        []string{"reeval", "--apply", "--dry-run", "--confirm"},
+			wantHandled: true,
+			wantCalled:  true,
+			wantConfirm: false,
+		},
+		{
 			name:        "unknown subcommand not handled",
 			args:        []string{"serve"},
 			wantHandled: false,
