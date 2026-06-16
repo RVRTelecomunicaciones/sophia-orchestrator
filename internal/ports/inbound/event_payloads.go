@@ -352,6 +352,23 @@ type PhaseCompletedPayload struct {
 	Confidence         float64   `json:"confidence"`
 	EnvelopeStatus     string    `json:"envelope_status"`
 	EnvelopeConfidence float64   `json:"envelope_confidence"`
+
+	// Concerns carries the advisory critic's concerns (design GAP B / D-GA-6).
+	// Populated ONLY when the event resolves to phase.completed_with_concerns;
+	// the omitempty tag keeps a plain phase.completed byte-identical to today.
+	// Conforms to sophia-wire-v1 §419 (the concerns field is documented there).
+	Concerns []ConcernPayload `json:"concerns,omitempty"`
+}
+
+// ConcernPayload is the wire shape of one advisory concern carried on a
+// phase.completed_with_concerns event (design GAP B / D-GA-6). It mirrors the
+// domain phase.Concern. Strictly advisory — consumers display it for operator
+// review; it never signals a block or escalation.
+type ConcernPayload struct {
+	Severity string `json:"severity"`
+	Category string `json:"category"`
+	Message  string `json:"message"`
+	Evidence string `json:"evidence"`
 }
 
 // PhaseCompletedFromApplyPayload is the slimmer payload emitted from

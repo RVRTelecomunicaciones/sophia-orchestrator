@@ -235,6 +235,46 @@ func TestRun_Critic_BlockedNeverDowngraded(t *testing.T) {
 		"a BLOCKED phase must never be coerced to done_with_concerns")
 }
 
+// --- G: SSE concerns ride only on completed_with_concerns ---
+
+func TestRun_Critic_SSEConcernsOnCompletedWithConcerns(t *testing.T) {
+	fc := &fakeCritic{concerns: []phase.Concern{
+		{Severity: "high", Category: "risk", Message: "danger", Evidence: "risks[0].level=high"},
+	}}
+	h := newCriticHarness(t, fc, mustEnvelope(t, phase.PhaseSpec, envelope.StatusDone, 0.9))
+
+	h.run(t, criticEnabledOverrides())
+
+	var completed *inbound.Event
+	for i := range h.events.published {
+		if h.events.published[i].Type == contract.EventPhaseCompletedWithConcerns {
+			completed = &h.events.published[i]
+		}
+	}
+	require.NotNil(t, completed, "expected a phase.completed_with_concerns event")
+	payload, ok := completed.Payload.(inbound.PhaseCompletedPayload)
+	require.True(t, ok, "payload type %T", completed.Payload)
+	require.Len(t, payload.Concerns, 1)
+	require.Equal(t, "high", payload.Concerns[0].Severity)
+	require.Equal(t, "risk", payload.Concerns[0].Category)
+}
+
+func TestRun_Critic_PlainCompleted_NoConcernsPayload(t *testing.T) {
+	h := newCriticHarness(t, nil, mustEnvelope(t, phase.PhaseSpec, envelope.StatusDone, 0.85))
+	h.run(t, nil)
+
+	var completed *inbound.Event
+	for i := range h.events.published {
+		if h.events.published[i].Type == contract.EventPhaseCompleted {
+			completed = &h.events.published[i]
+		}
+	}
+	require.NotNil(t, completed)
+	payload, ok := completed.Payload.(inbound.PhaseCompletedPayload)
+	require.True(t, ok)
+	require.Empty(t, payload.Concerns, "plain phase.completed must carry no concerns")
+}
+
 var errCriticBoom = &criticBoomError{}
 
 type criticBoomError struct{}

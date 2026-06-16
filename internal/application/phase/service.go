@@ -689,7 +689,30 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
 	}
+	// D-GA-6: attach advisory concerns ONLY on phase.completed_with_concerns.
+	// The omitempty tag keeps a plain phase.completed byte-identical to today.
+	if eventType == contract.EventPhaseCompletedWithConcerns {
+		payload.Concerns = toConcernPayloads(p.Concerns())
+	}
 	s.publishEvent(ctx, p.ID(), eventType, payload)
+}
+
+// toConcernPayloads maps domain concerns into their SSE wire shape (D-GA-6).
+// Returns nil for an empty slice so omitempty drops the field entirely.
+func toConcernPayloads(concerns []phase.Concern) []inbound.ConcernPayload {
+	if len(concerns) == 0 {
+		return nil
+	}
+	out := make([]inbound.ConcernPayload, 0, len(concerns))
+	for _, c := range concerns {
+		out = append(out, inbound.ConcernPayload{
+			Severity: c.Severity,
+			Category: c.Category,
+			Message:  c.Message,
+			Evidence: c.Evidence,
+		})
+	}
+	return out
 }
 
 // runApplyPhase delegates apply-phase coordination to the injected
