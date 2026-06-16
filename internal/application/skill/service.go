@@ -127,6 +127,44 @@ func (s *Service) GetUsage(ctx context.Context, changeID string) ([]inbound.Skil
 	return out, nil
 }
 
+// GetUsageBySkill returns all skill_usage rows for the given skill_id, enriching
+// each row with the real per-change apply_attempts (SUM(tasks.attempts)) for that
+// row's own change_id. Because a skill spans multiple changes, the per-change sum
+// is computed once per distinct change and reused for every row of that change.
+// Mirrors GetUsage's enrichment semantics (D-LH-2) on the skill_id filter path
+// (spec skill-usage-tracking "Filter by skill_id").
+func (s *Service) GetUsageBySkill(ctx context.Context, skillID string) ([]inbound.SkillUsageRow, error) {
+	sid, err := ids.ParseSkillID(skillID)
+	if err != nil {
+		return nil, fmt.Errorf("skill.GetUsageBySkill: invalid skill_id: %w", err)
+	}
+
+	rows, err := s.skillUsageRepo.FindBySkill(ctx, sid)
+	if err != nil {
+		return nil, err
+	}
+
+	attemptsByChange := make(map[string]int, len(rows))
+	out := make([]inbound.SkillUsageRow, 0, len(rows))
+	for _, r := range rows {
+		cid := r.ChangeID()
+		key := cid.String()
+		attempts, ok := attemptsByChange[key]
+		if !ok {
+			attempts, err = s.skillUsageRepo.SumApplyAttemptsByChange(ctx, cid)
+			if err != nil {
+				return nil, err
+			}
+			attemptsByChange[key] = attempts
+		}
+		out = append(out, inbound.SkillUsageRow{
+			SkillUsage:    r,
+			ApplyAttempts: attempts,
+		})
+	}
+	return out, nil
+}
+
 // GetSkill returns the current skill snapshot for GET /api/v1/skills/{id}.
 // Returns outbound.ErrNotFound (wrapped) when the skill_id is unknown or
 // cannot be parsed.
