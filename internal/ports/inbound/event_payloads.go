@@ -380,6 +380,13 @@ type ConcernPayload struct {
 type PhaseCompletedFromApplyPayload struct {
 	EnvelopeStatus     string  `json:"envelope_status"`
 	EnvelopeConfidence float64 `json:"envelope_confidence"`
+
+	// Concerns carries the advisory critic's concerns for the apply phase
+	// (design GAP B / D-GA-6, extended to runApplyPhase). Populated ONLY when
+	// the apply phase resolves to phase.completed_with_concerns; the omitempty
+	// tag keeps a plain phase.completed-from-apply byte-identical to today.
+	// Mirrors PhaseCompletedPayload.Concerns. Conforms to sophia-wire-v1 §419.
+	Concerns []ConcernPayload `json:"concerns,omitempty"`
 }
 
 // PhaseFailedPayload is the payload of phase.failed.

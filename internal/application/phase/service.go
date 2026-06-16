@@ -624,8 +624,8 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	})
 
 	// Step 12b: advisory critic (design GAP B / D-GA-5). Strictly advisory,
-	// per-change opt-in, DEFAULT OFF, NEVER blocking/escalating. Runs only on
-	// single-agent enveloped phases (this path); runApplyPhase is deferred.
+	// per-change opt-in, DEFAULT OFF, NEVER blocking/escalating. This is the
+	// single-agent enveloped path; runApplyPhase has the mirror insertion.
 	// On a Review error → log + SWALLOW (an advisory critic must never break a
 	// phase). On concerns → upgrade a DONE envelope to DONE_WITH_CONCERNS
 	// (only an upgrade; BLOCKED/NEEDS_CONTEXT are NEVER downgraded) and attach
@@ -730,6 +730,21 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 		return
 	}
 
+	// Advisory critic on the apply phase (design GAP B / D-GA-5, extended to
+	// runApplyPhase). Identical contract to the single-agent path: strictly
+	// advisory, per-change opt-in DEFAULT OFF, NEVER blocking/escalating. The
+	// Review error is logged + SWALLOWED inside reviewConcerns. On concerns →
+	// upgrade a DONE envelope to DONE_WITH_CONCERNS ONLY (an upgrade; never
+	// downgrade BLOCKED/NEEDS_CONTEXT). p.Complete then derives
+	// PhaseStatusDoneWithConcerns via the existing status switch, and
+	// AdvanceAllowed() already returns true for done_with_concerns so the cycle
+	// keeps progressing. Opted-out callers skip this entirely (byte-identical).
+	concerns := s.reviewConcerns(ctx, c, p, env, in.ContextOverrides)
+	if len(concerns) > 0 && env.Status == envelope.StatusDone {
+		env.Status = envelope.StatusDoneWithConcerns
+		p.SetConcerns(concerns)
+	}
+
 	if err := p.Complete(env, s.d.Clock.Now()); err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("phase complete: %v", err))
 		return
@@ -763,10 +778,17 @@ func (s *Service) runApplyPhase(ctx context.Context, c *change.Change, p *phase.
 			buildApplyFailedPayload(p.ID(), p.Type(), s.d.Clock.Now().UTC(), env))
 		return
 	}
-	s.publishEvent(ctx, p.ID(), eventType, inbound.PhaseCompletedFromApplyPayload{
+	applyPayload := inbound.PhaseCompletedFromApplyPayload{
 		EnvelopeStatus:     string(env.Status),
 		EnvelopeConfidence: env.Confidence,
-	})
+	}
+	// D-GA-6: attach advisory concerns ONLY on phase.completed_with_concerns.
+	// The omitempty tag keeps a plain phase.completed-from-apply byte-identical
+	// to today for opted-out changes and clean envelopes.
+	if eventType == contract.EventPhaseCompletedWithConcerns {
+		applyPayload.Concerns = toConcernPayloads(p.Concerns())
+	}
+	s.publishEvent(ctx, p.ID(), eventType, applyPayload)
 }
 
 // runInitPhase handles the INIT phase execution path. It mirrors Steps 13-16
