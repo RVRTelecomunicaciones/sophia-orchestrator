@@ -1,10 +1,10 @@
-# change-digest-deterministic Specification
+# Delta: change-digest-deterministic
 
 ## Capability
 
-Generates a deterministic YAML `ChangeDigest` document per V4.1 §13.1 from the change envelope and skill_usage rows, then persists it to memory-engine. No LLM is involved. As of the `loop-hardening` change the build drops only `Outcome="unknown"` skill entries (GetSkill failed) before persistence; never-applied skills STAY (availability is a matcher signal).
+The ME digest build drops only `Outcome="unknown"` skill entries (GetSkill failed) before semantic-memory persistence. Never-applied skills STAY, since availability is a matcher signal. The golden fixture is updated to reflect the filter.
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Deterministic ChangeDigest structure
 
@@ -48,26 +48,3 @@ YAML serialisation MUST be deterministic — given identical inputs, the output 
 - GIVEN a change using skills with IDs `[zzz-id, aaa-id, mmm-id]` (all non-`unknown`)
 - WHEN the digest is generated
 - THEN the YAML skills_used list is ordered `[aaa-id, mmm-id, zzz-id]`
-
-### Requirement: LLM-assisted digest MUST NOT be implemented
-
-The M2 digest generator MUST NOT invoke any LLM client or make any external AI API call. Any code path that would trigger an LLM call within the digest generation is forbidden in M2. The LLM-assisted variant (V4.1 §13.2) is deferred to M3.
-
-#### Scenario: Digest generated without LLM call
-
-- GIVEN a complete change envelope
-- WHEN the digest generator runs
-- THEN no HTTP call to an LLM provider is made
-- AND the digest is produced using only deterministic, in-process computation
-
-### Requirement: Digest persistence
-
-The generated YAML MUST be stored in memory-engine at `topic_key = digest/{change_id}`, with type `semantic` and tags `["change_digest"]`.
-
-#### Scenario: Digest persisted to memory-engine
-
-- GIVEN the digest generator has produced a valid YAML document
-- WHEN the persistence step executes
-- THEN a memory-engine record exists at `topic_key = digest/{change_id}`
-- AND the record type is `semantic`
-- AND the record tags include `"change_digest"`

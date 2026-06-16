@@ -1,10 +1,10 @@
-# phase-archived-webhook Specification
+# Delta: phase-archived-webhook
 
 ## Capability
 
-Delivery of `phase.archived` from orch to memory-engine. As of the `loop-hardening` change this moved from fire-and-forget to outbox-backed at-least-once delivery (see `webhook-outbox`). The POST payload stays byte-identical; the ME receiver is untouched.
+Delivery of `phase.archived` from orch to memory-engine moves from fire-and-forget to outbox-backed at-least-once (see `webhook-outbox`). The POST payload stays byte-identical; the ME receiver is untouched.
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Outbound delivery on phase.archived
 
