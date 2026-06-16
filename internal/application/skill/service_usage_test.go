@@ -51,6 +51,7 @@ func mustUsageID(t *testing.T, raw string) ids.SkillUsageID {
 // fakeUsageRepo is a configurable in-memory SkillUsageRepository for unit tests.
 type fakeUsageRepo struct {
 	byChange    map[string][]*skillusage.SkillUsage
+	bySkill     map[string][]*skillusage.SkillUsage
 	attemptsSum map[string]int
 	sumCalls    int
 }
@@ -58,6 +59,7 @@ type fakeUsageRepo struct {
 func newFakeUsageRepo() *fakeUsageRepo {
 	return &fakeUsageRepo{
 		byChange:    map[string][]*skillusage.SkillUsage{},
+		bySkill:     map[string][]*skillusage.SkillUsage{},
 		attemptsSum: map[string]int{},
 	}
 }
@@ -71,8 +73,8 @@ func (r *fakeUsageRepo) FindByChange(_ context.Context, changeID ids.ChangeID) (
 	return r.byChange[changeID.String()], nil
 }
 
-func (r *fakeUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) ([]*skillusage.SkillUsage, error) {
-	return nil, nil
+func (r *fakeUsageRepo) FindBySkill(_ context.Context, skillID ids.SkillID) ([]*skillusage.SkillUsage, error) {
+	return r.bySkill[skillID.String()], nil
 }
 
 func (r *fakeUsageRepo) SumApplyAttemptsByChange(_ context.Context, changeID ids.ChangeID) (int, error) {
