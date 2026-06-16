@@ -97,8 +97,10 @@ func (s *Service) PatchStatus(ctx context.Context, skillID string, status, _ str
 	return s.skillRepo.PatchStatus(ctx, id, newStatus, s.clock.Now())
 }
 
-// GetUsage returns all skill_usage rows for the given change_id with apply_attempts.
-// Currently ApplyAttempts is set to 0; the M4+ pass will enrich from the phase envelope.
+// GetUsage returns all skill_usage rows for the given change_id, enriching each
+// with the real per-change apply_attempts (D-LH-2): SUM(tasks.attempts) for the
+// change's apply tasks, applied identically to every row of that change. Tasks
+// carry no skill_id, so per-change is the finest honest granularity.
 func (s *Service) GetUsage(ctx context.Context, changeID string) ([]inbound.SkillUsageRow, error) {
 	cid, err := ids.ParseChangeID(changeID)
 	if err != nil {
@@ -110,11 +112,16 @@ func (s *Service) GetUsage(ctx context.Context, changeID string) ([]inbound.Skil
 		return nil, err
 	}
 
+	applyAttempts, err := s.skillUsageRepo.SumApplyAttemptsByChange(ctx, cid)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make([]inbound.SkillUsageRow, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, inbound.SkillUsageRow{
 			SkillUsage:    r,
-			ApplyAttempts: 0, // M4+: enrich from phase envelope
+			ApplyAttempts: applyAttempts,
 		})
 	}
 	return out, nil
