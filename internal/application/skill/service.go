@@ -36,6 +36,11 @@ type Service struct {
 	skillRepo      outbound.SkillRepository
 	skillUsageRepo outbound.SkillUsageRepository
 	clock          shared.Clock
+	// reevalAudit and idGen are optional and power the revertible reeval path
+	// (D1). When both are set, Reevaluator() returns an audited reevaluator that
+	// records a prior-state snapshot on apply and supports Revert/RevertLast.
+	reevalAudit outbound.ReevalAuditRepository
+	idGen       shared.IDGenerator
 }
 
 // New constructs a Service.
@@ -45,6 +50,14 @@ func New(skillRepo outbound.SkillRepository, skillUsageRepo outbound.SkillUsageR
 		skillUsageRepo: skillUsageRepo,
 		clock:          clock,
 	}
+}
+
+// WithReevalAudit enables the revertible reeval path by wiring the audit
+// repository and ID generator. Returns the same Service for fluent wiring.
+func (s *Service) WithReevalAudit(audit outbound.ReevalAuditRepository, idGen shared.IDGenerator) *Service {
+	s.reevalAudit = audit
+	s.idGen = idGen
+	return s
 }
 
 // PatchMetrics applies additive deltas to a skill's metrics and updates last_used_at.

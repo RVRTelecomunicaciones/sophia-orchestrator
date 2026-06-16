@@ -71,9 +71,15 @@ var _ EvidenceProvider = (*RepoEvidenceProvider)(nil)
 // Reevaluator builds a Reevaluator wired to this Service's repositories. Evidence
 // is read from the skills + skill_usage tables and transitions are applied through
 // the Service's own PatchStatus, so the 6-enum allowedTransitions guard is reused.
+//
+// When the audit repository and ID generator are wired (WithReevalAudit), the
+// returned Reevaluator records a revertible prior-state snapshot on apply and
+// supports Revert/RevertLast (D1). Otherwise it is the dry-run/apply-only
+// reevaluator with no revert surface.
 func (s *Service) Reevaluator() *Reevaluator {
-	return NewReevaluator(
-		NewRepoEvidenceProvider(s.skillRepo, s.skillUsageRepo),
-		s,
-	)
+	provider := NewRepoEvidenceProvider(s.skillRepo, s.skillUsageRepo)
+	if s.reevalAudit != nil && s.idGen != nil {
+		return NewReevaluatorWithAudit(provider, s, s.reevalAudit, s.clock, s.idGen)
+	}
+	return NewReevaluator(provider, s)
 }
