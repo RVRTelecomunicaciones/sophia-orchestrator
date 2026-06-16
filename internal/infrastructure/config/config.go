@@ -27,6 +27,11 @@ type Config struct {
 	LogLevel      string // debug | info | warn | error
 	SkillsEnabled bool   // SOPHIA_SKILLS_ENABLED (default true)
 
+	// Critic selects the advisory CriticPort implementation wired into the
+	// phase service. The per-change opt-in gate (ContextOverrides["scope"]
+	// ["critic_enabled"], DEFAULT OFF) is independent of this selection.
+	Critic CriticConfig
+
 	// MemoryWebhook configures the outbound best-effort webhook from orch to
 	// memory-engine's /api/v1/worker/phase-archived endpoint (D-M2-1).
 	MemoryWebhook MemoryWebhookConfig
@@ -34,6 +39,16 @@ type Config struct {
 	// Outbox configures the transactional outbox relay poller (loop-hardening
 	// D-LH-1) that durably delivers phase.archived to memory-engine.
 	Outbox OutboxConfig
+}
+
+// CriticConfig selects which advisory critic implementation is wired (D3
+// follow-up: real LLM critic). Loaded from SOPHIA_CRITIC_MODE.
+type CriticConfig struct {
+	// Mode is "stub" (default — deterministic StubCritic, byte-identical to
+	// the shipped behaviour) or "llm" (LLM-backed critic dispatched through
+	// the OpenCode dispatcher). Any unrecognized value falls back to "stub"
+	// at wire time. The per-change opt-in gate is independent of this.
+	Mode string
 }
 
 // OutboxConfig holds the outbox relay poller parameters (loop-hardening D-LH-1).
@@ -421,6 +436,9 @@ func Default() Config {
 		Environment:   "dev",
 		LogLevel:      "info",
 		SkillsEnabled: true, // default ON
+		Critic: CriticConfig{
+			Mode: "stub", // default ON-stub; LLM critic is opt-in via SOPHIA_CRITIC_MODE=llm
+		},
 	}
 }
 
@@ -516,6 +534,7 @@ func Load() (Config, error) {
 	c.Environment = envStr("SOPHIA_ENV", c.Environment)
 	c.LogLevel = strings.ToLower(envStr("SOPHIA_LOG_LEVEL", c.LogLevel))
 	c.SkillsEnabled = envBool("SOPHIA_SKILLS_ENABLED", c.SkillsEnabled)
+	c.Critic.Mode = strings.ToLower(envStr("SOPHIA_CRITIC_MODE", c.Critic.Mode))
 
 	c.Bootstrap.Timeout = envDuration("SOPHIA_BOOTSTRAP_TIMEOUT", c.Bootstrap.Timeout)
 	if v := envInt("SOPHIA_BOOTSTRAP_MAX_CALLS_PER_PROJECT_PER_DAY", 0); v > 0 {

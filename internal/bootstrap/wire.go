@@ -51,6 +51,7 @@ import (
 	dbpkg "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/db"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	obslog "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs/log"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
 // App is the wired application. main.go calls Run; tests can call Close
@@ -416,7 +417,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		OutboxEnqueuer:  outboxEnqueuer,   // loop-hardening: txn-bound phase.archived outbox (nil = disabled)
 		Init:            initSvc,          // INIT phase structural detection (D-INIT-3)
 		Bootstrap:       bootstrapSvc,     // PR3c-ii: async bootstrap trigger after INIT (DG-C7-5)
-		Critic:          criticadapter.NewStub(), // GAP B advisory critic (D-GA-4); per-change opt-in, DEFAULT OFF
+		Critic:          selectCritic(cfg, dispatcher, spawnGov), // GAP B advisory critic (D-GA-4); per-change opt-in, DEFAULT OFF
 		BootstrapTimeout: func() time.Duration {
 			if cfg.Bootstrap.Timeout > 0 {
 				return cfg.Bootstrap.Timeout
@@ -654,3 +655,17 @@ func readinessFor(pool *pgxpool.Pool) func() error {
 
 // guard against http_base import-cycle warnings since we don't use it directly here.
 var _ = httpbase.DefaultConfig
+
+// selectCritic chooses the advisory CriticPort implementation from config
+// (D3 follow-up). Default and any unrecognized mode wire the deterministic
+// StubCritic so production behaviour is byte-identical to the shipped advisory
+// critic. "llm" wires the LLM-backed critic that dispatches a rubric review
+// through the OpenCode dispatcher behind the SpawnGovernor (D1.4). The
+// per-change opt-in gate (ContextOverrides["scope"]["critic_enabled"], DEFAULT
+// OFF) is independent of this selection.
+func selectCritic(cfg config.Config, dispatcher criticadapter.Dispatcher, gov criticadapter.SpawnGovernor) outbound.CriticPort {
+	if cfg.Critic.Mode == "llm" {
+		return criticadapter.NewLLM(dispatcher, gov, criticadapter.LLMConfig{})
+	}
+	return criticadapter.NewStub()
+}
