@@ -46,10 +46,17 @@ type phaseDTO struct {
 	Confidence  float64 `json:"confidence"`
 	Attempts    int     `json:"attempts"`
 	RetryBudget int     `json:"retry_budget"`
+
+	// Concerns exposes the advisory critic's durably-persisted concerns so an
+	// operator can review them post-hoc on the phase read path (design GAP B
+	// durable follow-up). omitempty keeps a phase without concerns byte-
+	// identical to the prior response. Mirrors the wire ConcernPayload shape
+	// (sophia-wire-v1 §419) used on the SSE event. Strictly advisory.
+	Concerns []inbound.ConcernPayload `json:"concerns,omitempty"`
 }
 
 func toPhaseDTO(p *phase.Phase) phaseDTO {
-	return phaseDTO{
+	dto := phaseDTO{
 		PhaseID:     p.ID().String(),
 		ChangeID:    p.ChangeID().String(),
 		Type:        string(p.Type()),
@@ -58,6 +65,18 @@ func toPhaseDTO(p *phase.Phase) phaseDTO {
 		Attempts:    p.Attempts(),
 		RetryBudget: p.RetryBudget(),
 	}
+	if concerns := p.Concerns(); len(concerns) > 0 {
+		dto.Concerns = make([]inbound.ConcernPayload, len(concerns))
+		for i, c := range concerns {
+			dto.Concerns[i] = inbound.ConcernPayload{
+				Severity: c.Severity,
+				Category: c.Category,
+				Message:  c.Message,
+				Evidence: c.Evidence,
+			}
+		}
+	}
+	return dto
 }
 
 // Run handles POST /api/v1/changes/{change_id}/phases/{phase_type}/run.
