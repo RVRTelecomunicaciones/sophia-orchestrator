@@ -28,6 +28,68 @@ func NewPhaseRepo(pool *pgxpool.Pool) *PhaseRepo {
 	return &PhaseRepo{pool: pool}
 }
 
+// concernRow is the JSONB persistence shape for one advisory concern. It
+// mirrors the domain phase.Concern and uses the same lowercase field names as
+// the wire ConcernPayload (sophia-wire-v1 §419) so the durable form and the
+// SSE form are byte-identical. The domain Concern carries no JSON tags, so a
+// dedicated DTO is used here rather than marshaling the domain type directly.
+type concernRow struct {
+	Severity string `json:"severity"`
+	Category string `json:"category"`
+	Message  string `json:"message"`
+	Evidence string `json:"evidence"`
+}
+
+// marshalConcerns encodes the phase's advisory concerns to a JSONB byte slice.
+// Returns nil (→ SQL NULL) when there are no concerns so opted-out phases
+// persist exactly as before (byte-identical NULL column). Concerns are
+// strictly advisory metadata; persisting them never changes phase status.
+func marshalConcerns(concerns []phase.Concern) ([]byte, error) {
+	if len(concerns) == 0 {
+		return nil, nil
+	}
+	rows := make([]concernRow, len(concerns))
+	for i, c := range concerns {
+		rows[i] = concernRow{
+			Severity: c.Severity,
+			Category: c.Category,
+			Message:  c.Message,
+			Evidence: c.Evidence,
+		}
+	}
+	b, err := json.Marshal(rows)
+	if err != nil {
+		return nil, wrapErr("PhaseRepo.marshalConcerns", err)
+	}
+	return b, nil
+}
+
+// unmarshalConcerns decodes a JSONB concerns column into domain concerns.
+// A NULL/empty column yields nil so reads stay byte-identical for phases
+// that never carried concerns.
+func unmarshalConcerns(b []byte) ([]phase.Concern, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	var rows []concernRow
+	if err := json.Unmarshal(b, &rows); err != nil {
+		return nil, wrapErr("scanPhase.unmarshal-concerns", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out := make([]phase.Concern, len(rows))
+	for i, r := range rows {
+		out[i] = phase.Concern{
+			Severity: r.Severity,
+			Category: r.Category,
+			Message:  r.Message,
+			Evidence: r.Evidence,
+		}
+	}
+	return out, nil
+}
+
 // Save upserts a Phase row. Two conflict targets are handled:
 //
 //   - ON CONFLICT (id): in-place update for status/envelope/confidence
@@ -48,21 +110,26 @@ func (r *PhaseRepo) Save(ctx context.Context, p *phase.Phase) error {
 			return wrapErr("PhaseRepo.Save.marshal", err)
 		}
 	}
+	concernBytes, err := marshalConcerns(p.Concerns())
+	if err != nil {
+		return err
+	}
 	const q = `
-INSERT INTO phases (id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO phases (id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at, concerns)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (change_id, phase_type, attempts) DO UPDATE SET
   status       = EXCLUDED.status,
   envelope     = EXCLUDED.envelope,
   confidence   = EXCLUDED.confidence,
   retry_budget = EXCLUDED.retry_budget,
   started_at   = EXCLUDED.started_at,
-  completed_at = EXCLUDED.completed_at
+  completed_at = EXCLUDED.completed_at,
+  concerns     = EXCLUDED.concerns
 `
-	_, err := r.pool.Exec(ctx, q,
+	_, err = r.pool.Exec(ctx, q,
 		p.ID().String(), p.ChangeID().String(), string(p.Type()), string(p.Status()),
 		envBytes, p.Confidence(), p.RetryBudget(), p.Attempts(),
-		p.StartedAt(), p.CompletedAt(),
+		p.StartedAt(), p.CompletedAt(), concernBytes,
 	)
 	return wrapErr("PhaseRepo.Save", err)
 }
@@ -70,7 +137,7 @@ ON CONFLICT (change_id, phase_type, attempts) DO UPDATE SET
 // FindByID returns the Phase identified by id.
 func (r *PhaseRepo) FindByID(ctx context.Context, id ids.PhaseID) (*phase.Phase, error) {
 	const q = `
-SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at
+SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at, concerns
 FROM phases WHERE id = $1`
 	row := r.pool.QueryRow(ctx, q, id.String())
 	return scanPhase(row)
@@ -79,7 +146,7 @@ FROM phases WHERE id = $1`
 // FindByChangeAndType returns the most-recent Phase of pt for a Change.
 func (r *PhaseRepo) FindByChangeAndType(ctx context.Context, changeID ids.ChangeID, pt phase.PhaseType) (*phase.Phase, error) {
 	const q = `
-SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at
+SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at, concerns
 FROM phases WHERE change_id = $1 AND phase_type = $2
 ORDER BY attempts DESC LIMIT 1`
 	row := r.pool.QueryRow(ctx, q, changeID.String(), string(pt))
@@ -92,7 +159,7 @@ ORDER BY attempts DESC LIMIT 1`
 // empty slice when nothing is running — never returns ErrNotFound.
 func (r *PhaseRepo) FindAllRunning(ctx context.Context) ([]*phase.Phase, error) {
 	const q = `
-SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at
+SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at, concerns
 FROM phases WHERE status = 'running'
 ORDER BY started_at`
 	rows, err := r.pool.Query(ctx, q)
@@ -118,7 +185,7 @@ ORDER BY started_at`
 // outbound.ErrNotFound if none.
 func (r *PhaseRepo) FindRunningByChange(ctx context.Context, changeID ids.ChangeID) (*phase.Phase, error) {
 	const q = `
-SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at
+SELECT id, change_id, phase_type, status, envelope, confidence, retry_budget, attempts, started_at, completed_at, concerns
 FROM phases WHERE change_id = $1 AND status IN ('running', 'interrupted')
 ORDER BY started_at DESC LIMIT 1`
 	row := r.pool.QueryRow(ctx, q, changeID.String())
@@ -138,12 +205,12 @@ func (r *PhaseRepo) LockByChange(ctx context.Context, changeID ids.ChangeID) err
 func scanPhase(s scannable) (*phase.Phase, error) {
 	var (
 		idStr, changeIDStr, phaseTypeStr, statusStr string
-		envBytes                                    []byte
+		envBytes, concernBytes                      []byte
 		confidence                                  float64
 		retryBudget, attempts                       int
 		startedAt, completedAt                      *time.Time
 	)
-	err := s.Scan(&idStr, &changeIDStr, &phaseTypeStr, &statusStr, &envBytes, &confidence, &retryBudget, &attempts, &startedAt, &completedAt)
+	err := s.Scan(&idStr, &changeIDStr, &phaseTypeStr, &statusStr, &envBytes, &confidence, &retryBudget, &attempts, &startedAt, &completedAt, &concernBytes)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, outbound.ErrNotFound
@@ -165,13 +232,21 @@ func scanPhase(s scannable) (*phase.Phase, error) {
 			return nil, wrapErr("scanPhase.unmarshal-envelope", err)
 		}
 	}
-	return phase.Hydrate(
+	p := phase.Hydrate(
 		pid, cid,
 		phase.PhaseType(phaseTypeStr),
 		phase.PhaseStatus(statusStr),
 		env, confidence, retryBudget, attempts,
 		startedAt, completedAt,
-	), nil
+	)
+	concerns, err := unmarshalConcerns(concernBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(concerns) > 0 {
+		p.SetConcerns(concerns)
+	}
+	return p, nil
 }
 
 // Compile-time interface check.
