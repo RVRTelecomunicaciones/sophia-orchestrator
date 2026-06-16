@@ -71,6 +71,10 @@ func (r *fakeSkillUsageRepo) FindBySkill(_ context.Context, _ ids.SkillID) ([]*s
 	return nil, nil
 }
 
+func (r *fakeSkillUsageRepo) SumApplyAttemptsByChange(_ context.Context, _ ids.ChangeID) (int, error) {
+	return 0, nil
+}
+
 var _ outbound.SkillUsageRepository = (*fakeSkillUsageRepo)(nil)
 
 // fakeSkillMatcherWithSkills implements discipline.SkillMatcher for usage-tracking tests.
