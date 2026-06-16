@@ -43,6 +43,24 @@ func minimalEnv(t *testing.T, extra ...string) {
 	setEnv(t, append(base, extra...)...)
 }
 
+// --- Critic mode: stub (default) vs llm ---
+
+// Default critic mode is "stub" so production behaviour is byte-identical to
+// the shipped advisory critic (D3 follow-up: LLM critic is opt-in).
+func TestLoad_CriticDefaultsToStub(t *testing.T) {
+	minimalEnv(t) // SOPHIA_CRITIC_MODE not set
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "stub", cfg.Critic.Mode)
+}
+
+func TestLoad_CriticModeLLM(t *testing.T) {
+	minimalEnv(t, "SOPHIA_CRITIC_MODE", "llm")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "llm", cfg.Critic.Mode)
+}
+
 // --- D1: All SOPHIA_MCP_* env vars load into DispatcherConfig.MCP ---
 
 func TestLoad_MCPConfig_AllEnvVars(t *testing.T) {

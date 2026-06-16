@@ -7,8 +7,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	critic "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/critic"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/bootstrap"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/config"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
 // minimalWireConfig returns the minimum valid config.Config needed by Wire
@@ -24,6 +26,47 @@ func minimalWireConfig() config.Config {
 	cfg.Memory.BaseURL = "http://mem:9002"
 	cfg.Runtime.BaseURL = "http://rt:9003"
 	return cfg
+}
+
+// wireFakeDispatcher / wireFakeGovernor are no-op doubles satisfying the
+// critic adapter's minimal interfaces, so selectCritic can be exercised without
+// a real dispatcher or governor.
+type wireFakeDispatcher struct{}
+
+func (wireFakeDispatcher) Dispatch(_ context.Context, _ outbound.DispatchRequest) (*outbound.DispatchResult, error) {
+	return &outbound.DispatchResult{}, nil
+}
+
+type wireFakeGovernor struct{}
+
+func (wireFakeGovernor) Acquire(_ context.Context) error { return nil }
+func (wireFakeGovernor) Release(_ context.Context) error { return nil }
+
+// TestSelectCritic_DefaultsToStub locks that the default config wires the
+// deterministic StubCritic — production behaviour stays byte-identical.
+func TestSelectCritic_DefaultsToStub(t *testing.T) {
+	cfg := config.Default() // Mode == "stub"
+	c := bootstrap.ExportedSelectCritic(cfg, wireFakeDispatcher{}, wireFakeGovernor{})
+	_, ok := c.(*critic.StubCritic)
+	assert.True(t, ok, "default critic mode must wire StubCritic, got %T", c)
+}
+
+func TestSelectCritic_UnknownModeFallsBackToStub(t *testing.T) {
+	cfg := config.Default()
+	cfg.Critic.Mode = "bogus"
+	c := bootstrap.ExportedSelectCritic(cfg, wireFakeDispatcher{}, wireFakeGovernor{})
+	_, ok := c.(*critic.StubCritic)
+	assert.True(t, ok, "unknown critic mode must fall back to StubCritic, got %T", c)
+}
+
+// TestSelectCritic_LLMMode locks that SOPHIA_CRITIC_MODE=llm wires the
+// LLM-backed critic.
+func TestSelectCritic_LLMMode(t *testing.T) {
+	cfg := config.Default()
+	cfg.Critic.Mode = "llm"
+	c := bootstrap.ExportedSelectCritic(cfg, wireFakeDispatcher{}, wireFakeGovernor{})
+	_, ok := c.(*critic.LLMCritic)
+	assert.True(t, ok, "llm critic mode must wire LLMCritic, got %T", c)
 }
 
 // TestWire_MCPProvider_EmptyProvider_FailsFast (M2)
