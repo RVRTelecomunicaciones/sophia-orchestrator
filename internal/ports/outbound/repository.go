@@ -100,6 +100,40 @@ type SkillUsageRepository interface {
 	SumApplyAttemptsByChange(ctx context.Context, changeID ids.ChangeID) (int, error)
 }
 
+// ReevalRun is one persisted reeval-run audit record: the immutable snapshot of
+// a `reeval --apply --confirm` (mode "apply") or a `reeval --revert` (mode
+// "revert") operation. RevertsRunID is set only for revert runs and names the
+// apply-run whose transitions were inverted. Items carry the per-skill
+// prior/new status pair that defines the inverse operation (D1 loop-hardening).
+type ReevalRun struct {
+	ID           string
+	Mode         string // "apply" | "revert"
+	RevertsRunID string // empty for apply runs
+	CreatedAt    time.Time
+	Items        []ReevalRunItem
+}
+
+// ReevalRunItem is one per-skill transition inside a ReevalRun: the status the
+// skill held before the transition (PriorStatus) and the status it moved to
+// (NewStatus). Revert applies the inverse (NewStatus → PriorStatus) by walking
+// the legal transition chain.
+type ReevalRunItem struct {
+	ID          string
+	SkillID     string
+	PriorStatus string
+	NewStatus   string
+}
+
+// ReevalAuditRepository persists the append-only reeval-run audit trail
+// (migration 013). Save writes a run plus its items in one transaction.
+// FindByID and FindLatest read a run back so the revert path can compute the
+// inverse transitions. Returns ErrNotFound when no run matches.
+type ReevalAuditRepository interface {
+	Save(ctx context.Context, run ReevalRun) error
+	FindByID(ctx context.Context, runID string) (ReevalRun, error)
+	FindLatest(ctx context.Context) (ReevalRun, error)
+}
+
 // SkillRepository persists Skill aggregates with V4.1 §5.2 lifecycle fields.
 //
 // FindByPhase returns every Skill whose phases array contains pt AND

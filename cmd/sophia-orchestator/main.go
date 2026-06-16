@@ -33,7 +33,7 @@ func mainWithExit() int {
 
 	// reeval subcommand dispatch happens before the server boots. When the args
 	// do not match a subcommand, dispatch returns handled=false and the server runs.
-	handled, err := dispatch(ctx, os.Args[1:], runReeval)
+	handled, err := dispatch(ctx, os.Args[1:], runReeval, runRevert)
 	if err != nil {
 		slog.Error("sophia-orchestator subcommand failed", slog.String("err", err.Error()))
 		return 1
@@ -53,11 +53,18 @@ func mainWithExit() int {
 // proposed transitions; confirm=false (default) is a dry-run.
 type reevalRunner func(ctx context.Context, confirm bool) error
 
+// reevalReverter reverses a previously-applied reeval run. When last is true the
+// most recent run is reversed and runID is ignored; otherwise runID names the
+// run to reverse.
+type reevalReverter func(ctx context.Context, runID string, last bool) error
+
 // dispatch routes recognized subcommands. It returns handled=true when it consumed
 // the args (the caller must NOT boot the server), or handled=false to fall through
 // to the HTTP server. Flag semantics: `reeval` defaults to dry-run; `--apply`
-// requires `--confirm` to mutate, otherwise it stays a dry-run.
-func dispatch(ctx context.Context, args []string, reeval reevalRunner) (bool, error) {
+// requires `--confirm` to mutate, otherwise it stays a dry-run. `--revert <id>`
+// and `--revert-last` reverse a recorded run and are mutually exclusive with
+// `--apply`.
+func dispatch(ctx context.Context, args []string, reeval reevalRunner, revert reevalReverter) (bool, error) {
 	if len(args) == 0 {
 		return false, nil
 	}
@@ -69,21 +76,64 @@ func dispatch(ctx context.Context, args []string, reeval reevalRunner) (bool, er
 	dryRun := fs.Bool("dry-run", false, "report projected status changes without mutating (default)")
 	apply := fs.Bool("apply", false, "apply the projected status transitions (requires --confirm)")
 	confirm := fs.Bool("confirm", false, "confirm mutation; without it --apply stays a dry-run")
+	revertID := fs.String("revert", "", "reverse the transitions of the named reeval run id (inverse op via the same guard)")
+	revertLast := fs.Bool("revert-last", false, "reverse the most recent reeval run")
 	fs.Usage = func() {
 		_, _ = io.WriteString(fs.Output(), strings.Join([]string{
-			"Usage: sophia-orchestator reeval [--dry-run | --apply --confirm]",
+			"Usage: sophia-orchestator reeval [--dry-run | --apply --confirm | --revert <id> | --revert-last]",
 			"  Re-evaluates skill promotion/demotion against real apply_attempts.",
-			"  Default is dry-run (no mutation). --apply --confirm applies transitions.",
+			"  Default is dry-run (no mutation). --apply --confirm applies transitions and",
+			"  records a revertible prior-state snapshot.",
 			"  An explicit --dry-run always wins and forces no mutation.",
-			"  Reversal is NOT single-step: status transitions are constrained. A demotion",
-			"  (active->deprecated) cannot return to active in one PATCH; you must walk the",
-			"  allowed chain via admin PATCH /api/v1/skills/{id}/status:",
-			"  deprecated->blocked->candidate->validated->active.",
+			"  --revert <id> / --revert-last replay the INVERSE transitions of a recorded run",
+			"  through the same status-transition guard. A direct single-step inverse is not",
+			"  always legal (e.g. deprecated->active); revert walks the legal chain",
+			"  deprecated->blocked->candidate->validated->active. Where no legal path exists",
+			"  the skill is skipped and reported for manual intervention. The revert is itself",
+			"  recorded as an immutable audit run.",
+			"  NOTE: --revert/--revert-last MUTATE IMMEDIATELY and do NOT require --confirm",
+			"  (the revert flag itself is the confirmation). This is intentionally asymmetric",
+			"  with --apply, which requires an explicit --confirm to mutate. The revert path",
+			"  is computed from each skill's LIVE current status, so re-running the same",
+			"  --revert is idempotent (a skill already at its prior status is a no-op).",
 			"",
 		}, "\n"))
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		return true, fmt.Errorf("reeval: parse flags: %w", err)
+	}
+
+	// Detect whether --revert was explicitly passed (even with an empty value)
+	// so `--revert ""` is a clear usage error rather than a silent dry-run.
+	revertSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "revert" {
+			revertSet = true
+		}
+	})
+
+	wantRevert := revertSet || *revertLast
+
+	// Revert is mutually exclusive with apply: reversing while also requesting a
+	// fresh apply in the same invocation is ambiguous and refused.
+	if wantRevert && *apply {
+		return true, errors.New("reeval: --revert/--revert-last cannot be combined with --apply")
+	}
+
+	if wantRevert {
+		if *revertLast {
+			if err := revert(ctx, "", true); err != nil {
+				return true, fmt.Errorf("reeval revert: %w", err)
+			}
+			return true, nil
+		}
+		if *revertID == "" {
+			return true, errors.New("reeval: --revert requires a non-empty run id")
+		}
+		if err := revert(ctx, *revertID, false); err != nil {
+			return true, fmt.Errorf("reeval revert: %w", err)
+		}
+		return true, nil
 	}
 
 	// Mutation requires BOTH --apply and --confirm. An explicit --dry-run always
@@ -125,6 +175,82 @@ func runReeval(ctx context.Context, confirm bool) error {
 		return fmt.Errorf("write report: %w", err)
 	}
 	return nil
+}
+
+// runRevert wires the live skill service and reverses a recorded reeval run,
+// printing the per-skill revert outcome to stdout.
+func runRevert(ctx context.Context, runID string, last bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	app, err := bootstrap.Wire(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("wire: %w", err)
+	}
+	defer app.Close()
+
+	svc := app.SkillService()
+	if svc == nil {
+		return errors.New("skills are disabled (set SOPHIA_SKILLS_ENABLED=true)")
+	}
+
+	r := svc.Reevaluator()
+	var result []skillapp.RevertRow
+	if last {
+		result, err = r.RevertLast(ctx)
+	} else {
+		result, err = r.Revert(ctx, runID)
+	}
+	if err != nil {
+		return fmt.Errorf("revert: %w", err)
+	}
+	if _, err := io.WriteString(os.Stdout, formatRevertReport(result, runID, last)); err != nil {
+		return fmt.Errorf("write report: %w", err)
+	}
+	return nil
+}
+
+// formatRevertReport renders a human-readable per-skill revert outcome.
+func formatRevertReport(result []skillapp.RevertRow, runID string, last bool) string {
+	target := runID
+	if last {
+		target = "(latest run)"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Skill reeval revert — run %s\n", target)
+	reverted, skipped := 0, 0
+	for _, row := range result {
+		if row.Reverted {
+			reverted++
+		}
+		if row.Skipped {
+			skipped++
+		}
+	}
+	fmt.Fprintf(&b, "%d item(s): %d reverted, %d skipped\n\n", len(result), reverted, skipped)
+
+	for _, row := range result {
+		fmt.Fprintf(&b, "  %s  %s→%s", row.SkillID, row.FromStatus, row.ToStatus)
+		if len(row.Path) > 0 {
+			hops := make([]string, 0, len(row.Path))
+			for _, s := range row.Path {
+				hops = append(hops, s.String())
+			}
+			fmt.Fprintf(&b, "  via %s", strings.Join(hops, "->"))
+		}
+		switch {
+		case row.Skipped:
+			fmt.Fprintf(&b, "  [SKIPPED: %v]\n", row.RevertErr)
+		case row.Reverted:
+			b.WriteString("  [REVERTED]\n")
+		default:
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // formatReevalReport renders a human-readable per-skill report.

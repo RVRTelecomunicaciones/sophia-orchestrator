@@ -118,6 +118,7 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	spawnRepo := pg.NewSpawnGovernorRepo(pool)
 	skillRepo := pg.NewSkillRepo(pool)
 	skillUsageRepo := pg.NewSkillUsageRepo(pool)
+	reevalAuditRepo := pg.NewReevalAuditRepo(pool)
 	_ = boardRepo // used by ApplyService below
 
 	// Outbound HTTP clients.
@@ -224,7 +225,10 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	var skillSvc *skillapp.Service
 	if cfg.SkillsEnabled {
 		skillMatcher = pg.NewPGSkillMatcher(pool, skillRepo)
-		skillSvc = skillapp.New(skillRepo, skillUsageRepo, clock)
+		// WithReevalAudit enables the revertible reeval path (D1): apply records
+		// an immutable prior-state snapshot; `reeval --revert` replays the inverse.
+		skillSvc = skillapp.New(skillRepo, skillUsageRepo, clock).
+			WithReevalAudit(reevalAuditRepo, idGen)
 	}
 
 	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE
