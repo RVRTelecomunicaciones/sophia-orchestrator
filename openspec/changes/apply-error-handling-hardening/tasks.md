@@ -32,7 +32,7 @@ Delivery strategy: `ask-on-risk`. Orchestrator must confirm before launching `sd
 **Conventional commit prefix**: `fix(apply)`
 **Estimated lines**: ~230
 
-### WU-1: `appendAuditErr` helper on `*RunService`
+### [x] WU-1: `appendAuditErr` helper on `*RunService`
 
 **Target file**: `internal/application/apply/run.go`
 **Spec**: app-layer-transition-errors (audit signal requirement), app-layer-repo-errors (audit signal requirement)
@@ -88,7 +88,7 @@ go test ./...
 
 ---
 
-### WU-2: Cluster 2 — domain-transition sites in `apply/teamlead.go`
+### [x] WU-2: Cluster 2 — domain-transition sites in `apply/teamlead.go`
 
 **Target file**: `internal/application/apply/teamlead.go`
 **Spec**: app-layer-transition-errors (all scenarios)
@@ -148,7 +148,7 @@ go test ./...
 
 ---
 
-### WU-3: Cluster 3 — repo Save sites in `apply/teamlead.go`
+### [x] WU-3: Cluster 3 — repo Save sites in `apply/teamlead.go`
 
 **Target file**: `internal/application/apply/teamlead.go`
 **Spec**: app-layer-repo-errors (all scenarios)
@@ -203,7 +203,7 @@ go test ./...
 
 ---
 
-### WU-4: Cluster 3 — repo Save sites in `apply/build_feedback.go`
+### [x] WU-4: Cluster 3 — repo Save sites in `apply/build_feedback.go`
 
 **Target file**: `internal/application/apply/build_feedback.go`
 **Spec**: app-layer-repo-errors (build_feedback.go sites requirement)
@@ -238,7 +238,7 @@ go test ./...
 
 ---
 
-### WU-5: Clusters 2+3 — sites in `phase/service.go`
+### [x] WU-5: Clusters 2+3 — sites in `phase/service.go`
 
 **Target file**: `internal/application/phase/service.go`
 **Spec**: app-layer-transition-errors (RecordOutcome scenarios), app-layer-repo-errors (SessionRepo.Save scenarios)
@@ -315,7 +315,7 @@ go test ./...
 
 ---
 
-### WU-6: Success-path regression test for PR 1
+### [x] WU-6: Success-path regression test for PR 1
 
 **Target files**: `apply/run_test.go` or dedicated `regression_test.go`
 **Spec**: success-path-regression (all scenarios for PR 1)
