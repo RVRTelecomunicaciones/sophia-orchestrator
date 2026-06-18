@@ -35,6 +35,18 @@ type fakeBoardRepo struct {
 	tasks  map[string]*domainapply.Task
 
 	claimResults map[string]bool // taskID → claimed?
+
+	// error injection fields for WU-3 tests.
+	// saveGroupErr: when set, SaveGroup returns this error after N successful calls.
+	// saveGroupErrAfterN=0 fails immediately; set to N to skip first N calls.
+	saveGroupErr       error
+	saveGroupErrAfterN int
+	saveGroupCalls     int
+
+	// saveTaskErr: when set, SaveTask returns this error after N successful calls.
+	saveTaskErr       error
+	saveTaskErrAfterN int
+	saveTaskCalls     int
 }
 
 func newFakeBoardRepo() *fakeBoardRepo {
@@ -71,6 +83,10 @@ func (r *fakeBoardRepo) FindBoardByPhaseID(_ context.Context, phaseID ids.PhaseI
 func (r *fakeBoardRepo) SaveGroup(_ context.Context, g *domainapply.Group) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.saveGroupCalls++
+	if r.saveGroupErr != nil && r.saveGroupCalls > r.saveGroupErrAfterN {
+		return r.saveGroupErr
+	}
 	r.groups[g.ID().String()] = g
 	return nil
 }
@@ -78,6 +94,10 @@ func (r *fakeBoardRepo) SaveGroup(_ context.Context, g *domainapply.Group) error
 func (r *fakeBoardRepo) SaveTask(_ context.Context, t *domainapply.Task) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.saveTaskCalls++
+	if r.saveTaskErr != nil && r.saveTaskCalls > r.saveTaskErrAfterN {
+		return r.saveTaskErr
+	}
 	r.tasks[t.ID().String()] = t
 	return nil
 }
