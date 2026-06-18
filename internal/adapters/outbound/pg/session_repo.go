@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -110,12 +111,32 @@ func scanSession(s scannable) (*session.Session, error) {
 		}
 		return nil, wrapErr("scanSession", err)
 	}
-	sid, _ := ids.ParseSessionID(idStr)
-	cid, _ := ids.ParseChangeID(changeIDStr)
-	pid, _ := ids.ParsePhaseID(phaseIDStr)
+	sid, err := ids.ParseSessionID(idStr)
+	if err != nil {
+		slog.Default().Error("pg.SessionRepo: corrupt session id; returning error",
+			"repo", "session_repo", "column", "id", "raw_id", idStr, "error", err)
+		return nil, wrapErr("scanSession.parseSessionID", err)
+	}
+	cid, err := ids.ParseChangeID(changeIDStr)
+	if err != nil {
+		slog.Default().Error("pg.SessionRepo: corrupt change_id; returning error",
+			"repo", "session_repo", "column", "change_id", "raw_id", changeIDStr, "error", err)
+		return nil, wrapErr("scanSession.parseChangeID", err)
+	}
+	pid, err := ids.ParsePhaseID(phaseIDStr)
+	if err != nil {
+		slog.Default().Error("pg.SessionRepo: corrupt phase_id; returning error",
+			"repo", "session_repo", "column", "phase_id", "raw_id", phaseIDStr, "error", err)
+		return nil, wrapErr("scanSession.parsePhaseID", err)
+	}
 	var wid *ids.WorktreeID
 	if worktreeIDStr != nil {
-		v, _ := ids.ParseWorktreeID(*worktreeIDStr)
+		v, parseErr := ids.ParseWorktreeID(*worktreeIDStr)
+		if parseErr != nil {
+			slog.Default().Error("pg.SessionRepo: corrupt worktree_id; returning error",
+				"repo", "session_repo", "column", "worktree_id", "raw_id", *worktreeIDStr, "error", parseErr)
+			return nil, wrapErr("scanSession.parseWorktreeID", parseErr)
+		}
 		wid = &v
 	}
 	var env *envelope.Envelope
