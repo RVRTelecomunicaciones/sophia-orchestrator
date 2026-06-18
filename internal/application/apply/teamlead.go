@@ -148,24 +148,46 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 	}
 
 	// Mark group complete or failed.
+	cidLocal := c.ID()
+	pidLocal := p.ID()
 	if hadFailure {
-		_ = group.Fail()
+		if err := group.Fail(); err != nil {
+			slog.Default().WarnContext(ctx, "apply: group state transition discarded",
+				"operation", "group.Fail", "group_id", group.ID().String(), "error", err)
+			s.appendAuditErr(ctx, cidLocal, pidLocal, "group.Fail", err)
+		}
 	} else {
 		// Group build gate: detect manifest, run build, handle feedback loop.
 		// On no-manifest the group completes immediately (backward compat).
 		// On build failure + budget exhausted the group is failed + escalated.
 		buildErr := s.runGroupBuildFeedbackLoop(ctx, c, p, group, priorContext)
 		if buildErr != nil {
-			_ = group.Fail()
+			if err := group.Fail(); err != nil {
+				slog.Default().WarnContext(ctx, "apply: group state transition discarded",
+					"operation", "group.Fail", "group_id", group.ID().String(), "error", err)
+				s.appendAuditErr(ctx, cidLocal, pidLocal, "group.Fail", err)
+			}
 		} else {
-			_ = group.Complete()
+			if err := group.Complete(); err != nil {
+				slog.Default().WarnContext(ctx, "apply: group state transition discarded",
+					"operation", "group.Complete", "group_id", group.ID().String(), "error", err)
+				s.appendAuditErr(ctx, cidLocal, pidLocal, "group.Complete", err)
+			}
 		}
 		if buildErr != nil {
-			_ = s.d.BoardRepo.SaveGroup(ctx, group)
+			if err := s.d.BoardRepo.SaveGroup(ctx, group); err != nil {
+				slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveGroup failed; continuing",
+					"operation", "BoardRepo.SaveGroup", "group_id", group.ID().String(), "error", err)
+				s.appendAuditErr(ctx, cidLocal, pidLocal, "BoardRepo.SaveGroup", err)
+			}
 			return groupOutcome{failed: true, err: ErrGroupFailed, tasksDone: done}
 		}
 	}
-	_ = s.d.BoardRepo.SaveGroup(ctx, group)
+	if err := s.d.BoardRepo.SaveGroup(ctx, group); err != nil {
+		slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveGroup failed; continuing",
+			"operation", "BoardRepo.SaveGroup", "group_id", group.ID().String(), "error", err)
+		s.appendAuditErr(ctx, cidLocal, pidLocal, "BoardRepo.SaveGroup", err)
+	}
 
 	// Record team-lead session outcome.
 	teamLeadEnv := &envelope.Envelope{
@@ -185,8 +207,16 @@ func (s *RunService) runTeamLead(ctx context.Context, c *change.Change, p *phase
 	if hadFailure {
 		exitCode = 1
 	}
-	_ = teamLeadSess.RecordOutcome(teamLeadEnv, exitCode, s.d.Clock.Now())
-	_ = s.d.SessionRepo.Save(ctx, teamLeadSess)
+	if err := teamLeadSess.RecordOutcome(teamLeadEnv, exitCode, s.d.Clock.Now()); err != nil {
+		slog.Default().WarnContext(ctx, "apply: team-lead session state transition discarded",
+			"operation", "teamLeadSess.RecordOutcome", "group_id", group.ID().String(), "error", err)
+		s.appendAuditErr(ctx, cidLocal, pidLocal, "teamLeadSess.RecordOutcome", err)
+	}
+	if err := s.d.SessionRepo.Save(ctx, teamLeadSess); err != nil {
+		slog.Default().ErrorContext(ctx, "apply: SessionRepo.Save failed; continuing",
+			"operation", "SessionRepo.Save", "group_id", group.ID().String(), "error", err)
+		s.appendAuditErr(ctx, cidLocal, pidLocal, "SessionRepo.Save", err)
+	}
 
 	if hadFailure {
 		return groupOutcome{failed: true, err: ErrGroupFailed, tasksDone: done}
@@ -268,7 +298,11 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 			return false
 		}
 		ok, quotaErr := s.dispatchImplement(ctx, c, p, b, group, task, implSession, priorContext)
-		_ = s.d.SpawnGov.Release(ctx)
+		if err := s.d.SpawnGov.Release(ctx); err != nil {
+			slog.Default().WarnContext(ctx, "apply: SpawnGov.Release failed; continuing",
+				"operation", "SpawnGov.Release", "task_id", task.ID().String(), "error", err)
+			s.appendAuditErr(ctx, c.ID(), p.ID(), "SpawnGov.Release", err)
+		}
 
 		// Quota fallback (ADR-0010 Slice 4): when the primary model hits quota
 		// AND a fallback model is configured, attempt ONE extra dispatch with
@@ -292,7 +326,11 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 						Evidence:          quotaErr.Evidence,
 					})
 					recordErr := task.RecordAttempt(true)
-					_ = s.d.BoardRepo.SaveTask(ctx, task)
+					if err := s.d.BoardRepo.SaveTask(ctx, task); err != nil {
+						slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveTask failed; continuing",
+							"operation", "BoardRepo.SaveTask", "task_id", task.ID().String(), "error", err)
+						s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveTask", err)
+					}
 					if recordErr != nil {
 						// Should not happen on a success record, but be safe.
 						return false
@@ -315,8 +353,16 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 			// resume (Release only works from Claimed or Running; at this point
 			// the task is still Claimed because dispatchImplement returned
 			// before the agent produced an outcome that would transition it).
-			_ = task.Release()
-			_ = s.d.BoardRepo.SaveTask(ctx, task)
+			if err := task.Release(); err != nil {
+				slog.Default().WarnContext(ctx, "apply: task state transition discarded",
+					"operation", "task.Release", "task_id", task.ID().String(), "error", err)
+				s.appendAuditErr(ctx, c.ID(), p.ID(), "task.Release", err)
+			}
+			if err := s.d.BoardRepo.SaveTask(ctx, task); err != nil {
+				slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveTask failed; continuing",
+					"operation", "BoardRepo.SaveTask", "task_id", task.ID().String(), "error", err)
+				s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveTask", err)
+			}
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyProviderQuotaExceeded, inbound.ApplyProviderQuotaExceededPayload{
 				TaskID:            task.ID().String(),
 				Provider:          quotaErr.Provider,
@@ -336,7 +382,11 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 
 		// Iron Law #5: record attempt; escalation triggers BLOCKED on 3rd fail.
 		recordErr := task.RecordAttempt(ok)
-		_ = s.d.BoardRepo.SaveTask(ctx, task)
+		if err := s.d.BoardRepo.SaveTask(ctx, task); err != nil {
+			slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveTask failed; continuing",
+				"operation", "BoardRepo.SaveTask", "task_id", task.ID().String(), "error", err)
+			s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveTask", err)
+		}
 		if ok {
 			// ADR-0010 Slice 5: successful task resets the quota streak so
 			// sporadic quota errors across a long run never accumulate.
@@ -404,7 +454,11 @@ func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *chang
 		return false, nil
 	}
 
-	_ = sess.MarkRunning()
+	if err := sess.MarkRunning(); err != nil {
+		slog.Default().WarnContext(ctx, "apply: implement session state transition discarded",
+			"operation", "sess.MarkRunning", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "sess.MarkRunning", err)
+	}
 
 	res, err := s.d.Dispatcher.Dispatch(ctx, outbound.DispatchRequest{
 		Prompt:        prompt,
@@ -457,10 +511,26 @@ func (s *RunService) dispatchImplementWithOverride(ctx context.Context, c *chang
 		return false, nil
 	}
 
-	_ = sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now())
-	_ = s.d.SessionRepo.Save(ctx, sess)
-	_ = task.Complete(env)
-	_ = s.d.BoardRepo.SaveTask(ctx, task)
+	if err := sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now()); err != nil {
+		slog.Default().WarnContext(ctx, "apply: implement session state transition discarded",
+			"operation", "sess.RecordOutcome", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "sess.RecordOutcome", err)
+	}
+	if err := s.d.SessionRepo.Save(ctx, sess); err != nil {
+		slog.Default().ErrorContext(ctx, "apply: SessionRepo.Save failed; continuing",
+			"operation", "SessionRepo.Save", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "SessionRepo.Save", err)
+	}
+	if err := task.Complete(env); err != nil {
+		slog.Default().WarnContext(ctx, "apply: task state transition discarded",
+			"operation", "task.Complete", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "task.Complete", err)
+	}
+	if err := s.d.BoardRepo.SaveTask(ctx, task); err != nil {
+		slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveTask failed; continuing",
+			"operation", "BoardRepo.SaveTask", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveTask", err)
+	}
 
 	return env.Status == envelope.StatusDone || env.Status == envelope.StatusDoneWithConcerns, nil
 }
@@ -510,9 +580,12 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 	}
 
 	// MarkRunning is idempotent — a non-nil error means "already running"
-	// on a previous attempt, which is fine. Discard the return value
-	// rather than guarding with an empty block (revive flags empty blocks).
-	_ = sess.MarkRunning()
+	// on a previous attempt (benign). Log at WARN and audit for observability.
+	if err := sess.MarkRunning(); err != nil {
+		slog.Default().WarnContext(ctx, "apply: implement session state transition discarded",
+			"operation", "sess.MarkRunning", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "sess.MarkRunning", err)
+	}
 
 	res, err := s.d.Dispatcher.Dispatch(ctx, outbound.DispatchRequest{
 		Prompt:       prompt,
@@ -587,10 +660,26 @@ func (s *RunService) dispatchImplement(ctx context.Context, c *change.Change, p 
 		return false, nil
 	}
 
-	_ = sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now())
-	_ = s.d.SessionRepo.Save(ctx, sess)
-	_ = task.Complete(env)
-	_ = s.d.BoardRepo.SaveTask(ctx, task)
+	if err := sess.RecordOutcome(env, res.ExitCode, s.d.Clock.Now()); err != nil {
+		slog.Default().WarnContext(ctx, "apply: implement session state transition discarded",
+			"operation", "sess.RecordOutcome", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "sess.RecordOutcome", err)
+	}
+	if err := s.d.SessionRepo.Save(ctx, sess); err != nil {
+		slog.Default().ErrorContext(ctx, "apply: SessionRepo.Save failed; continuing",
+			"operation", "SessionRepo.Save", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "SessionRepo.Save", err)
+	}
+	if err := task.Complete(env); err != nil {
+		slog.Default().WarnContext(ctx, "apply: task state transition discarded",
+			"operation", "task.Complete", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "task.Complete", err)
+	}
+	if err := s.d.BoardRepo.SaveTask(ctx, task); err != nil {
+		slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveTask failed; continuing",
+			"operation", "BoardRepo.SaveTask", "task_id", task.ID().String(), "error", err)
+		s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveTask", err)
+	}
 
 	// Hash audit payload for prompt provenance.
 	_ = hashPrompt(prompt)

@@ -1154,6 +1154,20 @@ func roleForApply(role string) session.AgentRole {
 	return session.RoleImplement
 }
 
+// appendAuditErr records a non-fatal error event in the audit trail.
+// Matches the existing inline pattern at run.go:669. Fail-soft: discard the
+// Append error (same as all other appendAudit call sites in the codebase).
+func (s *RunService) appendAuditErr(ctx context.Context, cid ids.ChangeID, pid ids.PhaseID, op string, err error) {
+	payload, _ := json.Marshal(map[string]any{"operation": op, "error": err.Error()})
+	_ = s.d.Audit.Append(ctx, outbound.AuditEvent{
+		ChangeID:   &cid,
+		PhaseID:    &pid,
+		EventType:  "apply.error.discarded",
+		Payload:    payload,
+		OccurredAt: s.d.Clock.Now(),
+	})
+}
+
 // extractFailedDep parses the dag.Wait ErrGroupFailed error and returns
 // (failed_dep_id, root_cause_err). The shape matches dag.go's wrap:
 //

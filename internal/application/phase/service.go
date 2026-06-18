@@ -580,10 +580,34 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		EnvelopeOut:  "stdout-fenced-json",
 		PhaseType:    string(p.Type()),
 	})
-	_ = s.d.SpawnGov.Release(ctx)
+	// cidLocal and pidLocal are used by appendAudit for soft-error events.
+	cidLocal := c.ID()
+	pidLocal := p.ID()
+	if err := s.d.SpawnGov.Release(ctx); err != nil {
+		slog.WarnContext(ctx, "runPhase: SpawnGov.Release discarded",
+			slog.String("phase_id", pidLocal.String()),
+			slog.String("error", err.Error()),
+		)
+		s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+			map[string]any{"op": "SpawnGov.Release", "error": err.Error()})
+	}
 	if dispatchErr != nil {
-		_ = sess.RecordOutcome(nil, -1, s.d.Clock.Now())
-		_ = s.d.SessionRepo.Save(ctx, sess)
+		if err := sess.RecordOutcome(nil, -1, s.d.Clock.Now()); err != nil {
+			slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
+				slog.String("phase_id", pidLocal.String()),
+				slog.String("error", err.Error()),
+			)
+			s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+				map[string]any{"op": "session.RecordOutcome", "error": err.Error()})
+		}
+		if err := s.d.SessionRepo.Save(ctx, sess); err != nil {
+			slog.Error("runPhase: SessionRepo.Save discarded",
+				slog.String("phase_id", pidLocal.String()),
+				slog.String("error", err.Error()),
+			)
+			s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+				map[string]any{"op": "SessionRepo.Save", "error": err.Error()})
+		}
 		s.failPhase(ctx, p, fmt.Sprintf("dispatch: %v", dispatchErr))
 		return
 	}
@@ -597,8 +621,22 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	// Step 12: validate envelope.
 	env, err := s.d.Validator.Validate(envRaw, p.Type())
 	if err != nil {
-		_ = sess.RecordOutcome(nil, result.ExitCode, s.d.Clock.Now())
-		_ = s.d.SessionRepo.Save(ctx, sess)
+		if recErr := sess.RecordOutcome(nil, result.ExitCode, s.d.Clock.Now()); recErr != nil {
+			slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
+				slog.String("phase_id", pidLocal.String()),
+				slog.String("error", recErr.Error()),
+			)
+			s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+				map[string]any{"op": "session.RecordOutcome", "error": recErr.Error()})
+		}
+		if saveErr := s.d.SessionRepo.Save(ctx, sess); saveErr != nil {
+			slog.Error("runPhase: SessionRepo.Save discarded",
+				slog.String("phase_id", pidLocal.String()),
+				slog.String("error", saveErr.Error()),
+			)
+			s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+				map[string]any{"op": "SessionRepo.Save", "error": saveErr.Error()})
+		}
 		s.failPhase(ctx, p, fmt.Sprintf("envelope validation: %v", err))
 		return
 	}
@@ -609,15 +647,43 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	// ("schema_mismatch") that clients can act on programmatically.
 	if p.Type() == phase.PhaseTasks {
 		if mismatch := detectTasksSchemaMismatch(env.Data); mismatch != "" {
-			_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
-			_ = s.d.SessionRepo.Save(ctx, sess)
+			if recErr := sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now()); recErr != nil {
+				slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
+					slog.String("phase_id", pidLocal.String()),
+					slog.String("error", recErr.Error()),
+				)
+				s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+					map[string]any{"op": "session.RecordOutcome", "error": recErr.Error()})
+			}
+			if saveErr := s.d.SessionRepo.Save(ctx, sess); saveErr != nil {
+				slog.Error("runPhase: SessionRepo.Save discarded",
+					slog.String("phase_id", pidLocal.String()),
+					slog.String("error", saveErr.Error()),
+				)
+				s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+					map[string]any{"op": "SessionRepo.Save", "error": saveErr.Error()})
+			}
 			s.failPhaseWithReason(ctx, p, sess, "schema_mismatch", mismatch)
 			return
 		}
 	}
 
-	_ = sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now())
-	_ = s.d.SessionRepo.Save(ctx, sess)
+	if recErr := sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now()); recErr != nil {
+		slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
+			slog.String("phase_id", pidLocal.String()),
+			slog.String("error", recErr.Error()),
+		)
+		s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+			map[string]any{"op": "session.RecordOutcome", "error": recErr.Error()})
+	}
+	if saveErr := s.d.SessionRepo.Save(ctx, sess); saveErr != nil {
+		slog.Error("runPhase: SessionRepo.Save discarded",
+			slog.String("phase_id", pidLocal.String()),
+			slog.String("error", saveErr.Error()),
+		)
+		s.appendAudit(ctx, &cidLocal, &pidLocal, nil, "phase.apply.error.discarded",
+			map[string]any{"op": "SessionRepo.Save", "error": saveErr.Error()})
+	}
 	s.publishEvent(ctx, p.ID(), inbound.EventAgentEnvelopeReceived, inbound.AgentEnvelopeReceivedPayload{
 		Status:     string(env.Status),
 		Confidence: env.Confidence,
@@ -677,8 +743,10 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	// ended_at + confidence per the spec; envelope_status is
 	// retained as a Forward-compat extra field (clients ignore unknown
 	// fields per §10).
-	cidLocal := c.ID()
-	pidLocal := p.ID()
+	// Note: cidLocal and pidLocal are already declared above for soft-error
+	// auditing; reassign here so they reflect current c/p values.
+	cidLocal = c.ID()
+	pidLocal = p.ID()
 	eventType := eventTypeForStatus(p.Status())
 	s.appendAudit(ctx, &cidLocal, &pidLocal, nil, eventType, env)
 	payload := inbound.PhaseCompletedPayload{

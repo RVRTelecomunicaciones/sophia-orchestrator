@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/apply"
@@ -150,7 +151,11 @@ func (s *RunService) runGroupBuildFeedbackLoop(
 		if err := group.SkipBuild(); err != nil {
 			return fmt.Errorf("skip build: %w", err)
 		}
-		_ = s.d.BoardRepo.SaveGroup(ctx, group)
+		if err := s.d.BoardRepo.SaveGroup(ctx, group); err != nil {
+			slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveGroup failed; continuing",
+				"operation", "BoardRepo.SaveGroup", "group_id", group.ID().String(), "error", err)
+			s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveGroup", err)
+		}
 		return nil
 	}
 
@@ -176,7 +181,11 @@ func (s *RunService) runGroupBuildFeedbackLoop(
 		if outcome.exitCode == 0 {
 			// Build passed.
 			_ = group.RecordBuildAttempt(true)
-			_ = s.d.BoardRepo.SaveGroup(ctx, group)
+			if err := s.d.BoardRepo.SaveGroup(ctx, group); err != nil {
+				slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveGroup failed; continuing",
+					"operation", "BoardRepo.SaveGroup", "group_id", group.ID().String(), "error", err)
+				s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveGroup", err)
+			}
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyBuildPassed, inbound.ApplyBuildPassedPayload{
 				GroupID:    group.ID().String(),
 				Manifest:   plan.Manifest,
@@ -189,7 +198,11 @@ func (s *RunService) runGroupBuildFeedbackLoop(
 
 		// Build failed.
 		budgetErr := group.RecordBuildAttempt(false)
-		_ = s.d.BoardRepo.SaveGroup(ctx, group)
+		if err := s.d.BoardRepo.SaveGroup(ctx, group); err != nil {
+			slog.Default().ErrorContext(ctx, "apply: BoardRepo.SaveGroup failed; continuing",
+				"operation", "BoardRepo.SaveGroup", "group_id", group.ID().String(), "error", err)
+			s.appendAuditErr(ctx, c.ID(), p.ID(), "BoardRepo.SaveGroup", err)
+		}
 		s.publishEvent(ctx, p.ID(), inbound.EventApplyBuildFailed, inbound.ApplyBuildFailedPayload{
 			GroupID:   group.ID().String(),
 			Manifest:  plan.Manifest,
