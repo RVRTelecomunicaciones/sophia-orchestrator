@@ -82,6 +82,50 @@ func (s *Service) recordSSEEvent(eventType string) {
 	m.SSEEventsEmitted.WithLabelValues(eventType).Inc()
 }
 
+// recordGovernanceCall increments GovernanceCallsTotal after an EvaluatePhase
+// call. op must be a bounded string (e.g. "evaluate_phase").
+func (s *Service) recordGovernanceCall(op string, err error) {
+	m := s.d.Metrics
+	if m == nil {
+		return
+	}
+	status := "ok"
+	if err != nil {
+		status = "error"
+	}
+	m.GovernanceCallsTotal.WithLabelValues(op, status).Inc()
+}
+
+// recordDispatcherCall increments DispatcherCallsTotal and observes
+// DispatcherCallDurationMS. provider should be the string form of the
+// dispatcher's Provider() value.
+func (s *Service) recordDispatcherCall(provider string, durationMS float64, err error) {
+	m := s.d.Metrics
+	if m == nil {
+		return
+	}
+	status := "ok"
+	if err != nil {
+		status = "error"
+	}
+	m.DispatcherCallsTotal.WithLabelValues(provider, status).Inc()
+	m.DispatcherCallDurationMS.WithLabelValues(provider).Observe(durationMS)
+}
+
+// recordMemoryCall increments MemoryCallsTotal. op must be a bounded string
+// (e.g. "ingest", "get", "get_by_topic_key", "search", "build_context").
+func (s *Service) recordMemoryCall(op string, err error) {
+	m := s.d.Metrics
+	if m == nil {
+		return
+	}
+	status := "ok"
+	if err != nil {
+		status = "error"
+	}
+	m.MemoryCallsTotal.WithLabelValues(op, status).Inc()
+}
+
 // classifyEnvelopeReason maps an envelope failure to a bounded reason
 // label for the EnvelopeValidationFailures counter. Keeps cardinality low.
 func classifyEnvelopeReason(env *envelope.Envelope) string {

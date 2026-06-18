@@ -115,13 +115,15 @@ func (s *Service) persistArtifactsToMemory(ctx context.Context, c *change.Change
 			Scope:      scope,
 			Provenance: prov,
 		}
-		if _, err := s.d.Memory.Ingest(ctx, in); err != nil {
+		_, ingestErr := s.d.Memory.Ingest(ctx, in)
+		s.recordMemoryCall("ingest", ingestErr)
+		if ingestErr != nil {
 			s.publishEvent(ctx, p.ID(), inbound.EventMemoryArtifactPersistFailed,
 				inbound.MemoryArtifactPersistFailedPayload{
 					PhaseID:  p.ID().String(),
 					TopicKey: ref.TopicKey,
 					Type:     ref.Type,
-					Err:      err.Error(),
+					Err:      ingestErr.Error(),
 				})
 			continue
 		}
