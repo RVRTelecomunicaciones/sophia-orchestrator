@@ -206,17 +206,6 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	validator := discipline.NewValidator()
 	ironLaw := discipline.NewIronLawChecker()
 	prompts := discipline.NewPromptBuilder()
-	spawnGov, err := discipline.NewSpawnGovernor(spawnRepo, discipline.SpawnGovernorConfig{
-		Max:          cfg.Spawn.Max,
-		StaggerMin:   cfg.Spawn.StaggerMin,
-		StaggerMax:   cfg.Spawn.StaggerMax,
-		WaitInterval: cfg.Spawn.WaitInterval,
-		MaxWait:      cfg.Spawn.MaxWait,
-	}, clock)
-	if err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
-	}
 
 	// SkillMatcher wiring (M3: PGSkillMatcher handles context-aware filtering:
 	// scope, applies_when, structural, risk_level sort).
@@ -237,6 +226,18 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	var metrics *obs.Metrics
 	if cfg.Obs.MetricsEnabled {
 		metrics = obs.NewMetrics()
+	}
+
+	spawnGov, err := discipline.NewSpawnGovernor(spawnRepo, discipline.SpawnGovernorConfig{
+		Max:          cfg.Spawn.Max,
+		StaggerMin:   cfg.Spawn.StaggerMin,
+		StaggerMax:   cfg.Spawn.StaggerMax,
+		WaitInterval: cfg.Spawn.WaitInterval,
+		MaxWait:      cfg.Spawn.MaxWait,
+	}, clock, metrics)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
 	}
 
 	// Application services. EventStore is required for durable SSE

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -92,11 +93,14 @@ type SpawnGovernor struct {
 	waiter  Waiter
 	sleeper Sleeper
 	jitter  Jitter
+	metrics *obs.Metrics // optional; nil ⇒ no-op recording
 }
 
 // NewSpawnGovernor constructs a SpawnGovernor with production defaults
 // (real wait, sleep, jitter). Returns ErrInvalidConfig if cfg fails Validate.
-func NewSpawnGovernor(repo outbound.SpawnGovernorRepo, cfg SpawnGovernorConfig, clock shared.Clock) (*SpawnGovernor, error) {
+// metrics is optional; pass nil to disable metric recording (safe for tests
+// that don't need metrics assertions).
+func NewSpawnGovernor(repo outbound.SpawnGovernorRepo, cfg SpawnGovernorConfig, clock shared.Clock, metrics *obs.Metrics) (*SpawnGovernor, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -107,6 +111,7 @@ func NewSpawnGovernor(repo outbound.SpawnGovernorRepo, cfg SpawnGovernorConfig, 
 		waiter:  realWaiter{},
 		sleeper: realSleeper{},
 		jitter:  realJitter{},
+		metrics: metrics,
 	}, nil
 }
 
@@ -122,7 +127,8 @@ func (sg *SpawnGovernor) WithDeps(w Waiter, s Sleeper, j Jitter) *SpawnGovernor 
 // until a slot is free, ctx is cancelled, or MaxWait elapses (returns
 // ErrSaturated). On success, applies a stagger+jitter sleep before returning.
 func (sg *SpawnGovernor) Acquire(ctx context.Context) error {
-	deadline := sg.clock.Now().Add(sg.cfg.MaxWait)
+	start := sg.clock.Now()
+	deadline := start.Add(sg.cfg.MaxWait)
 	for {
 		ok, _, err := sg.repo.Acquire(ctx, sg.cfg.Max)
 		if err != nil {
@@ -130,6 +136,11 @@ func (sg *SpawnGovernor) Acquire(ctx context.Context) error {
 		}
 		if ok {
 			sg.applyStagger()
+			// Record wait duration and bump active gauge on successful acquire.
+			if sg.metrics != nil {
+				sg.metrics.SpawnGovernorWaitMS.Observe(float64(sg.clock.Now().Sub(start).Milliseconds()))
+				sg.metrics.SpawnGovernorActive.Inc()
+			}
 			return nil
 		}
 		if !sg.clock.Now().Before(deadline) {
@@ -145,6 +156,10 @@ func (sg *SpawnGovernor) Acquire(ctx context.Context) error {
 func (sg *SpawnGovernor) Release(ctx context.Context) error {
 	if err := sg.repo.Release(ctx); err != nil {
 		return fmt.Errorf("spawn governor release: %w", err)
+	}
+	// Decrement active gauge on successful release.
+	if sg.metrics != nil {
+		sg.metrics.SpawnGovernorActive.Dec()
 	}
 	return nil
 }

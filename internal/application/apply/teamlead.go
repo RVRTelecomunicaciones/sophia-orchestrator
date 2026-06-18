@@ -17,6 +17,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/session"
 	skdomain "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skillusage"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -60,7 +61,10 @@ func saturationBackoff(attempt int) time.Duration {
 // (ctx cancel, repo error). Saturation is transient: slots free as
 // in-flight tasks Release, so a bounded retry rides out contention
 // without poisoning the calling phase. See BUG-26.
-func acquireWithSaturationRetries(ctx context.Context, gov SpawnGovernor) error {
+//
+// m is optional (*obs.Metrics); when non-nil, each saturation retry
+// increments SpawnGovernorThrottled{reason="saturated"}.
+func acquireWithSaturationRetries(ctx context.Context, gov SpawnGovernor, m *obs.Metrics) error {
 	var err error
 	for attempt := 0; attempt < saturationRetryBudget; attempt++ {
 		err = gov.Acquire(ctx)
@@ -69,6 +73,10 @@ func acquireWithSaturationRetries(ctx context.Context, gov SpawnGovernor) error 
 		}
 		if !errors.Is(err, discipline.ErrSaturated) {
 			return err
+		}
+		// Record each throttle/retry event.
+		if m != nil {
+			m.SpawnGovernorThrottled.WithLabelValues("saturated").Inc()
 		}
 		select {
 		case <-ctx.Done():
@@ -290,7 +298,7 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		// failure — saturation is transient (slots free as other
 		// in-flight tasks Release). Other Acquire errors (ctx cancel,
 		// repo error) still fail fast inside the helper.
-		if err := acquireWithSaturationRetries(ctx, s.d.SpawnGov); err != nil {
+		if err := acquireWithSaturationRetries(ctx, s.d.SpawnGov, s.d.Metrics); err != nil {
 			s.publishEvent(ctx, p.ID(), inbound.EventApplyImplementSpawnGovernorError, inbound.ApplyImplementSpawnGovernorErrorPayload{
 				TaskID: task.ID().String(),
 				Err:    err.Error(),
