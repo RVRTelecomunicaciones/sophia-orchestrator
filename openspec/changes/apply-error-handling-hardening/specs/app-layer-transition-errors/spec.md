@@ -8,7 +8,7 @@ Makes domain state-machine transition errors observable in the application layer
 
 ### Requirement: Structured error log on transition failure
 
-When any domain-transition call (`RecordOutcome`, `group.Fail`, `group.Complete`, `task.Complete`, `MarkRunning`, `task.Release`) returns a non-nil error, the application layer MUST emit exactly one structured error-level log entry containing all of the following fields:
+When any domain-transition call (`RecordOutcome`, `group.Fail`, `group.Complete`, `task.Complete`, `MarkRunning`, `task.Release`) returns a non-nil error, the application layer MUST emit exactly one structured log entry containing all of the following fields:
 
 | Field | Contract |
 |---|---|
@@ -16,14 +16,14 @@ When any domain-transition call (`RecordOutcome`, `group.Fail`, `group.Complete`
 | Identity field | At minimum one of: `change_id`, `group_id`, or `task_id` — whichever is in scope at that call site |
 | `error` | The error value returned by the call |
 
-The log entry MUST be at ERROR severity. The log entry MUST NOT be omitted even if the caller continues normally.
+The log entry MUST be at **WARN severity** (not ERROR). Rationale: these are soft state-machine transitions — the domain state has already advanced or the transition is idempotent; no data is lost and no persistence is at risk. Elevating to ERROR would pollute alert channels with non-actionable noise. The log entry MUST NOT be omitted even if the caller continues normally.
 
 #### Scenario: group.Fail returns error — log is emitted
 
 - GIVEN an application layer handler where `group.Fail` is invoked on a domain group
 - AND `group.Fail` returns a non-nil error (e.g., invalid state transition)
 - WHEN the handler processes the event
-- THEN exactly one ERROR-level log entry is emitted
+- THEN exactly one WARN-level log entry is emitted
 - AND the log entry contains the operation name (`"group.Fail"` or equivalent site identifier)
 - AND the log entry contains a `change_id` or `group_id` identifying the affected entity
 - AND the log entry contains the error value
@@ -34,7 +34,7 @@ The log entry MUST be at ERROR severity. The log entry MUST NOT be omitted even 
 - GIVEN an application layer handler where `task.Complete` is invoked on a domain task
 - AND `task.Complete` returns a non-nil error
 - WHEN the handler processes the event
-- THEN exactly one ERROR-level log entry is emitted containing the operation name, a task or group identity, and the error
+- THEN exactly one WARN-level log entry is emitted containing the operation name, a task or group identity, and the error
 - AND the handler does NOT abort or return early
 
 #### Scenario: RecordOutcome returns error — log is emitted
@@ -42,7 +42,7 @@ The log entry MUST be at ERROR severity. The log entry MUST NOT be omitted even 
 - GIVEN a call to `RecordOutcome` in the application layer
 - AND the call returns a non-nil error
 - WHEN the site is reached during apply processing
-- THEN exactly one ERROR-level log entry is emitted with the operation name, an identity field in scope, and the error
+- THEN exactly one WARN-level log entry is emitted with the operation name, an identity field in scope, and the error
 - AND execution continues to the next line after the call
 
 ### Requirement: Audit signal on transition failure
@@ -67,7 +67,7 @@ A non-nil error from any domain-transition call listed in this spec MUST NOT cau
 
 - GIVEN an apply run where `group.Fail` AND `task.Release` both return non-nil errors at different call sites
 - WHEN apply processing reaches each site in sequence
-- THEN each site emits its own ERROR-level log entry
+- THEN each site emits its own WARN-level log entry
 - AND each site appends its own audit entry
 - AND the apply phase does not abort between the two sites
 - AND the apply phase completes to its normal terminal state
@@ -82,5 +82,5 @@ When a domain-transition call returns nil, the behavior MUST be byte-identical t
 
 - GIVEN a domain-transition call returns nil
 - WHEN the application layer processes the event
-- THEN zero ERROR-level log entries are emitted for that call
+- THEN zero WARN-level log entries are emitted for that call
 - AND no additional audit entry is appended for that call

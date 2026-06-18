@@ -4,11 +4,23 @@
 
 Makes repository persistence errors observable in the apply hot path. Every call to `BoardRepo.SaveGroup`, `BoardRepo.SaveTask`, `SessionRepo.Save`, and `SpawnGov.Release` that currently discards its error via `_ =` MUST instead emit a structured error log AND record an audit signal. Control flow is not changed. Design invariant D1.2 is not violated further after this change lands.
 
+## Severity-by-failure-class principle
+
+Log severity follows the **failure class**, not the layer:
+
+| Failure class | Examples | Severity |
+|---|---|---|
+| Persistence / data loss risk | `BoardRepo.SaveGroup`, `BoardRepo.SaveTask`, `SessionRepo.Save` | **ERROR** |
+| Resource release / no data loss | `SpawnGov.Release` | **WARN** |
+| Domain-transition (soft; state already advanced) | `RecordOutcome`, `group.Fail`, `group.Complete`, `task.Complete`, `MarkRunning`, `task.Release` | **WARN** (see app-layer-transition-errors spec) |
+
+Persistence errors (Save calls) are logged at ERROR because a failed save risks data loss or state divergence. `SpawnGov.Release` is logged at WARN because the resource-release failure has no data-loss consequence — the token is simply leaked until the next process restart or governor reset.
+
 ## ADDED Requirements
 
 ### Requirement: Structured error log on repo Save failure
 
-When any repo-save call (`BoardRepo.SaveGroup`, `BoardRepo.SaveTask`, `SessionRepo.Save`, `SpawnGov.Release`) returns a non-nil error, the application layer MUST emit exactly one structured error-level log entry containing all of the following fields:
+When any repo-save or resource-release call (`BoardRepo.SaveGroup`, `BoardRepo.SaveTask`, `SessionRepo.Save`, `SpawnGov.Release`) returns a non-nil error, the application layer MUST emit exactly one structured log entry containing all of the following fields:
 
 | Field | Contract |
 |---|---|
@@ -16,7 +28,7 @@ When any repo-save call (`BoardRepo.SaveGroup`, `BoardRepo.SaveTask`, `SessionRe
 | Identity field | At minimum one of: `change_id`, `group_id`, or `task_id` — whichever is in scope at that call site |
 | `error` | The error value returned by the call |
 
-The log entry MUST be at ERROR severity. It MUST be emitted even though the caller continues normally.
+Severity follows the failure class (see table above): Save calls (`BoardRepo.SaveGroup`, `BoardRepo.SaveTask`, `SessionRepo.Save`) MUST be at **ERROR** severity. `SpawnGov.Release` MUST be at **WARN** severity. The log entry MUST be emitted even though the caller continues normally.
 
 #### Scenario: BoardRepo.SaveGroup failure — log is emitted
 
@@ -42,7 +54,7 @@ The log entry MUST be at ERROR severity. It MUST be emitted even though the call
 - GIVEN `SpawnGov.Release` is called at the end of an apply task
 - AND `SpawnGov.Release` returns a non-nil error
 - WHEN the handler reaches that call site
-- THEN exactly one ERROR-level log entry is emitted with the operation name and available identity
+- THEN exactly one WARN-level log entry is emitted with the operation name and available identity
 - AND the handler does NOT abort or return early
 
 ### Requirement: Audit signal on repo Save failure
