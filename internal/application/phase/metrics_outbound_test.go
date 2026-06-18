@@ -41,7 +41,7 @@ func newHarnessWithMetrics(t *testing.T) (*harness, *obs.Metrics) {
 func rebuildServiceWithMetrics(t *testing.T, h *harness, m *obs.Metrics) *appphase.Service {
 	t.Helper()
 
-	idGen := shared_idgen_for_harness(t)
+	idGen := sharedIDGenForHarness(t)
 	return appphase.New(appphase.Deps{
 		ChangeRepo:  h.changeRepo,
 		PhaseRepo:   h.phaseRepo,
@@ -166,14 +166,14 @@ func mustEnvelopeWithArtifacts(t *testing.T, pt phase.PhaseType) []byte {
 
 // These are thin wrappers over discipline constructors used by newHarness.
 // newHarness in service_test.go is unexported (lowercase) and typed via *harness;
-// we share the same test binary so shared_idgen_for_harness below is not needed
+// we share the same test binary so sharedIDGenForHarness below is not needed
 // if we reuse newHarness directly. Keeping the helpers for clarity.
 func disciplineValidator() *discipline.Validator { return discipline.NewValidator() }
 func disciplineIronLaw() *discipline.IronLawChecker { return discipline.NewIronLawChecker() }
 func disciplinePrompts() *discipline.PromptBuilder  { return discipline.NewPromptBuilder() }
 
-// shared_idgen_for_harness returns a fresh fixed ID generator.
-func shared_idgen_for_harness(t *testing.T) shared.IDGenerator {
+// sharedIDGenForHarness returns a fresh fixed ID generator.
+func sharedIDGenForHarness(t *testing.T) shared.IDGenerator {
 	t.Helper()
 	return shared.FixedIDGenerator([]string{
 		"01ARZ3NDEKTSV4RRFFQ69G5P01",

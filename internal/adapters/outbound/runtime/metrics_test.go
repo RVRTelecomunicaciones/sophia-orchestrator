@@ -38,7 +38,7 @@ func TestMetrics_RuntimeCallsTotal_SuccessIncrements(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(successReceipt(t, []byte("hi"), nil, 0))
+		_, _ = w.Write(successReceipt(t, []byte("hi"), nil, 0))
 	}))
 	t.Cleanup(srv.Close)
 
