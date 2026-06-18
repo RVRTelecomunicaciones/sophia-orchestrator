@@ -71,7 +71,7 @@ No stale directory to delete.
 4. **Enum mapping `constrain → allow_with_constraints`** — NON-GOAL; no producer
    emits a non-`allow` decision today (identity map). Add only when govcore emits
    non-allow.
-5. **govcore module-path mismatch** — `github.com/russellcxl/agent-governance-core`
+5. **govcore module-path mismatch** — `github.com/RVRTelecomunicaciones/agent-governance-core`
    vs the `RVRTelecomunicaciones` remote blocks a cross-module `go.mod require`;
    the contract test resolves via `go.work` + the `ECOSYSTEM_REPO_TOKEN`-gated
    `contract` CI job. Ecosystem cleanup, govcore-owned.

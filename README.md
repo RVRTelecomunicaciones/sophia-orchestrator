@@ -10,7 +10,7 @@ Drives an SDD Change through 9 canonical phases (`init → explore → proposal 
 
 ## What it does NOT do
 
-- Decide policy → [`agent-governance-core`](https://github.com/russellcxl/agent-governance-core).
+- Decide policy → [`agent-governance-core`](https://github.com/RVRTelecomunicaciones/agent-governance-core).
 - Store knowledge → [`sophia-memory-engine`](https://github.com/sophia-engine/memory-engine).
 - Execute side effects → [`sophia-runtime-adapters`](https://github.com/sophia-ecosystem/runtime-adapters).
 - Call LLMs directly → that lives inside the OpenCode subprocess we dispatch.
@@ -57,7 +57,7 @@ make test-chaos         # crash + manual resume
 
 | Service | Role | Repo |
 |---|---|---|
-| `agent-governance-core` | Policy / approval / routing | [russellcxl/agent-governance-core](https://github.com/russellcxl/agent-governance-core) |
+| `agent-governance-core` | Policy / approval / routing | [RVRTelecomunicaciones/agent-governance-core](https://github.com/RVRTelecomunicaciones/agent-governance-core) |
 | `sophia-memory-engine` | Episodic / semantic memory | [sophia-engine/memory-engine](https://github.com/sophia-engine/memory-engine) |
 | `sophia-runtime-adapters` | Side-effect execution + Phase 2 coordination primitives | [sophia-ecosystem/runtime-adapters](https://github.com/sophia-ecosystem/runtime-adapters) |
 | `sophia-orchestator` | **(this repo)** SDD workflow coordinator | this |

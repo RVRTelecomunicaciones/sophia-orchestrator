@@ -70,7 +70,7 @@ wire-checksum enforcement. GAP A was therefore reframed from "build facade" to
 - The `contract` CI job depends on the `ECOSYSTEM_REPO_TOKEN` secret AND on
   govcore main carrying the `govhttptest` seam. A cross-repo merge-order exists:
   the govcore seam (PR #10) must land BEFORE the orch contract job can pass.
-- govcore's module path (`github.com/russellcxl/agent-governance-core`) does not
+- govcore's module path (`github.com/RVRTelecomunicaciones/agent-governance-core`) does not
   match its remote (`RVRTelecomunicaciones`), blocking a `go.mod require`; the
   test resolves the dependency via `go.work` + the public `govhttptest` seam only.
 
@@ -93,7 +93,7 @@ wire-checksum enforcement. GAP A was therefore reframed from "build facade" to
    for post-hoc operator review. (Verify SUGGESTION 2.)
 4. **Enum mapping `constrain → allow_with_constraints`** — NON-GOAL; add only
    when govcore starts emitting non-`allow` decisions.
-5. **govcore module-path vs remote mismatch** — `github.com/russellcxl/agent-governance-core`
+5. **govcore module-path vs remote mismatch** — `github.com/RVRTelecomunicaciones/agent-governance-core`
    vs the `RVRTelecomunicaciones` remote blocks cross-module `go.mod require`.
    Ecosystem cleanup, govcore-owned. The contract test works around it via
    `go.work` + the `ECOSYSTEM_REPO_TOKEN`-gated `contract` CI job.

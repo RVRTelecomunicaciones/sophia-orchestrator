@@ -98,7 +98,7 @@ provide.
 The locked test resolves the cross-module dependency via `go.work`
 (`use ./agent-governance-core`) plus the public `govhttptest` seam — NOT a
 `go.mod require` — because govcore's module path
-(`github.com/russellcxl/agent-governance-core`) does not match its remote
+(`github.com/RVRTelecomunicaciones/agent-governance-core`) does not match its remote
 (`RVRTelecomunicaciones`), so any `require` fails VCS lookup. CI runs the test in
 a dedicated `contract` job that checks out both repos, runs `go work init`, and
 builds with `-tags=contract`; the standard `integration` job does NOT compile the
