@@ -584,7 +584,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	cidLocal := c.ID()
 	pidLocal := p.ID()
 	if err := s.d.SpawnGov.Release(ctx); err != nil {
-		slog.Error("runPhase: SpawnGov.Release discarded",
+		slog.WarnContext(ctx, "runPhase: SpawnGov.Release discarded",
 			slog.String("phase_id", pidLocal.String()),
 			slog.String("error", err.Error()),
 		)
@@ -593,7 +593,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 	if dispatchErr != nil {
 		if err := sess.RecordOutcome(nil, -1, s.d.Clock.Now()); err != nil {
-			slog.Error("runPhase: session.RecordOutcome discarded",
+			slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
 				slog.String("phase_id", pidLocal.String()),
 				slog.String("error", err.Error()),
 			)
@@ -622,7 +622,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	env, err := s.d.Validator.Validate(envRaw, p.Type())
 	if err != nil {
 		if recErr := sess.RecordOutcome(nil, result.ExitCode, s.d.Clock.Now()); recErr != nil {
-			slog.Error("runPhase: session.RecordOutcome discarded",
+			slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
 				slog.String("phase_id", pidLocal.String()),
 				slog.String("error", recErr.Error()),
 			)
@@ -648,7 +648,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	if p.Type() == phase.PhaseTasks {
 		if mismatch := detectTasksSchemaMismatch(env.Data); mismatch != "" {
 			if recErr := sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now()); recErr != nil {
-				slog.Error("runPhase: session.RecordOutcome discarded",
+				slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
 					slog.String("phase_id", pidLocal.String()),
 					slog.String("error", recErr.Error()),
 				)
@@ -669,7 +669,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 	}
 
 	if recErr := sess.RecordOutcome(env, result.ExitCode, s.d.Clock.Now()); recErr != nil {
-		slog.Error("runPhase: session.RecordOutcome discarded",
+		slog.WarnContext(ctx, "runPhase: session.RecordOutcome discarded",
 			slog.String("phase_id", pidLocal.String()),
 			slog.String("error", recErr.Error()),
 		)

@@ -299,7 +299,7 @@ func (s *RunService) runImplementWithRetry(ctx context.Context, c *change.Change
 		}
 		ok, quotaErr := s.dispatchImplement(ctx, c, p, b, group, task, implSession, priorContext)
 		if err := s.d.SpawnGov.Release(ctx); err != nil {
-			slog.Default().ErrorContext(ctx, "apply: SpawnGov.Release failed; continuing",
+			slog.Default().WarnContext(ctx, "apply: SpawnGov.Release failed; continuing",
 				"operation", "SpawnGov.Release", "task_id", task.ID().String(), "error", err)
 			s.appendAuditErr(ctx, c.ID(), p.ID(), "SpawnGov.Release", err)
 		}
