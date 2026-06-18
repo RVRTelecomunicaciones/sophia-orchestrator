@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -103,14 +104,70 @@ func (r *BoardRepo) FindBoardByPhaseID(ctx context.Context, phaseID ids.PhaseID)
 		}
 		return nil, wrapErr("BoardRepo.FindBoardByPhaseID", err)
 	}
-	boardID, _ := ids.ParseBoardID(bid)
-	pidParsed, _ := ids.ParsePhaseID(pid)
+	boardID, err := ids.ParseBoardID(bid)
+	if err != nil {
+		slog.Default().ErrorContext(ctx, "pg.BoardRepo: corrupt board_id in FindBoardByPhaseID",
+			"repo", "board_repo", "column", "id", "raw_id", bid, "error", err)
+		return nil, wrapErr("BoardRepo.FindBoardByPhaseID.parseBoard", err)
+	}
+	pidParsed, err := ids.ParsePhaseID(pid)
+	if err != nil {
+		slog.Default().ErrorContext(ctx, "pg.BoardRepo: corrupt phase_id in FindBoardByPhaseID",
+			"repo", "board_repo", "column", "phase_id", "raw_id", pid, "error", err)
+		return nil, wrapErr("BoardRepo.FindBoardByPhaseID.parsePhase", err)
+	}
 
 	groups, err := r.findGroupsByBoard(ctx, boardID)
 	if err != nil {
 		return nil, err
 	}
 	return apply.HydrateBoard(boardID, pidParsed, apply.BoardStatus(status), groups), nil
+}
+
+// scanGroupRow hydrates one apply.Group from a scannable row.
+// Returns a non-nil error when any ULID column fails to parse; the caller
+// (findGroupsByBoard) MUST skip that row and continue (scan-loop policy).
+func scanGroupRow(s scannable) (*apply.Group, error) {
+	var (
+		gid, bid, name, status string
+		deps                   []string
+		worktreePath, branch   string
+		buildStatus            string
+		buildAttempts          int
+	)
+	if err := s.Scan(&gid, &bid, &name, &deps, &status, &worktreePath, &branch,
+		&buildStatus, &buildAttempts); err != nil {
+		return nil, wrapErr("BoardRepo.scanGroup", err)
+	}
+	groupID, err := ids.ParseGroupID(gid)
+	if err != nil {
+		slog.Default().Error("pg.BoardRepo: corrupt group_id; skipping row",
+			"repo", "board_repo", "column", "id", "raw_id", gid, "error", err)
+		return nil, err
+	}
+	bidParsed, err := ids.ParseBoardID(bid)
+	if err != nil {
+		slog.Default().Error("pg.BoardRepo: corrupt board_id in group row; skipping row",
+			"repo", "board_repo", "column", "board_id", "raw_id", bid, "error", err)
+		return nil, err
+	}
+	depIDs := make([]ids.GroupID, 0, len(deps))
+	for _, d := range deps {
+		depID, depErr := ids.ParseGroupID(d)
+		if depErr != nil {
+			slog.Default().Error("pg.BoardRepo: corrupt depends_on entry in group row; skipping row",
+				"repo", "board_repo", "column", "depends_on", "raw_id", d, "error", depErr)
+			return nil, depErr
+		}
+		depIDs = append(depIDs, depID)
+	}
+	g := apply.HydrateGroup(
+		groupID, bidParsed, name, depIDs,
+		apply.GroupStatus(status),
+		worktreePath, branch,
+		apply.GroupBuildStatus(buildStatus), buildAttempts,
+	)
+	return g, nil
 }
 
 func (r *BoardRepo) findGroupsByBoard(ctx context.Context, boardID ids.BoardID) ([]*apply.Group, error) {
@@ -125,27 +182,14 @@ FROM groups WHERE board_id = $1`
 	defer rows.Close()
 	var out []*apply.Group
 	for rows.Next() {
-		var (
-			gid, bid, name, status string
-			deps                   []string
-			worktreePath, branch   string
-			buildStatus            string
-			buildAttempts          int
-		)
-		if err := rows.Scan(&gid, &bid, &name, &deps, &status, &worktreePath, &branch,
-			&buildStatus, &buildAttempts); err != nil {
-			return nil, wrapErr("BoardRepo.scanGroup", err)
-		}
-		groupID, _ := ids.ParseGroupID(gid)
-		bidParsed, _ := ids.ParseBoardID(bid)
-		depIDs := make([]ids.GroupID, 0, len(deps))
-		for _, d := range deps {
-			id, _ := ids.ParseGroupID(d)
-			depIDs = append(depIDs, id)
+		g, scanErr := scanGroupRow(rows)
+		if scanErr != nil {
+			// Scan-loop policy: skip corrupt rows; log was already emitted by scanGroupRow.
+			continue
 		}
 
 		// Hydrate tasks first so they can be attached to the group.
-		tasks, err := r.findTasksByGroup(ctx, groupID)
+		tasks, err := r.findTasksByGroup(ctx, g.ID())
 		if err != nil {
 			return nil, err
 		}
@@ -154,18 +198,6 @@ FROM groups WHERE board_id = $1`
 		// restored without replaying transitions. AddTask is not available once
 		// a group is beyond Pending, so we pass tasks to the board builder
 		// below via a small two-step that avoids the transition guard.
-		g := apply.HydrateGroup(
-			groupID, bidParsed, name, depIDs,
-			apply.GroupStatus(status),
-			worktreePath, branch,
-			apply.GroupBuildStatus(buildStatus), buildAttempts,
-		)
-
-		// Attach tasks: HydrateGroup does not receive tasks; we inject them via
-		// the board's AddGroup + the group's own task list. Because HydrateGroup
-		// produces a group in an arbitrary status, AddTask would reject non-Pending
-		// groups. We therefore inject tasks through the Board's HydrateBoard path
-		// where the full slice is passed directly.
 		//
 		// Workaround: re-hydrate via a helper that passes tasks through the
 		// group struct directly (groups are passed into HydrateBoard as-is).
@@ -182,6 +214,59 @@ FROM groups WHERE board_id = $1`
 	return out, rows.Err()
 }
 
+// scanTaskRow hydrates one apply.Task from a scannable row.
+// Returns a non-nil error when any ULID column fails to parse; the caller
+// (findTasksByGroup) MUST skip that row and continue (scan-loop policy).
+func scanTaskRow(s scannable) (*apply.Task, error) {
+	var (
+		tid, gid, description, status string
+		files                         []string
+		claimedBy                     *string
+		attempts                      int
+		envBytes                      []byte
+	)
+	if err := s.Scan(&tid, &gid, &description, &files, &status, &claimedBy, &attempts, &envBytes); err != nil {
+		return nil, wrapErr("BoardRepo.scanTask", err)
+	}
+	taskID, err := ids.ParseTaskID(tid)
+	if err != nil {
+		slog.Default().Error("pg.BoardRepo: corrupt task_id; skipping row",
+			"repo", "board_repo", "column", "id", "raw_id", tid, "error", err)
+		return nil, err
+	}
+	groupIDParsed, err := ids.ParseGroupID(gid)
+	if err != nil {
+		slog.Default().Error("pg.BoardRepo: corrupt group_id in task row; skipping row",
+			"repo", "board_repo", "column", "group_id", "raw_id", gid, "error", err)
+		return nil, err
+	}
+	var sid *ids.SessionID
+	if claimedBy != nil {
+		parsed, parseErr := ids.ParseSessionID(*claimedBy)
+		if parseErr != nil {
+			slog.Default().Error("pg.BoardRepo: corrupt claimed_by in task row; skipping row",
+				"repo", "board_repo", "column", "claimed_by", "raw_id", *claimedBy, "error", parseErr)
+			return nil, parseErr
+		}
+		sid = &parsed
+	}
+	var env *envelope.Envelope
+	if len(envBytes) > 0 {
+		var e envelope.Envelope
+		if jsonErr := json.Unmarshal(envBytes, &e); jsonErr == nil {
+			env = &e
+		}
+	}
+	t, err := apply.HydrateTask(
+		taskID, groupIDParsed, description, files,
+		apply.TaskStatus(status), sid, attempts, env,
+	)
+	if err != nil {
+		return nil, wrapErr("BoardRepo.hydrateTask", err)
+	}
+	return t, nil
+}
+
 func (r *BoardRepo) findTasksByGroup(ctx context.Context, groupID ids.GroupID) ([]*apply.Task, error) {
 	const q = `
 SELECT id, group_id, description, files_pattern, status, claimed_by, attempts, envelope
@@ -193,39 +278,10 @@ FROM tasks WHERE group_id = $1`
 	defer rows.Close()
 	var out []*apply.Task
 	for rows.Next() {
-		var (
-			tid, gid, description, status string
-			files                         []string
-			claimedBy                     *string
-			attempts                      int
-			envBytes                      []byte
-		)
-		if err := rows.Scan(&tid, &gid, &description, &files, &status, &claimedBy, &attempts, &envBytes); err != nil {
-			return nil, wrapErr("BoardRepo.scanTask", err)
-		}
-		taskID, _ := ids.ParseTaskID(tid)
-		groupIDParsed, _ := ids.ParseGroupID(gid)
-
-		var sid *ids.SessionID
-		if claimedBy != nil {
-			parsed, _ := ids.ParseSessionID(*claimedBy)
-			sid = &parsed
-		}
-
-		var env *envelope.Envelope
-		if len(envBytes) > 0 {
-			var e envelope.Envelope
-			if jsonErr := json.Unmarshal(envBytes, &e); jsonErr == nil {
-				env = &e
-			}
-		}
-
-		t, err := apply.HydrateTask(
-			taskID, groupIDParsed, description, files,
-			apply.TaskStatus(status), sid, attempts, env,
-		)
-		if err != nil {
-			return nil, wrapErr("BoardRepo.hydrateTask", err)
+		t, scanErr := scanTaskRow(rows)
+		if scanErr != nil {
+			// Scan-loop policy: skip corrupt rows; log was already emitted by scanTaskRow.
+			continue
 		}
 		out = append(out, t)
 	}
@@ -249,12 +305,27 @@ FROM tasks WHERE id = $1`
 		}
 		return nil, wrapErr("BoardRepo.FindTaskByID", err)
 	}
-	taskID, _ := ids.ParseTaskID(tid)
-	groupID, _ := ids.ParseGroupID(gid)
+	taskID, err := ids.ParseTaskID(tid)
+	if err != nil {
+		slog.Default().ErrorContext(ctx, "pg.BoardRepo: corrupt task_id in FindTaskByID",
+			"repo", "board_repo", "column", "id", "raw_id", tid, "error", err)
+		return nil, wrapErr("BoardRepo.FindTaskByID.parseTask", err)
+	}
+	groupID, err := ids.ParseGroupID(gid)
+	if err != nil {
+		slog.Default().ErrorContext(ctx, "pg.BoardRepo: corrupt group_id in FindTaskByID",
+			"repo", "board_repo", "column", "group_id", "raw_id", gid, "error", err)
+		return nil, wrapErr("BoardRepo.FindTaskByID.parseGroup", err)
+	}
 
 	var sid *ids.SessionID
 	if claimedBy != nil {
-		parsed, _ := ids.ParseSessionID(*claimedBy)
+		parsed, parseErr := ids.ParseSessionID(*claimedBy)
+		if parseErr != nil {
+			slog.Default().ErrorContext(ctx, "pg.BoardRepo: corrupt claimed_by in FindTaskByID",
+				"repo", "board_repo", "column", "claimed_by", "raw_id", *claimedBy, "error", parseErr)
+			return nil, wrapErr("BoardRepo.FindTaskByID.parseClaimedBy", parseErr)
+		}
 		sid = &parsed
 	}
 

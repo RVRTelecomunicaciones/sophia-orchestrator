@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -82,10 +83,20 @@ func scanWorktree(s scannable) (*worktree.Worktree, error) {
 		}
 		return nil, wrapErr("scanWorktree", err)
 	}
-	wid, _ := ids.ParseWorktreeID(idStr)
+	wid, err := ids.ParseWorktreeID(idStr)
+	if err != nil {
+		slog.Default().Error("pg.WorktreeRepo: corrupt worktree id; returning error",
+			"repo", "worktree_repo", "column", "id", "raw_id", idStr, "error", err)
+		return nil, wrapErr("scanWorktree.parseWorktreeID", err)
+	}
 	var sid *ids.SessionID
 	if sessionIDStr != nil {
-		v, _ := ids.ParseSessionID(*sessionIDStr)
+		v, parseErr := ids.ParseSessionID(*sessionIDStr)
+		if parseErr != nil {
+			slog.Default().Error("pg.WorktreeRepo: corrupt session_id in worktree row; returning error",
+				"repo", "worktree_repo", "column", "session_id", "raw_id", *sessionIDStr, "error", parseErr)
+			return nil, wrapErr("scanWorktree.parseSessionID", parseErr)
+		}
 		sid = &v
 	}
 	return worktree.Hydrate(
