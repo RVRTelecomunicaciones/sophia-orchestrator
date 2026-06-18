@@ -34,7 +34,7 @@ cannot check out govcore and will fail.
 
 ### Why `go.work`, not a `go.mod` require
 
-govcore's module path (`github.com/russellcxl/agent-governance-core`) does not
+govcore's module path (`github.com/RVRTelecomunicaciones/agent-governance-core`) does not
 match its remote (`RVRTelecomunicaciones/agent-governance-core`). A `go.mod`
 require would force a failing VCS lookup, so the cross-repo dependency is resolved
 via `go.work` (locally and in the `contract` job) instead. This mismatch is a

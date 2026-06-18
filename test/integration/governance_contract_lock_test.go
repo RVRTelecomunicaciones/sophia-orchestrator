@@ -25,7 +25,7 @@
 // `go test -tags=contract ./test/integration/...`.
 //
 // CROSS-REPO RESOLUTION: this test imports
-// github.com/russellcxl/agent-governance-core via the public govhttptest seam.
+// github.com/RVRTelecomunicaciones/agent-governance-core via the public govhttptest seam.
 // orch's production code never imports govcore. Resolution is provided ENTIRELY
 // by a go.work workspace `use ./agent-governance-core` directive — there is
 // intentionally NO require in orch's go.mod. govcore's module path has no public
@@ -44,7 +44,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	govhttptest "github.com/russellcxl/agent-governance-core/govhttptest"
+	govhttptest "github.com/RVRTelecomunicaciones/agent-governance-core/govhttptest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
