@@ -170,15 +170,20 @@ func scanGroupRow(s scannable) (*apply.Group, error) {
 	return g, nil
 }
 
-func (r *BoardRepo) findGroupsByBoard(ctx context.Context, boardID ids.BoardID) ([]*apply.Group, error) {
-	const q = `
-SELECT id, board_id, name, depends_on, status, worktree_path, branch_name,
-       build_status, build_attempts
-FROM groups WHERE board_id = $1`
-	rows, err := r.pool.Query(ctx, q, boardID.String())
-	if err != nil {
-		return nil, wrapErr("BoardRepo.findGroupsByBoard", err)
-	}
+// pgRows is the minimal interface the scan-loops need from pgx.Rows.
+// Extracting it allows the loop bodies to be tested with a fake without a live DB.
+type pgRows interface {
+	scannable
+	Next() bool
+	Close()
+	Err() error
+}
+
+// iterateGroupRows is the testable core of findGroupsByBoard. It consumes rows
+// from any pgRows source and applies the scan-loop skip policy: corrupt rows
+// (ULID parse errors) are skipped; valid rows have their tasks loaded via
+// taskFinder and are appended to the result.
+func iterateGroupRows(rows pgRows, taskFinder func(ids.GroupID) ([]*apply.Task, error)) ([]*apply.Group, error) {
 	defer rows.Close()
 	var out []*apply.Group
 	for rows.Next() {
@@ -188,30 +193,57 @@ FROM groups WHERE board_id = $1`
 			continue
 		}
 
-		// Hydrate tasks first so they can be attached to the group.
-		tasks, err := r.findTasksByGroup(ctx, g.ID())
+		tasks, err := taskFinder(g.ID())
 		if err != nil {
 			return nil, err
 		}
-
-		// Use HydrateGroup so all persisted fields (status, build state) are
-		// restored without replaying transitions. AddTask is not available once
-		// a group is beyond Pending, so we pass tasks to the board builder
-		// below via a small two-step that avoids the transition guard.
-		//
-		// Workaround: re-hydrate via a helper that passes tasks through the
-		// group struct directly (groups are passed into HydrateBoard as-is).
-		// The simplest approach that avoids reflection is to build a fresh group
-		// with all hydrated tasks and then apply HydrateGroup again — but that
-		// duplicates construction. Instead we expose the task list attachment via
-		// a package-level helper that is only callable by the persistence adapter.
 		for _, t := range tasks {
 			apply.AttachTaskToGroup(g, t)
 		}
-
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// iterateTaskRows is the testable core of findTasksByGroup. Corrupt rows are
+// skipped (scan-loop policy); valid rows are appended.
+func iterateTaskRows(rows pgRows) ([]*apply.Task, error) {
+	defer rows.Close()
+	var out []*apply.Task
+	for rows.Next() {
+		t, scanErr := scanTaskRow(rows)
+		if scanErr != nil {
+			// Scan-loop policy: skip corrupt rows; log was already emitted by scanTaskRow.
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (r *BoardRepo) findGroupsByBoard(ctx context.Context, boardID ids.BoardID) ([]*apply.Group, error) {
+	const q = `
+SELECT id, board_id, name, depends_on, status, worktree_path, branch_name,
+       build_status, build_attempts
+FROM groups WHERE board_id = $1`
+	rows, err := r.pool.Query(ctx, q, boardID.String())
+	if err != nil {
+		return nil, wrapErr("BoardRepo.findGroupsByBoard", err)
+	}
+	// Use HydrateGroup so all persisted fields (status, build state) are
+	// restored without replaying transitions. AddTask is not available once
+	// a group is beyond Pending, so we pass tasks to the board builder
+	// below via a small two-step that avoids the transition guard.
+	//
+	// Workaround: re-hydrate via a helper that passes tasks through the
+	// group struct directly (groups are passed into HydrateBoard as-is).
+	// The simplest approach that avoids reflection is to build a fresh group
+	// with all hydrated tasks and then apply HydrateGroup again — but that
+	// duplicates construction. Instead we expose the task list attachment via
+	// a package-level helper that is only callable by the persistence adapter.
+	return iterateGroupRows(rows, func(groupID ids.GroupID) ([]*apply.Task, error) {
+		return r.findTasksByGroup(ctx, groupID)
+	})
 }
 
 // scanTaskRow hydrates one apply.Task from a scannable row.
@@ -275,17 +307,7 @@ FROM tasks WHERE group_id = $1`
 	if err != nil {
 		return nil, wrapErr("BoardRepo.findTasksByGroup", err)
 	}
-	defer rows.Close()
-	var out []*apply.Task
-	for rows.Next() {
-		t, scanErr := scanTaskRow(rows)
-		if scanErr != nil {
-			// Scan-loop policy: skip corrupt rows; log was already emitted by scanTaskRow.
-			continue
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return iterateTaskRows(rows)
 }
 
 // FindTaskByID returns a Task by id, fully hydrated from the persisted row.
