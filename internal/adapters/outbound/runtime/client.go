@@ -44,6 +44,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/adapters/outbound/http_base"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -56,6 +57,8 @@ type Config struct {
 	Clock shared.Clock
 	// Entropy is the source of ULID randomness. Defaults to crypto/rand.
 	Entropy io.Reader
+	// Metrics is optional; when non-nil, Execute increments RuntimeCallsTotal.
+	Metrics *obs.Metrics
 }
 
 // DefaultConfig returns production defaults.
@@ -82,6 +85,7 @@ type Client struct {
 	http    *http_base.Client
 	clock   shared.Clock
 	entropy io.Reader
+	metrics *obs.Metrics // optional; nil ⇒ no-op recording
 }
 
 // New constructs a Client. Defaults Clock to shared.SystemClock and
@@ -99,7 +103,7 @@ func New(cfg Config) (*Client, error) {
 	if ent == nil {
 		ent = rand.Reader
 	}
-	return &Client{cfg: cfg, http: hc, clock: clk, entropy: ent}, nil
+	return &Client{cfg: cfg, http: hc, clock: clk, entropy: ent, metrics: cfg.Metrics}, nil
 }
 
 // --- request wire shape (matches runtime ExecutionRequest.MarshalJSON) ---
@@ -221,7 +225,13 @@ func (c *Client) Execute(ctx context.Context, req outbound.ExecutionRequest) (*o
 	}
 	var resp executionReceiptResponse
 	if err := c.http.PostJSON(ctx, "/api/v1/execute", wireReq, &resp); err != nil {
+		if c.metrics != nil {
+			c.metrics.RuntimeCallsTotal.WithLabelValues(req.Capability, "error").Inc()
+		}
 		return nil, fmt.Errorf("runtime Execute: %w", err)
+	}
+	if c.metrics != nil {
+		c.metrics.RuntimeCallsTotal.WithLabelValues(req.Capability, "ok").Inc()
 	}
 	// Map nested receipt → flat orch outbound.ExecutionReceipt.
 	var stdout, stderr []byte

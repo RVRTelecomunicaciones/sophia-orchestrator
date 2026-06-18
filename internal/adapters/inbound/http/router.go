@@ -103,7 +103,7 @@ func NewRouter(d Deps) chi.Router {
 		ch := handlers.NewChangesHandler(d.Changes, d.PhaseRepo, writeChangeErr, writeJSON)
 		ph := handlers.NewPhasesHandler(d.Phases, writePhaseErr, writeJSON)
 		ap := handlers.NewApplyHandler(d.Apply, writePhaseErr, writeJSON)
-		sh := handlers.NewSSEHandler(d.Events, d.EventStore, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen)
+		sh := handlers.NewSSEHandler(d.Events, d.EventStore, d.Phases, 5*time.Second, writePhaseErr, writeJSON, d.IDGen, d.Metrics)
 
 		// Change-scoped: create, list, get, abort, plus phase creation
 		// (phase doesn't yet exist when /run is invoked, so the parent
