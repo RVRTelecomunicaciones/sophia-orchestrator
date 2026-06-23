@@ -1356,7 +1356,7 @@ func (s *Service) fallbackToMemory(ctx context.Context, c *change.Change, p *pha
 	// Memory record content is opaque; if it happens to be the envelope
 	// JSON, the validator will accept it. Otherwise validation fails and
 	// the phase fails downstream.
-	return []byte("")
+	return []byte(rec.Content)
 }
 
 func (s *Service) advanceChange(ctx context.Context, c *change.Change, completed phase.PhaseType) {
