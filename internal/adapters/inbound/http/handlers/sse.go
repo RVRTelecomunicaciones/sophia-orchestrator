@@ -16,6 +16,7 @@ import (
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/ids"
 	domainphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/phase"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/infrastructure/obs"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
@@ -43,6 +44,7 @@ type SSEHandler struct {
 	writeErr  func(http.ResponseWriter, error)
 	writeJSON func(http.ResponseWriter, int, any)
 	idGen     shared.IDGenerator
+	metrics   *obs.Metrics // optional; nil ⇒ no-op recording
 }
 
 // NewSSEHandler constructs an SSEHandler. heartbeat ≤ 0 defaults to 5s.
@@ -50,8 +52,8 @@ type SSEHandler struct {
 // production, FixedIDGenerator in tests). phases MUST be a working
 // PhaseService for the terminal-phase short-circuit. store MUST be a
 // working EventStore so the handler can honour Last-Event-ID resume
-// (audit rojo #3 fix).
-func NewSSEHandler(stream inbound.EventStream, store outbound.EventStore, phases PhaseLookup, heartbeat time.Duration, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any), idGen shared.IDGenerator) *SSEHandler {
+// (audit rojo #3 fix). metrics is optional; pass nil to disable recording.
+func NewSSEHandler(stream inbound.EventStream, store outbound.EventStore, phases PhaseLookup, heartbeat time.Duration, writeErr func(http.ResponseWriter, error), writeJSON func(http.ResponseWriter, int, any), idGen shared.IDGenerator, metrics *obs.Metrics) *SSEHandler {
 	if heartbeat <= 0 {
 		heartbeat = 5 * time.Second
 	}
@@ -63,6 +65,7 @@ func NewSSEHandler(stream inbound.EventStream, store outbound.EventStore, phases
 		writeErr:  writeErr,
 		writeJSON: writeJSON,
 		idGen:     idGen,
+		metrics:   metrics,
 	}
 }
 
@@ -141,6 +144,12 @@ func (h *SSEHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
+
+	// Track open SSE connections.
+	if h.metrics != nil {
+		h.metrics.SSEConnectionsActive.Inc()
+		defer h.metrics.SSEConnectionsActive.Dec()
+	}
 
 	// Audit rojo #3 fix: replay events from the durable store since the
 	// client's Last-Event-ID (0 = full history). Failing here is fatal —

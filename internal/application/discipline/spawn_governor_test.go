@@ -114,7 +114,7 @@ func newSGForTest(t *testing.T, repo *fakeRepo) (*discipline.SpawnGovernor, *fak
 		WaitInterval: 50 * time.Millisecond,
 		MaxWait:      1 * time.Second,
 	}
-	sg, err := discipline.NewSpawnGovernor(repo, cfg, clk)
+	sg, err := discipline.NewSpawnGovernor(repo, cfg, clk, nil)
 	require.NoError(t, err)
 	w := &fakeWaiter{}
 	s := &fakeSleeper{}
@@ -177,7 +177,7 @@ func TestSpawnGovernor_Release(t *testing.T) {
 func TestSpawnGovernor_Release_RepoErrorPropagates(t *testing.T) {
 	repo := &errReleaseRepo{}
 	clk := shared.FixedClock(time.Now())
-	sg, err := discipline.NewSpawnGovernor(repo, discipline.DefaultConfig(), clk)
+	sg, err := discipline.NewSpawnGovernor(repo, discipline.DefaultConfig(), clk, nil)
 	require.NoError(t, err)
 	err = sg.Release(context.Background())
 	require.Error(t, err)
@@ -222,7 +222,7 @@ func TestSpawnGovernorConfig_Validate(t *testing.T) {
 func TestNewSpawnGovernor_RejectsBadConfig(t *testing.T) {
 	repo := &fakeRepo{}
 	clk := shared.FixedClock(time.Now())
-	_, err := discipline.NewSpawnGovernor(repo, discipline.SpawnGovernorConfig{Max: 0}, clk)
+	_, err := discipline.NewSpawnGovernor(repo, discipline.SpawnGovernorConfig{Max: 0}, clk, nil)
 	require.ErrorIs(t, err, discipline.ErrInvalidConfig)
 }
 
@@ -244,7 +244,7 @@ func TestRealWaiter_RespectsContextCancel(t *testing.T) {
 		WaitInterval: 50 * time.Millisecond,
 		MaxWait:      1 * time.Hour, // large; expect cancel-driven exit
 	}
-	sg, err := discipline.NewSpawnGovernor(repo, cfg, clk)
+	sg, err := discipline.NewSpawnGovernor(repo, cfg, clk, nil)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

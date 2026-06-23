@@ -559,7 +559,7 @@ func (s *RunService) runAllGroups(ctx context.Context, c *change.Change, p *phas
 			// Spawn-governor for the team-lead itself. BUG-26: retry
 			// on transient saturation via the shared helper before
 			// failing the entire group.
-			if err := acquireWithSaturationRetries(ctx, s.d.SpawnGov); err != nil {
+			if err := acquireWithSaturationRetries(ctx, s.d.SpawnGov, s.d.Metrics); err != nil {
 				dag.Signal(group.ID(), true, err)
 				resultsMu.Lock()
 				results[group.ID()] = groupOutcome{failed: true, err: err}

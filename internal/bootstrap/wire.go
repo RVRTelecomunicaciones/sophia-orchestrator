@@ -122,6 +122,13 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	reevalAuditRepo := pg.NewReevalAuditRepo(pool)
 	_ = boardRepo // used by ApplyService below
 
+	// Observability: Prometheus metrics. Constructed early so they can be
+	// injected into outbound HTTP clients and application services.
+	var metrics *obs.Metrics
+	if cfg.Obs.MetricsEnabled {
+		metrics = obs.NewMetrics()
+	}
+
 	// Outbound HTTP clients.
 	govClient, err := governance.New(governance.DefaultConfig(cfg.Governance.BaseURL, cfg.Governance.APIKey))
 	if err != nil {
@@ -139,7 +146,9 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("bootstrap: memory: %w", err)
 	}
-	rtClient, err := runtime.New(runtime.DefaultConfig(cfg.Runtime.BaseURL, cfg.Runtime.APIKey))
+	rtCfg := runtime.DefaultConfig(cfg.Runtime.BaseURL, cfg.Runtime.APIKey)
+	rtCfg.Metrics = metrics
+	rtClient, err := runtime.New(rtCfg)
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("bootstrap: runtime: %w", err)
@@ -206,17 +215,6 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	validator := discipline.NewValidator()
 	ironLaw := discipline.NewIronLawChecker()
 	prompts := discipline.NewPromptBuilder()
-	spawnGov, err := discipline.NewSpawnGovernor(spawnRepo, discipline.SpawnGovernorConfig{
-		Max:          cfg.Spawn.Max,
-		StaggerMin:   cfg.Spawn.StaggerMin,
-		StaggerMax:   cfg.Spawn.StaggerMax,
-		WaitInterval: cfg.Spawn.WaitInterval,
-		MaxWait:      cfg.Spawn.MaxWait,
-	}, clock)
-	if err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
-	}
 
 	// SkillMatcher wiring (M3: PGSkillMatcher handles context-aware filtering:
 	// scope, applies_when, structural, risk_level sort).
@@ -232,11 +230,16 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 			WithReevalAudit(reevalAuditRepo, idGen)
 	}
 
-	// Observability: Prometheus metrics + OTEL traces. Constructed BEFORE
-	// application services so metrics can be injected into them.
-	var metrics *obs.Metrics
-	if cfg.Obs.MetricsEnabled {
-		metrics = obs.NewMetrics()
+	spawnGov, err := discipline.NewSpawnGovernor(spawnRepo, discipline.SpawnGovernorConfig{
+		Max:          cfg.Spawn.Max,
+		StaggerMin:   cfg.Spawn.StaggerMin,
+		StaggerMax:   cfg.Spawn.StaggerMax,
+		WaitInterval: cfg.Spawn.WaitInterval,
+		MaxWait:      cfg.Spawn.MaxWait,
+	}, clock, metrics)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("bootstrap: spawn governor: %w", err)
 	}
 
 	// Application services. EventStore is required for durable SSE

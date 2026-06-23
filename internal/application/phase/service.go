@@ -396,6 +396,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		PhaseType:       p.Type(),
 		TaskDescription: in.TaskDescription,
 	})
+	s.recordGovernanceCall("evaluate_phase", err)
 	if err != nil {
 		s.failPhase(ctx, p, fmt.Sprintf("governance error: %v", err))
 		return
@@ -573,6 +574,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		s.failPhase(ctx, p, fmt.Sprintf("spawn governor: %v", err))
 		return
 	}
+	dispatchStart := s.d.Clock.Now()
 	result, dispatchErr := s.d.Dispatcher.Dispatch(ctx, outbound.DispatchRequest{
 		Prompt:       prompt,
 		WorktreePath: ".",
@@ -580,6 +582,7 @@ func (s *Service) runAsync(ctx context.Context, c *change.Change, p *phase.Phase
 		EnvelopeOut:  "stdout-fenced-json",
 		PhaseType:    string(p.Type()),
 	})
+	s.recordDispatcherCall(string(s.d.Dispatcher.Provider()), float64(s.d.Clock.Now().Sub(dispatchStart).Milliseconds()), dispatchErr)
 	// cidLocal and pidLocal are used by appendAudit for soft-error events.
 	cidLocal := c.ID()
 	pidLocal := p.ID()
@@ -1262,6 +1265,7 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change, phase
 		Query:     c.Name(),
 		MaxTokens: 4000,
 	})
+	s.recordMemoryCall("build_context", err)
 
 	var episodes []discipline.EpisodeRef
 	var rules []discipline.RuleRef
@@ -1295,17 +1299,21 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change, phase
 	// SearchQuery.Types IS honoured by ME search (search.go:67).
 	// Limit:3 matches V4.1 §12.2 "digests top-3".
 	var digests []discipline.ChangeDigestRef
-	if sr, srErr := s.d.Memory.Search(ctx, outbound.SearchQuery{
-		Query:  c.Name(),
-		Scope:  scope,
-		Types:  []string{"semantic"},
-		Limit:  3,
-	}); srErr == nil && sr != nil {
-		for _, r := range sr.Results {
-			digests = append(digests, discipline.ChangeDigestRef{
-				ChangeID: r.ID,
-				Content:  r.Snippet,
-			})
+	{
+		sr, srErr := s.d.Memory.Search(ctx, outbound.SearchQuery{
+			Query:  c.Name(),
+			Scope:  scope,
+			Types:  []string{"semantic"},
+			Limit:  3,
+		})
+		s.recordMemoryCall("search", srErr)
+		if srErr == nil && sr != nil {
+			for _, r := range sr.Results {
+				digests = append(digests, discipline.ChangeDigestRef{
+					ChangeID: r.ID,
+					Content:  r.Snippet,
+				})
+			}
 		}
 	}
 
@@ -1313,10 +1321,14 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change, phase
 	// Topic key is "sdd/<changeName>/init" per INIT persister (dual_persister.go:66).
 	// Nil-safe: absent or unmarshal-failed → structuralCtx = nil (fail-open).
 	var structuralCtx *structural.StructuralContext
-	if rec, recErr := s.d.Memory.GetByTopicKey(ctx, scope, "sdd/"+c.Name()+"/init"); recErr == nil && rec != nil && rec.Content != "" {
-		var sc structural.StructuralContext
-		if jsonErr := parseJSON(rec.Content, &sc); jsonErr == nil {
-			structuralCtx = &sc
+	{
+		rec, recErr := s.d.Memory.GetByTopicKey(ctx, scope, "sdd/"+c.Name()+"/init")
+		s.recordMemoryCall("get_by_topic_key", recErr)
+		if recErr == nil && rec != nil && rec.Content != "" {
+			var sc structural.StructuralContext
+			if jsonErr := parseJSON(rec.Content, &sc); jsonErr == nil {
+				structuralCtx = &sc
+			}
 		}
 	}
 
@@ -1350,6 +1362,7 @@ func (s *Service) buildPriorContext(ctx context.Context, c *change.Change, phase
 func (s *Service) fallbackToMemory(ctx context.Context, c *change.Change, p *phase.Phase) []byte {
 	topic := fmt.Sprintf("sdd/%s/%s", c.Name(), p.Type())
 	rec, err := s.d.Memory.Get(ctx, topic)
+	s.recordMemoryCall("get", err)
 	if err != nil || rec == nil {
 		return nil
 	}
