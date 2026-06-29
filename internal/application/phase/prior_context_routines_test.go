@@ -135,8 +135,9 @@ func TestBuildPriorContext_GraphStats_AllPhases(t *testing.T) {
 		GraphSummary:  gs,
 	}
 
-	// Run 5 distinct phase types through the dispatcher path (INIT short-circuits
-	// before prompt dispatch so it is excluded; coverage uses EXPLORE through APPLY).
+	// Run 6 distinct phase transitions through the dispatcher path (INIT
+	// short-circuits before prompt dispatch so it is excluded; coverage spans
+	// EXPLORE through APPLY, including the mandatory spec→design link).
 	cases := []struct {
 		current phase.PhaseType
 		next    phase.PhaseType
@@ -144,6 +145,7 @@ func TestBuildPriorContext_GraphStats_AllPhases(t *testing.T) {
 		{phase.PhaseInit, phase.PhaseExplore},
 		{phase.PhaseExplore, phase.PhaseProposal},
 		{phase.PhaseProposal, phase.PhaseSpec},
+		{phase.PhaseSpec, phase.PhaseDesign},
 		{phase.PhaseDesign, phase.PhaseTasks},
 		{phase.PhaseTasks, phase.PhaseApply},
 	}
