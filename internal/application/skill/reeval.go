@@ -316,6 +316,20 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 	// Mint the revert run ID before any item ID (parent-first allocation).
 	revRunID := r.idgen.NewID()
 
+	// Idempotency guard: if a revert run already names run.ID as its
+	// reverts_run_id, this revert has already been processed. Skip all metric
+	// emission — status walks are still idempotent via the from==to no-op guard.
+	skipMetrics := false
+	if r.audit != nil && r.metricsPatcher != nil {
+		exists, err := r.audit.ExistsByRevertsRunID(ctx, run.ID)
+		if err != nil {
+			return result, fmt.Errorf("skill.Reevaluator.revertRun: idempotency check: %w", err)
+		}
+		if exists {
+			skipMetrics = true
+		}
+	}
+
 	for _, item := range run.Items {
 		to := domainskill.Status(item.PriorStatus) // where we want it back
 
@@ -380,6 +394,16 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 			PriorStatus: from.String(), // inverse: prior of the revert IS where it started
 			NewStatus:   to.String(),
 		})
+
+		// Emit RollbackDelta=1 for this reverted skill (attribution: only skills
+		// that were actually reverted, i.e. row.Reverted==true, receive the delta).
+		if !skipMetrics && r.metricsPatcher != nil {
+			if pErr := r.metricsPatcher.PatchMetrics(ctx, item.SkillID,
+				inbound.MetricsDelta{RollbackDelta: 1}); pErr != nil {
+				return result, fmt.Errorf("skill.Reevaluator.revertRun: patch metrics %s: %w",
+					item.SkillID, pErr)
+			}
+		}
 	}
 
 	// Record the revert as its own immutable audit run.

@@ -440,6 +440,177 @@ func TestRevert_DoubleRevertIsIdempotent(t *testing.T) {
 	assert.Equal(t, domainskill.StatusActive, patcher.status[testSkillID1], "status unchanged")
 }
 
+// WU-3 — rollback metric emission + idempotency.
+
+// TestRevertRun_EmitsDeltaPerRevertedSkill verifies that revertRun emits
+// RollbackDelta=1 for each skill whose walk completed (row.Reverted==true).
+// SPEC: "Multiple reverted skills each receive exactly one delta."
+func TestRevertRun_EmitsDeltaPerRevertedSkill(t *testing.T) {
+	testSkillID3 := "01ARZ3NDEKTSV4RRFFQ69G5US3"
+	audit := newFakeAuditRepo()
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID:   "RUN0000000000000000000001",
+		Mode: "apply",
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+			{ID: "ITEM2", SkillID: testSkillID3, PriorStatus: "validated", NewStatus: "active"},
+		},
+	}))
+
+	mp := &fakeMetricsPatcher{}
+	patcher := newChainPatcher(map[string]domainskill.Status{
+		testSkillID1: domainskill.StatusDeprecated,
+		testSkillID3: domainskill.StatusActive,
+	})
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{
+			"RUN0000000000000000000002",
+			"ITEM000000000000000000002",
+			"ITEM000000000000000000003",
+		}),
+		mp,
+	)
+
+	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.True(t, result[0].Reverted)
+	assert.True(t, result[1].Reverted)
+
+	require.Len(t, mp.calls, 2, "exactly 2 PatchMetrics calls expected (one per reverted skill)")
+	skillIDs := []string{mp.calls[0].skillID, mp.calls[1].skillID}
+	assert.ElementsMatch(t, []string{testSkillID1, testSkillID3}, skillIDs)
+	for _, c := range mp.calls {
+		assert.Equal(t, 1, c.delta.RollbackDelta, "RollbackDelta must be 1 per reverted skill")
+	}
+}
+
+// TestRevertRun_SkipsNonRevertedSkills verifies that only skills where
+// row.Reverted==true emit a RollbackDelta; skills that were skipped (e.g. no
+// legal path) do not.
+// SPEC: "Non-reverted skills in the same change are not incremented."
+func TestRevertRun_SkipsNonRevertedSkills(t *testing.T) {
+	testSkillID3 := "01ARZ3NDEKTSV4RRFFQ69G5US3"
+	audit := newFakeAuditRepo()
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID:   "RUN0000000000000000000001",
+		Mode: "apply",
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+			// testSkillID3 has no legal path (archived is terminal).
+			{ID: "ITEM2", SkillID: testSkillID3, PriorStatus: "active", NewStatus: "archived"},
+		},
+	}))
+
+	mp := &fakeMetricsPatcher{}
+	patcher := newChainPatcher(map[string]domainskill.Status{
+		testSkillID1: domainskill.StatusDeprecated,
+		testSkillID3: domainskill.StatusArchived, // no path back → skipped
+	})
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{
+			"RUN0000000000000000000002",
+			"ITEM000000000000000000002",
+		}),
+		mp,
+	)
+
+	_, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+
+	require.Len(t, mp.calls, 1, "only the reverted skill should emit a delta")
+	assert.Equal(t, testSkillID1, mp.calls[0].skillID)
+	assert.Equal(t, 1, mp.calls[0].delta.RollbackDelta)
+}
+
+// TestRevertRun_Idempotency_SameRunIDSkipsEmission verifies that when
+// ExistsByRevertsRunID returns true for run.ID, PatchMetrics is NOT called,
+// but status walks still execute (the from==to no-op guard makes them no-ops).
+// SPEC: "Repeated execution of the same run is a no-op for metric emission."
+func TestRevertRun_Idempotency_SameRunIDSkipsEmission(t *testing.T) {
+	audit := newFakeAuditRepo()
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID:   "RUN0000000000000000000001",
+		Mode: "apply",
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+		},
+	}))
+
+	// Signal that this revert run has already been processed.
+	audit.existsByRevertsRunID["RUN0000000000000000000001"] = true
+
+	mp := &fakeMetricsPatcher{}
+	patcher := newChainPatcher(map[string]domainskill.Status{
+		testSkillID1: domainskill.StatusDeprecated,
+	})
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{
+			"RUN0000000000000000000002",
+			"ITEM000000000000000000002",
+		}),
+		mp,
+	)
+
+	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+
+	// Metric emission must be skipped entirely.
+	assert.Len(t, mp.calls, 0, "idempotency: PatchMetrics must not be called on re-run")
+
+	// Status walks still executed (the from==to no-op guard skips them, but the
+	// loop ran — meaning the result row was produced).
+	assert.True(t, result[0].Reverted, "status walk must still run on idempotent re-run")
+}
+
+// TestRevertRun_DifferentRunIDs_EmitIndependently verifies that two distinct
+// revert runs are treated independently: if R1 already exists but R2 is new,
+// running R2 emits its deltas normally.
+// SPEC: "Different revert runs are independent."
+func TestRevertRun_DifferentRunIDs_EmitIndependently(t *testing.T) {
+	audit := newFakeAuditRepo()
+	// The apply run to revert.
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID:   "RUN0000000000000000000002",
+		Mode: "apply",
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+		},
+	}))
+
+	// R1 already processed; R2 (the one we're about to revert) is new.
+	audit.existsByRevertsRunID["RUN0000000000000000000001"] = true
+	// R2 not in the map → ExistsByRevertsRunID returns false.
+
+	mp := &fakeMetricsPatcher{}
+	patcher := newChainPatcher(map[string]domainskill.Status{
+		testSkillID1: domainskill.StatusDeprecated,
+	})
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{
+			"RUN0000000000000000000003",
+			"ITEM000000000000000000003",
+		}),
+		mp,
+	)
+
+	_, err := r.Revert(context.Background(), "RUN0000000000000000000002")
+	require.NoError(t, err)
+
+	require.Len(t, mp.calls, 1, "new revert run must emit its delta normally")
+	assert.Equal(t, testSkillID1, mp.calls[0].skillID)
+	assert.Equal(t, 1, mp.calls[0].delta.RollbackDelta)
+}
+
 // MEDIUM-1 RED — a mid-chain walk failure is auditable (stranded state visible).
 
 // TestRevert_PartialWalkFailureIsAudited verifies that when a multi-hop walk fails
