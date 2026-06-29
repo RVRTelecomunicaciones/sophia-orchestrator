@@ -1,148 +1,203 @@
 # Architecture — sophia-orchestator
 
 > Grounded in the code (read directly + an AST knowledge graph of the 372 Go
-> files), **not** in the openspec artifacts — those drift from the code. Every
-> non-obvious claim cites `file:line`.
+> files), **not** in the openspec artifacts — those drift. Every non-obvious
+> claim cites `file:line`. Diagrams are [Mermaid](https://mermaid.js.org) and
+> render inline on GitHub.
 
 ## 1. What this service is
 
-`sophia-orchestator` is the **deterministic SDD workflow coordinator** of the
-Sophia ecosystem. Its single responsibility is to drive a *Change* through the
-canonical SDD phases, emitting a **validated Envelope** at every transition and
-persisting it **before** any caller-visible state change.
+The **deterministic SDD workflow coordinator** of the Sophia ecosystem. It drives
+a *Change* through the canonical SDD phases, emitting a **validated Envelope** at
+every transition and persisting it **before** any caller-visible state change.
 
-It does NOT decide policy (→ agent-governance-core), does NOT store knowledge
-(→ sophia-memory-engine), does NOT execute side effects (→ sophia-runtime-adapters),
-and is NOT the LLM (the model runs inside the dispatcher: opencode subprocess or
-the host MCP bridge).
+It does NOT decide policy (→ agent-governance-core), store knowledge
+(→ sophia-memory-engine), execute side effects (→ sophia-runtime-adapters), or
+run the LLM (that lives in the dispatcher: opencode subprocess or host MCP bridge).
 
 ## 2. Hexagonal layering
 
 Dependencies point inward only; the AST graph shows **zero import cycles**.
 
-```
-cmd/sophia-orchestator/main.go        process entrypoint (serve | reeval)
-        │
-internal/bootstrap/wire.go            composition root — Wire() assembles everything
-        │
-internal/adapters/inbound/http/       HTTP boundary (chi router + handlers)
-        │
-internal/application/                 use-case services (orchestration logic)
-        │
-internal/domain/                      aggregates + value objects + the phase state machine
-        │
-internal/ports/{inbound,outbound}     interfaces
-        │
-internal/adapters/outbound/           pg · governance · memory · runtime · dispatcher · ...
-internal/infrastructure/              config · observability (slog/otel)
+```mermaid
+flowchart TD
+    CMD["cmd/sophia-orchestator/main.go<br/>(serve · reeval)"]
+    WIRE["internal/bootstrap/wire.go<br/><b>Wire() — composition root</b>"]
+    IN["inbound adapter<br/>internal/adapters/inbound/http<br/>(chi router + handlers)"]
+    APP["application services<br/>internal/application/*<br/>(phase · apply · skill · change · discipline)"]
+    DOM["domain<br/>internal/domain/*<br/>(aggregates · phase state machine)"]
+    PORTS["ports<br/>internal/ports/{inbound,outbound}"]
+    OUT["outbound adapters<br/>pg · governance · memory · runtime · dispatcher"]
+
+    CMD --> WIRE --> IN --> APP --> DOM
+    APP --> PORTS --> OUT
+    OUT -.implements.-> PORTS
 ```
 
-Core abstractions (graph god nodes, by edge degree): `Wire()` (DI bridge, highest
-betweenness), `newRunService()` (apply engine), `NewPromptBuilder()` (per-phase
-prompt assembly), `ParseChangeID()`/`ParsePhaseID()` (ULID parsing, ubiquitous).
+Graph god-nodes (by edge degree): `Wire()` (DI bridge, highest betweenness),
+`newRunService()` (apply engine), `NewPromptBuilder()` (prompt assembly),
+`ParseChangeID()`/`ParsePhaseID()` (ULID parsing).
 
 ## 3. The SDD phase lifecycle
 
-The 9 canonical phase types and their **strictly sequential** order are defined
-in `internal/domain/phase/type.go` (`PhaseType` enum + `NextValid()`):
+Phase types + their **strictly sequential** order live in
+`internal/domain/phase/type.go` (`PhaseType` + `NextValid()`):
 
+```mermaid
+flowchart LR
+    init --> explore --> proposal --> spec --> design --> tasks --> apply --> verify --> archive
+    classDef both fill:#cde,stroke:#36c;
+    class spec,design both;
 ```
-init → explore → proposal → spec → design → tasks → apply → verify → archive
-```
 
-`NextValid()` is the single source of transition truth — the run handler
-(`internal/application/phase/service.go`, `isNextValidTransition`) delegates to
-it, so there is no separate hardcoded map to drift.
-
-> **spec → design are SEQUENTIAL** (design depends on / reads spec), matching the
-> reference `cortex-ia` and the broader SDD field (Kiro, BMAD, SPARC, OpenSpec).
-> Earlier the domain modeled them as either/or (`proposal → {spec, design}`,
-> both → tasks), which made a single `currentPhase` change run only ONE of them.
-> Fixed so both always run.
-
-Per-phase confidence gates (`type.go` `ConfidenceThreshold`): explore 0.5;
-proposal/design/apply 0.7; spec/tasks 0.8; verify/archive 0.9. Below threshold
-the phase becomes `done_with_concerns` or `blocked`.
+`NextValid()` is the single source of transition truth (`isNextValidTransition`
+in `internal/application/phase/service.go` delegates to it). **`spec` and
+`design` both run, sequentially** (design reads spec) — matching the reference
+`cortex-ia` and the SDD field. Confidence gates (`type.go ConfidenceThreshold`):
+explore 0.5 · proposal/design/apply 0.7 · spec/tasks 0.8 · verify/archive 0.9.
 
 ## 4. Phase execution flow
 
-`POST /api/v1/changes/{id}/phases/{phase}/run` → `PhasesHandler.Run`
-(`internal/adapters/inbound/http/handlers/phases.go`) → `phase.Service` runs
-(`internal/application/phase/service.go`):
+`POST /api/v1/changes/{id}/phases/{phase}/run` → `PhasesHandler.Run` → `phase.Service`:
 
-1. Validate the transition against `currentPhase.NextValid()`; reject otherwise
-   (`ErrInvalidTransition`). Only one phase runs per change at a time
-   (`ErrPhaseRunning`).
-2. Create + **persist** the Phase row as `pending` BEFORE the work goroutine
-   (`service.go:314,349`).
-3. Governance decision (`s.d.Governance.EvaluatePhase`, `service.go:394`) →
-   allow / allow_with_constraints / require_approval (HARD-GATE) / deny.
-4. Dispatch to the LLM (`s.d.Dispatcher.Dispatch`, `service.go:578`); the agent
-   returns an Envelope (JSON).
-5. Validate the Envelope (schema + confidence threshold).
-6. Complete + **persist the Phase before returning** — `service.go:711` carries
-   the literal invariant comment *"Iron Law #1: persisted-before-return"*
-   (`PhaseRepo.Save`, `service.go:716`), then `advanceChange` moves
-   `currentPhase` forward.
+```mermaid
+sequenceDiagram
+    actor C as Client / CLI
+    participant H as PhasesHandler
+    participant S as phase.Service
+    participant G as Governance (port)
+    participant D as Dispatcher (opencode/MCP)
+    participant R as PhaseRepo (pg)
 
-Long-running phases respond `202 Accepted` + SSE (`/api/v1/phases/{id}/events`),
-never on the request thread.
+    C->>H: POST .../phases/{phase}/run
+    H->>S: Run()
+    S->>S: validate NextValid(currentPhase); ErrPhaseRunning if busy
+    S->>R: Save Phase = pending  (before goroutine · L349)
+    H-->>C: 200 {phase_id, events_url}  (SSE)
+    Note over S: async goroutine
+    S->>G: EvaluatePhase()  (L394) → allow / gate / deny
+    S->>D: Dispatch()  (L578) → Envelope JSON
+    S->>S: validate Envelope (schema + confidence)
+    S->>R: Save Phase = done  ("Iron Law #1: persisted-before-return" · L711-716)
+    S->>S: advanceChange() → currentPhase moves on
+```
 
-## 5. The apply phase
+## 5. Skills — per-phase injection + lifecycle
+
+Sophia is **LLM-first with an additive, optional skill layer**. Every phase
+injects the skills that match it; if none match (or skills are disabled) the
+prompt is byte-identical to the no-skills baseline — **fail-soft**
+(`service.go:484-485`).
+
+```mermaid
+flowchart TD
+    PH["phase.Service.runPhase<br/>(per phase p.Type)"] --> PC["buildPriorContext()"]
+    PH --> Q["Skills.SkillsForContext<br/>SkillQuery{Phase, ProjectID, StructuralContext}<br/>service.go:488"]
+    Q --> M{"SkillMatcher<br/>(PG adapter)"}
+    M -->|"matched skills"| PCS["PriorContext.Skills"]
+    M -->|"nil / off / empty / err"| FS["no skills → prompt byte-identical<br/>(LLM-first fallback)"]
+    PCS --> RENDER["PriorContext.Render → phase prompt"]
+    FS --> RENDER
+    RENDER --> D["Dispatcher → LLM"]
+```
+
+- Injection point moved from the generic prompt builder into `PriorContext`
+  (`prompt_builder.go:90`, D-M3-5/PR3a). Apply additionally hydrates skills for
+  its implement agents (`apply/teamlead.go hydrateSkills`). Toggle:
+  `SOPHIA_SKILLS_ENABLED` (default on).
+- Matcher port: `discipline.SkillMatcher.SkillsForContext`
+  (`internal/application/discipline/skill_matcher.go`); PG adapter
+  `internal/adapters/outbound/pg/skill_matcher.go`; wired in `wire.go`.
+- A `Skill` (`internal/domain/skill`) is a **persisted entity** declaring the
+  `phases []PhaseType` it applies to (≥1) + `AppliesWhen` (JSONB conditions).
+
+**The differentiator** — vs the static `SKILL.md` files of cortex-ia / gentle-ai,
+Sophia's skills are *governed entities with a lifecycle*:
+
+```mermaid
+stateDiagram-v2
+    [*] --> candidate
+    candidate --> validated: promoter (success/tests thresholds met)
+    validated --> active: in use
+    active --> blocked: demoter (failure ratio · rollback_count ≥ 1 · deprecated_api_hits)
+    candidate --> blocked: rollback / deprecated
+    blocked --> [*]
+```
+
+The promoter/demoter (`internal/application/skill` + sophia-memory-engine
+consolidation) score skills on usage metrics; a skill whose change was reverted
+(`reeval --revert`) is demoted/blocked. Learning loop runs against memory-engine
+(PATCH /skills metrics). So: **LLM-first → skills-when-they-match → skills-that-learn.**
+
+## 6. The apply phase
 
 The most complex phase, centered on `newRunService()`
-(`internal/application/apply`). It reads the tasks artifact, builds a **board**
-of **groups**, creates per-group **git worktrees** (via `shell.exec` to
-runtime-adapters), and dispatches **implement agents** in parallel, bounded by
-the **Spawn Governor** (`internal/application/discipline/spawn_governor.go`).
+(`internal/application/apply`). Inspired by cortex-ia's apply-board pattern:
 
-Concurrency caps are real values in `internal/infrastructure/config/config.go`
-(`SpawnConfig`, ~line 418): global `Max: 6` slots (raised from 4 so the ceiling
-exceeds the apply demand of `MaxParallelGroups × MaxParallelImplementsPerGroup`
-= 2×2 = 4), stagger 200–500 ms, wait interval 250 ms, max wait 30 s. Overridable
-via `SOPHIA_SPAWN_MAX`.
+```mermaid
+flowchart TD
+    T["tasks artifact"] --> B["Board"]
+    B --> G1["Group: foundation"]
+    B --> G2["Group: implementation"]
+    B --> G3["Group: testing / ..."]
+    subgraph SG["Spawn Governor (config.go:418)"]
+      direction LR
+      CAP["global Max: 6 slots · apply demand 2×2=4<br/>stagger 200-500ms · maxWait 30s"]
+    end
+    G1 & G2 & G3 --> WT["git worktree per group<br/>(shell.exec → runtime-adapters)"]
+    WT --> IMP["implement agents (parallel)<br/>dispatched via SG → LLM"]
+    SG -.bounds.-> IMP
+```
 
-## 6. The dispatcher (pluggable LLM)
+Caps are real values in `internal/infrastructure/config/config.go` (`SpawnConfig`,
+~L418): `Max: 6`, stagger 200-500 ms, wait 250 ms, max wait 30 s. Override via
+`SOPHIA_SPAWN_MAX`.
+
+## 7. The dispatcher (pluggable LLM)
 
 Selected in `internal/bootstrap/wire.go` by `cfg.Dispatcher.Provider`:
-`opencode` (in-container subprocess, default) or `mcp` (host-side MCP bridge
+`opencode` (in-container subprocess, default) or `mcp` (host-side bridge
 `sophia-agent-mcp` over Streamable HTTP at `host.docker.internal:7775`). Other
-adapters (ollama, aider) live under `internal/adapters/outbound/dispatcher/`.
+adapters (ollama, aider) under `internal/adapters/outbound/dispatcher/`.
 
-## 7. Outbound ports (cross-service)
+## 8. Outbound ports (cross-service)
 
-| Port | Service | Purpose |
-|------|---------|---------|
-| Governance | agent-governance-core (`SOPHIA_GOVERNANCE_URL`) | per-phase policy/approval |
-| Memory | sophia-memory-engine (`SOPHIA_MEMORY_URL`) | persist SDD artifacts; learning loop (skill metrics via PATCH /skills) |
-| Runtime | sophia-runtime-adapters (`SOPHIA_RUNTIME_URL`) | execute shell/git/side effects |
-| Dispatcher | opencode / MCP bridge | the per-phase LLM |
+```mermaid
+flowchart LR
+    O["sophia-orchestator"]
+    O -->|"per-phase policy / approval"| GOV["agent-governance-core<br/>SOPHIA_GOVERNANCE_URL"]
+    O -->|"persist artifacts · skill metrics"| MEM["sophia-memory-engine<br/>SOPHIA_MEMORY_URL"]
+    O -->|"shell / git / side effects"| RT["sophia-runtime-adapters<br/>SOPHIA_RUNTIME_URL"]
+    O -->|"per-phase LLM"| DISP["dispatcher: opencode | MCP bridge"]
+    O --> PG[("PostgreSQL")]
+```
 
-## 8. Persistence
+## 9. Persistence
 
 PostgreSQL via `pgx/v5` (`internal/adapters/outbound/pg`). Migrations under
 `migrations/postgres/` (golang-migrate), auto-applied on boot when
-`SOPHIA_DB_MIGRATE_ON_BOOT=true`. Tables: changes, phases (with `envelope`,
-`concerns`), apply board (groups/tasks/sessions/worktrees), audit, spawn
-governor state, skills + skill_usage, outbox, reeval_runs, phase_concerns.
+`SOPHIA_DB_MIGRATE_ON_BOOT=true`. Tables: changes, phases (`envelope`,
+`concerns`), apply board (groups/tasks/sessions/worktrees), audit, spawn governor
+state, skills + skill_usage, outbox, reeval_runs, phase_concerns.
 
-## 9. Key invariants
+## 10. Key invariants
 
-- **D1.2 / Iron Law #1** — every phase persists its Envelope BEFORE any
-  caller-visible state change (`service.go:711`).
+- **D1.2 / Iron Law #1** — persist the Envelope BEFORE any caller-visible state
+  change (`service.go:711`).
 - **5 Iron Laws** — enforced at phase boundaries (`internal/application/discipline`).
 - **Determinism** — no direct `time.Now()` / `ulid.Make()` in domain/application;
   injectable `Clock` + `IDGenerator`.
-- **Boundary discipline** — orchestrator never decides policy, stores memory, or
-  executes side effects directly; always via an outbound port.
+- **Boundary discipline** — never decide policy, store memory, or execute side
+  effects directly; always via an outbound port.
 
-## 10. Where to start reading
+## 11. Where to start reading
 
-1. `cmd/sophia-orchestator/main.go` — entrypoint.
-2. `internal/bootstrap/wire.go` — how everything is wired (`Wire()`).
-3. `internal/domain/phase/type.go` — the phase state machine.
-4. `internal/application/phase/service.go` — the phase execution flow.
-5. `internal/application/apply` — the apply board + spawn governor.
+1. **This file (`ARCHITECTURE.md`) — code-grounded source of truth.**
+2. `cmd/sophia-orchestator/main.go` — entrypoint.
+3. `internal/bootstrap/wire.go` — `Wire()` composition.
+4. `internal/domain/phase/type.go` — phase state machine.
+5. `internal/application/phase/service.go` — phase execution + skill injection.
+6. `internal/application/apply` — apply board + spawn governor.
 
-> Tip: a queryable AST knowledge graph lives in `graphify-out/` — run
-> `graphify query "<question>"` to navigate the code structure.
+> A queryable AST knowledge graph lives in `graphify-out/` —
+> `graphify query "<question>"` to navigate the code.
