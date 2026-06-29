@@ -1,7 +1,8 @@
 // Package phase contains the Phase aggregate, PhaseType enum, PhaseStatus
 // enum, and state machine. PhaseType is a closed enum of the 9 canonical
-// SDD phases. NextValid encodes the canonical lifecycle. ConfidenceThreshold
-// returns the gating threshold per phase per spec § 1.4.
+// SDD phases. NextValid encodes the canonical strictly-sequential lifecycle
+// (init→explore→proposal→spec→design→tasks→apply→verify→archive).
+// ConfidenceThreshold returns the gating threshold per phase per spec § 1.4.
 package phase
 
 // PhaseType is the closed set of SDD phase types. See spec § 1.1.
@@ -39,8 +40,9 @@ func (p PhaseType) IsValid() bool {
 }
 
 // NextValid returns the set of phase types that may follow p in the canonical
-// SDD lifecycle. For terminal phases (archive) it returns nil. Note that spec
-// and design are concurrent: from proposal both are valid next phases.
+// SDD lifecycle. For terminal phases (archive) it returns nil. The lifecycle
+// is strictly sequential: proposal→spec→design→tasks. Design depends on spec
+// (design is HOW, spec is WHAT); both must run in order before tasks.
 func (p PhaseType) NextValid() []PhaseType {
 	switch p {
 	case PhaseInit:
@@ -48,8 +50,10 @@ func (p PhaseType) NextValid() []PhaseType {
 	case PhaseExplore:
 		return []PhaseType{PhaseProposal}
 	case PhaseProposal:
-		return []PhaseType{PhaseSpec, PhaseDesign}
-	case PhaseSpec, PhaseDesign:
+		return []PhaseType{PhaseSpec}
+	case PhaseSpec:
+		return []PhaseType{PhaseDesign}
+	case PhaseDesign:
 		return []PhaseType{PhaseTasks}
 	case PhaseTasks:
 		return []PhaseType{PhaseApply}

@@ -1015,8 +1015,9 @@ func TestRun_AllPhases_RoleAndActionMappings(t *testing.T) {
 	}{
 		{"init->explore", phase.PhaseInit, phase.PhaseExplore, 0.6, session.RoleSDDExplore},
 		{"explore->proposal", phase.PhaseExplore, phase.PhaseProposal, 0.8, session.RoleSDDProposal},
-		{"proposal->design", phase.PhaseProposal, phase.PhaseDesign, 0.8, session.RoleSDDDesign},
-		{"spec->tasks", phase.PhaseSpec, phase.PhaseTasks, 0.85, session.RoleSDDTasks},
+		{"proposal->spec", phase.PhaseProposal, phase.PhaseSpec, 0.8, session.RoleSDDSpec},
+		{"spec->design", phase.PhaseSpec, phase.PhaseDesign, 0.8, session.RoleSDDDesign},
+		{"design->tasks", phase.PhaseDesign, phase.PhaseTasks, 0.85, session.RoleSDDTasks},
 		{"tasks->apply", phase.PhaseTasks, phase.PhaseApply, 0.85, session.RoleTeamLead},
 		{"apply->verify", phase.PhaseApply, phase.PhaseVerify, 0.95, session.RoleSDDVerify},
 		{"verify->archive", phase.PhaseVerify, phase.PhaseArchive, 0.95, session.RoleSDDArchive},
@@ -1130,10 +1131,10 @@ func mustTasksEnvelopeGrouped(t *testing.T) []byte {
 func TestRun_TasksPhase_FlatTasksArray_SchemaMismatch(t *testing.T) {
 	h := newHarness(t)
 	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
-	// Advance change to PhaseTasks-ready state.
+	// Advance change to PhaseTasks-ready state (sequential: design precedes tasks).
 	h.changeRepo.byID[cid.String()] = domainchange.Hydrate(
 		cid, "feat-x", "proj",
-		domainchange.StatusActive, phase.PhaseSpec,
+		domainchange.StatusActive, phase.PhaseDesign,
 		domainchange.ArtifactStoreMemoryEngine, "main",
 		time.Now(), time.Now(),
 	)
@@ -1168,7 +1169,7 @@ func TestRun_TasksPhase_GroupedSchema_Passes(t *testing.T) {
 	cid, _ := ids.ParseChangeID("01ARZ3NDEKTSV4RRFFQ69G5C01")
 	h.changeRepo.byID[cid.String()] = domainchange.Hydrate(
 		cid, "feat-x", "proj",
-		domainchange.StatusActive, phase.PhaseSpec,
+		domainchange.StatusActive, phase.PhaseDesign,
 		domainchange.ArtifactStoreMemoryEngine, "main",
 		time.Now(), time.Now(),
 	)

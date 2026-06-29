@@ -23,13 +23,16 @@ func TestPhaseType_NextValid_Init(t *testing.T) {
 	require.Equal(t, []phase.PhaseType{phase.PhaseExplore}, phase.PhaseInit.NextValid())
 }
 
-func TestPhaseType_NextValid_ProposalSplitsToSpecAndDesign(t *testing.T) {
+func TestPhaseType_NextValid_ProposalLeadsToSpecOnly(t *testing.T) {
 	got := phase.PhaseProposal.NextValid()
-	require.ElementsMatch(t, []phase.PhaseType{phase.PhaseSpec, phase.PhaseDesign}, got)
+	require.Equal(t, []phase.PhaseType{phase.PhaseSpec}, got)
 }
 
-func TestPhaseType_NextValid_SpecAndDesignBothLeadToTasks(t *testing.T) {
-	require.Equal(t, []phase.PhaseType{phase.PhaseTasks}, phase.PhaseSpec.NextValid())
+func TestPhaseType_NextValid_SpecLeadsToDesign(t *testing.T) {
+	require.Equal(t, []phase.PhaseType{phase.PhaseDesign}, phase.PhaseSpec.NextValid())
+}
+
+func TestPhaseType_NextValid_DesignLeadsToTasks(t *testing.T) {
 	require.Equal(t, []phase.PhaseType{phase.PhaseTasks}, phase.PhaseDesign.NextValid())
 }
 

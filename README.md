@@ -2,7 +2,7 @@
 
 Deterministic coordinator of the Sophia SDD (Spec-Driven Development) workflow.
 
-> **Status:** V1 in development. See [`docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`](docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md) for the authoritative V1 design.
+> **Status:** V1 in development. For how it actually works, read **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — a code-grounded reference (the `docs/` and `openspec/` artifacts capture original intent but drift from the code; the code is the source of truth).
 
 ## What it does
 
@@ -26,7 +26,13 @@ make build
 
 ## Architecture
 
-Hexagonal / clean. Eight bounded contexts: Change, Phase, Apply, AgentDispatch, Worktree, Artifact, Discipline, Audit. See [`docs/architecture.md`](docs/architecture.md).
+Hexagonal / clean, **zero import cycles**. The canonical phase order is strictly
+sequential — `init → explore → proposal → spec → design → tasks → apply → verify
+→ archive` — where **spec and design both run** (design reads spec). Bounded
+contexts: Change, Phase, Apply, AgentDispatch, Worktree, Artifact, Discipline, Audit.
+
+See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — code-grounded, with `file:line`
+citations and an AST knowledge graph (`graphify-out/`, query with `graphify query "..."`).
 
 ## Stack
 
@@ -46,8 +52,8 @@ make test-chaos         # crash + manual resume
 
 ## Where to start reading
 
-1. [`docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`](docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md) — V1 design (authoritative).
-2. [`docs/superpowers/plans/2026-05-03-sophia-orchestator-v1.md`](docs/superpowers/plans/2026-05-03-sophia-orchestator-v1.md) — V1 implementation plan (~90 tasks, 13 milestones).
+1. **[`ARCHITECTURE.md`](ARCHITECTURE.md) — code-grounded architecture (source of truth).**
+2. [`docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md`](docs/superpowers/specs/2026-05-03-sophia-orchestator-design.md) — original V1 design intent (may drift from code).
 3. [`CLAUDE.md`](CLAUDE.md) — for AI agents working in this repo.
 4. [`AGENTS.md`](AGENTS.md) — quickstart + conventions.
 5. [`docs/rules.md`](docs/rules.md) — R1..R12.
