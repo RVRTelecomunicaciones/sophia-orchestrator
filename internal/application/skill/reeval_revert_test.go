@@ -12,6 +12,7 @@ import (
 	skillapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/skill"
 	domainskill "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -62,6 +63,57 @@ func (f *fakeAuditRepo) ExistsByRevertsRunID(_ context.Context, originalRunID st
 		return false, f.existsByRevertsRunIDErr
 	}
 	return f.existsByRevertsRunID[originalRunID], nil
+}
+
+// fakeMetricsPatcher captures PatchMetrics calls for assertion.
+type fakeMetricsPatcher struct {
+	calls []metricsCall
+	err   error
+}
+
+type metricsCall struct {
+	skillID string
+	delta   inbound.MetricsDelta
+}
+
+func (f *fakeMetricsPatcher) PatchMetrics(_ context.Context, skillID string, delta inbound.MetricsDelta) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, metricsCall{skillID: skillID, delta: delta})
+	return nil
+}
+
+// TestReevaluator_RevertRun_NilMetricsPatcher verifies that when a Reevaluator
+// is built WITHOUT a MetricsPatcher (dry-run constructor path), revertRun
+// completes without panic and makes no PatchMetrics calls.
+//
+// WU-2 RED: compiles only after MetricsPatcher interface + Reevaluator field exist.
+func TestReevaluator_RevertRun_NilMetricsPatcher(t *testing.T) {
+	audit := newFakeAuditRepo()
+	require.NoError(t, audit.Save(context.Background(), outbound.ReevalRun{
+		ID:   "RUN0000000000000000000001",
+		Mode: "apply",
+		Items: []outbound.ReevalRunItem{
+			{ID: "ITEM1", SkillID: testSkillID1, PriorStatus: "active", NewStatus: "deprecated"},
+		},
+	}))
+
+	patcher := newChainPatcher(map[string]domainskill.Status{
+		testSkillID1: domainskill.StatusDeprecated,
+	})
+	// NewReevaluatorWithAudit without a MetricsPatcher — nil patcher must not panic.
+	r := skillapp.NewReevaluatorWithAudit(
+		staticEvidence{}, patcher, audit,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
+		shared.FixedIDGenerator([]string{"RUN0000000000000000000002", "ITEM000000000000000000002"}),
+		nil, // nil MetricsPatcher: emission must be skipped without panic
+	)
+
+	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.True(t, result[0].Reverted, "revert must succeed without a MetricsPatcher")
 }
 
 // chainPatcher tracks current status per skill and enforces the real
@@ -128,7 +180,7 @@ func TestApply_PersistsAuditRunOnConfirm(t *testing.T) {
 
 	r := skillapp.NewReevaluatorWithAudit(
 		staticEvidence{rows: []skillapp.Evidence{ev(testSkillID1, domainskill.StatusActive, 0.333, 3)}},
-		patcher, audit, clk, idgen,
+		patcher, audit, clk, idgen, nil,
 	)
 
 	report, err := r.Apply(context.Background(), true)
@@ -156,6 +208,7 @@ func TestApply_NoConfirmRecordsNoAudit(t *testing.T) {
 		audit,
 		fixedClockAt(time.Now()),
 		shared.FixedIDGenerator([]string{"X"}),
+		nil,
 	)
 
 	_, err := r.Apply(context.Background(), false)
@@ -185,7 +238,7 @@ func TestRevert_ReversesToPriorStatusMultiHop(t *testing.T) {
 
 	r := skillapp.NewReevaluatorWithAudit(
 		staticEvidence{}, patcher, audit,
-		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)), idgen,
+		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)), idgen, nil,
 	)
 
 	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
@@ -215,6 +268,7 @@ func TestRevert_WalksMultiHopChain(t *testing.T) {
 		staticEvidence{}, patcher, audit,
 		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
 		shared.FixedIDGenerator([]string{"RUN0000000000000000000002", "ITEM000000000000000000002"}),
+		nil,
 	)
 
 	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
@@ -254,6 +308,7 @@ func TestRevert_SkipsWhenNoLegalPath(t *testing.T) {
 		staticEvidence{}, patcher, audit,
 		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
 		shared.FixedIDGenerator([]string{"RUN0000000000000000000002"}),
+		nil,
 	)
 
 	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")
@@ -284,6 +339,7 @@ func TestRevert_IsItselfAudited(t *testing.T) {
 	r := skillapp.NewReevaluatorWithAudit(
 		staticEvidence{}, patcher, audit, clk,
 		shared.FixedIDGenerator([]string{"RUN0000000000000000000002", "ITEM000000000000000000002"}),
+		nil,
 	)
 
 	_, err := r.Revert(context.Background(), "RUN0000000000000000000001")
@@ -307,6 +363,7 @@ func TestRevert_UnknownRunIDErrors(t *testing.T) {
 	r := skillapp.NewReevaluatorWithAudit(
 		staticEvidence{}, newChainPatcher(nil), audit,
 		fixedClockAt(time.Now()), shared.FixedIDGenerator([]string{"X"}),
+		nil,
 	)
 	_, err := r.Revert(context.Background(), "RUNDOESNOTEXIST0000000001")
 	assert.True(t, errors.Is(err, outbound.ErrNotFound))
@@ -328,6 +385,7 @@ func TestRevertLast_UsesLatestRun(t *testing.T) {
 		staticEvidence{}, patcher, audit,
 		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
 		shared.FixedIDGenerator([]string{"RUN0000000000000000000002", "ITEM000000000000000000002"}),
+		nil,
 	)
 
 	result, err := r.RevertLast(context.Background())
@@ -359,6 +417,7 @@ func TestRevert_DoubleRevertIsIdempotent(t *testing.T) {
 			"RUN0000000000000000000002", "ITEM000000000000000000002",
 			"RUN0000000000000000000003", "ITEM000000000000000000003",
 		}),
+		nil,
 	)
 
 	// First revert: deprecated → active via the legal chain.
@@ -405,6 +464,7 @@ func TestRevert_PartialWalkFailureIsAudited(t *testing.T) {
 		staticEvidence{}, patcher, audit,
 		fixedClockAt(time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC)),
 		shared.FixedIDGenerator([]string{"RUN0000000000000000000002", "ITEM000000000000000000002"}),
+		nil,
 	)
 
 	result, err := r.Revert(context.Background(), "RUN0000000000000000000001")

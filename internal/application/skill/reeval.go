@@ -7,6 +7,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	domainskill "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -57,6 +58,13 @@ type StatusPatcher interface {
 	PatchStatus(ctx context.Context, skillID, status, reason string) error
 }
 
+// MetricsPatcher increments a skill's additive metric counters.
+// Satisfied by *Service.PatchMetrics — no new type required.
+// Used by revertRun to emit RollbackDelta=1 per reverted skill.
+type MetricsPatcher interface {
+	PatchMetrics(ctx context.Context, skillID string, delta inbound.MetricsDelta) error
+}
+
 // StatusReader reads a skill's live current lifecycle status. Revert uses it to
 // compute the revert path from where the skill ACTUALLY sits now (idempotency and
 // drift-correctness), not from the status recorded at apply time. It is satisfied
@@ -99,12 +107,13 @@ type ReevalRow struct {
 // leaves them nil for the dry-run-only path (and the existing call sites), while
 // NewReevaluatorWithAudit wires them for the audited apply/revert path.
 type Reevaluator struct {
-	evidence EvidenceProvider
-	patcher  StatusPatcher
-	reader   StatusReader // optional; set when patcher also reads live status
-	audit    outbound.ReevalAuditRepository
-	clock    shared.Clock
-	idgen    shared.IDGenerator
+	evidence       EvidenceProvider
+	patcher        StatusPatcher
+	reader         StatusReader // optional; set when patcher also reads live status
+	audit          outbound.ReevalAuditRepository
+	metricsPatcher MetricsPatcher // optional; nil on the dry-run constructor path
+	clock          shared.Clock
+	idgen          shared.IDGenerator
 }
 
 // NewReevaluator constructs a Reevaluator without audit persistence. Apply still
@@ -117,21 +126,25 @@ func NewReevaluator(evidence EvidenceProvider, patcher StatusPatcher) *Reevaluat
 
 // NewReevaluatorWithAudit constructs a Reevaluator with audit persistence so
 // Apply records a revertible snapshot and Revert/RevertLast become available.
+// The metricsPatcher parameter is optional (pass nil on the dry-run-only path);
+// when non-nil, revertRun emits RollbackDelta=1 per reverted skill.
 func NewReevaluatorWithAudit(
 	evidence EvidenceProvider,
 	patcher StatusPatcher,
 	audit outbound.ReevalAuditRepository,
 	clock shared.Clock,
 	idgen shared.IDGenerator,
+	metricsPatcher MetricsPatcher,
 ) *Reevaluator {
 	reader, _ := patcher.(StatusReader)
 	return &Reevaluator{
-		evidence: evidence,
-		patcher:  patcher,
-		reader:   reader,
-		audit:    audit,
-		clock:    clock,
-		idgen:    idgen,
+		evidence:       evidence,
+		patcher:        patcher,
+		reader:         reader,
+		audit:          audit,
+		metricsPatcher: metricsPatcher,
+		clock:          clock,
+		idgen:          idgen,
 	}
 }
 

@@ -68,11 +68,12 @@ func (p *RepoEvidenceProvider) Rows(ctx context.Context) ([]Evidence, error) {
 // Verify RepoEvidenceProvider satisfies the EvidenceProvider contract.
 var _ EvidenceProvider = (*RepoEvidenceProvider)(nil)
 
-// Verify *Service satisfies both the patcher and the live-status reader contracts
-// so Reevaluator() wires an idempotent, drift-correct revert path.
+// Verify *Service satisfies the patcher, live-status reader, and metrics patcher
+// contracts so Reevaluator() wires an idempotent, drift-correct revert path.
 var (
-	_ StatusPatcher = (*Service)(nil)
-	_ StatusReader  = (*Service)(nil)
+	_ StatusPatcher  = (*Service)(nil)
+	_ StatusReader   = (*Service)(nil)
+	_ MetricsPatcher = (*Service)(nil)
 )
 
 // Reevaluator builds a Reevaluator wired to this Service's repositories. Evidence
@@ -86,7 +87,7 @@ var (
 func (s *Service) Reevaluator() *Reevaluator {
 	provider := NewRepoEvidenceProvider(s.skillRepo, s.skillUsageRepo)
 	if s.reevalAudit != nil && s.idGen != nil {
-		return NewReevaluatorWithAudit(provider, s, s.reevalAudit, s.clock, s.idGen)
+		return NewReevaluatorWithAudit(provider, s, s.reevalAudit, s.clock, s.idGen, s)
 	}
 	return NewReevaluator(provider, s)
 }
