@@ -125,9 +125,29 @@ stateDiagram-v2
 ```
 
 The promoter/demoter (`internal/application/skill` + sophia-memory-engine
-consolidation) score skills on usage metrics; a skill whose change was reverted
-(`reeval --revert`) is demoted/blocked. Learning loop runs against memory-engine
-(PATCH /skills metrics). So: **LLM-first → skills-when-they-match → skills-that-learn.**
+consolidation) score skills on **usage metrics** — `SuccessCount`, `FailureCount`,
+`TestsPassedCount`, `AvgRetryReduction`, `RollbackCount`, `DeprecatedAPIHits`
+(`internal/domain/skill/lifecycle.go:142-147`) — and walk the lifecycle via the
+allowed transition map (`service.go:26-30`). A skill whose change was reverted
+(`reeval --revert`) is demoted/blocked. The learning loop runs against
+memory-engine (PATCH /skills metrics).
+
+### Why it works (the value proposition)
+
+This is the heuristic core: **`AvgRetryReduction`** — derived from
+`SUM(tasks.attempts)` across the changes a skill was used in
+(`internal/application/skill/reeval_provider.go`) — measures whether a skill
+actually makes the LLM need *fewer retries* to produce a valid envelope. Skills
+that demonstrably reduce retries get promoted; skills that correlate with
+failures/rollbacks get demoted. So the system **learns which guidance works** and
+keeps only that. Net effect: injecting curated, research-backed prompting
+techniques per phase makes the *same* (even weaker) model materially more
+reliable — Sophia turns a "dumber" LLM into a more capable one, and gets better
+over time. **LLM-first → skills-when-they-match → skills-that-learn.**
+
+> Retrieval today is **lexical FTS** (pg_trgm + tsvector) in sophia-memory-engine;
+> vector/semantic embeddings are a noop stub + empty scaffold (Phase 2, not yet
+> implemented) — documented here to avoid implying a capability the code lacks.
 
 ## 6. The apply phase
 
