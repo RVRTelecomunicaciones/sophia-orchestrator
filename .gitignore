@@ -37,3 +37,6 @@ testdata/tmp/
 
 # Docker bind-mount artifacts from local e2e runs
 .claude/
+
+# graphify generated knowledge graph
+graphify-out/
