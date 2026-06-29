@@ -111,6 +111,18 @@ flowchart TD
 - A `Skill` (`internal/domain/skill`) is a **persisted entity** declaring the
   `phases []PhaseType` it applies to (≥1) + `AppliesWhen` (JSONB conditions).
 
+### Reuse — don't redo the same work twice
+
+- **Canonical phase-skill templates**: `internal/bootstrap/seed_skills.go`
+  (`seedSkills`) upserts the **9 canonical per-phase skills** (one per phase;
+  baselines in `internal/adapters/outbound/pg/testdata/skill_phase_baseline/*.golden.json`)
+  on every boot. Every change reuses these curated templates instead of
+  re-authoring per-phase guidance — and the lifecycle then improves them over time.
+- **INIT structural cache**: `internal/application/init/cache/file_cache.go`
+  (`Lookup`/`Write`, atomic temp+rename) + `init/persister/dual_persister.go`
+  (file cache + memory-engine, keyed by `key_builder`) reuse the codebase
+  structural analysis across runs instead of re-detecting an unchanged repo.
+
 **The differentiator** — vs the static `SKILL.md` files of cortex-ia / gentle-ai,
 Sophia's skills are *governed entities with a lifecycle*:
 
