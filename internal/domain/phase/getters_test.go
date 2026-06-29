@@ -67,8 +67,8 @@ func TestPhaseType_NextValid_AllPhases(t *testing.T) {
 	cases := map[phase.PhaseType][]phase.PhaseType{
 		phase.PhaseInit:     {phase.PhaseExplore},
 		phase.PhaseExplore:  {phase.PhaseProposal},
-		phase.PhaseProposal: {phase.PhaseSpec, phase.PhaseDesign},
-		phase.PhaseSpec:     {phase.PhaseTasks},
+		phase.PhaseProposal: {phase.PhaseSpec},
+		phase.PhaseSpec:     {phase.PhaseDesign},
 		phase.PhaseDesign:   {phase.PhaseTasks},
 		phase.PhaseTasks:    {phase.PhaseApply},
 		phase.PhaseApply:    {phase.PhaseVerify},

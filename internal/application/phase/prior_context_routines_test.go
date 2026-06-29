@@ -144,7 +144,7 @@ func TestBuildPriorContext_GraphStats_AllPhases(t *testing.T) {
 		{phase.PhaseInit, phase.PhaseExplore},
 		{phase.PhaseExplore, phase.PhaseProposal},
 		{phase.PhaseProposal, phase.PhaseSpec},
-		{phase.PhaseSpec, phase.PhaseTasks},
+		{phase.PhaseDesign, phase.PhaseTasks},
 		{phase.PhaseTasks, phase.PhaseApply},
 	}
 
@@ -224,7 +224,8 @@ func TestBuildPriorContext_GodNodes_ExploreApplyOnly(t *testing.T) {
 	}{
 		{phase.PhaseExplore, phase.PhaseProposal},
 		{phase.PhaseProposal, phase.PhaseSpec},
-		{phase.PhaseSpec, phase.PhaseTasks},
+		{phase.PhaseSpec, phase.PhaseDesign},
+		{phase.PhaseDesign, phase.PhaseTasks},
 	}
 	for _, tc := range noGodNodes {
 		tc := tc

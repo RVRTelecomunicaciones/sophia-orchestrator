@@ -81,18 +81,21 @@ func TestAdvancePhase_InvalidTransition(t *testing.T) {
 	require.ErrorIs(t, err, change.ErrInvalidTransition)
 }
 
-func TestAdvancePhase_ProposalAllowsSpecOrDesign(t *testing.T) {
+func TestAdvancePhase_ProposalLeadsToSpecThenDesignThenTasks(t *testing.T) {
 	c, _ := change.New(mkChangeID(t), "feat-x", "proj", change.ArtifactStoreMemoryEngine, "", now())
 	require.NoError(t, c.AdvancePhase(phase.PhaseExplore, now()))
 	require.NoError(t, c.AdvancePhase(phase.PhaseProposal, now()))
-	// From proposal we can go to either spec or design.
+	// Sequential: proposal → spec → design → tasks.
+	require.NoError(t, c.AdvancePhase(phase.PhaseSpec, now()))
 	require.NoError(t, c.AdvancePhase(phase.PhaseDesign, now()))
+	require.NoError(t, c.AdvancePhase(phase.PhaseTasks, now()))
 
-	// Reset and try spec instead.
+	// Proposal no longer accepts design directly.
 	c2, _ := change.New(mkChangeID(t), "feat-y", "proj", change.ArtifactStoreMemoryEngine, "", now())
 	require.NoError(t, c2.AdvancePhase(phase.PhaseExplore, now()))
 	require.NoError(t, c2.AdvancePhase(phase.PhaseProposal, now()))
-	require.NoError(t, c2.AdvancePhase(phase.PhaseSpec, now()))
+	err := c2.AdvancePhase(phase.PhaseDesign, now())
+	require.ErrorIs(t, err, change.ErrInvalidTransition)
 }
 
 func TestAbort_FromActive(t *testing.T) {
