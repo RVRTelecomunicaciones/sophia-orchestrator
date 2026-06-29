@@ -39,16 +39,21 @@ rollback guard is accidentally removed.
 - WHEN the promoter evaluates the skill
 - THEN `PatchStatus` is called with `status = "validated"`
 
-#### Scenario: Low-risk skill is not gated on rollback_count
+#### Scenario: Rollback gates promotion at every risk level (including low)
 
 - GIVEN a `candidate` skill with `risk_level = low`, `success_count = 1`,
   `failure_count = 0`, `tests_passed_count = 1`, AND `rollback_count = 1`
 - WHEN the promoter evaluates the skill
-- THEN `PatchStatus` is called with `status = "validated"`
-- AND the low-risk promotion path is unaffected by rollback_count
+- THEN it is NOT promoted (`PatchStatus` is NOT called with `status = "validated"`)
+- AND this is consistent with low-risk already being gated on `failure_count = 0`
+  (per D-M2-6): a rollback is an equally-strong negative signal, so a
+  rolled-back skill is ineligible for promotion regardless of risk level. The
+  gate is the existing generic check `rollback_count > threshold.RollbackCount`
+  where the low-risk threshold's zero-value (`0`) already blocks any rollback.
 
 ## Non-Goals
 
-- No promoter code change is required or permitted by this spec.
+- No promoter code change is required or permitted by this spec — the rollback
+  gate already exists for all risk levels via the generic check + zero-value
+  thresholds. This spec only adds regression tests that lock that behavior.
 - Changing promotion thresholds for any risk level.
-- Adding `rollback_count` to the low-risk threshold table.
