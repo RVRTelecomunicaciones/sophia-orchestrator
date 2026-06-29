@@ -58,8 +58,20 @@ The observable contract is: after N executions of the same revert run (N ≥ 1),
 each reverted skill's `rollback_count` has increased by exactly 1 compared
 to before the first execution.
 
-The mechanism that enforces this (e.g., a check on the audit record, a
-revert-run-scoped flag) is left to design.
+The mechanism that enforces this is a query-before-emit idempotency guard
+(`ExistsByRevertsRunID`) checked once before emission; the persisted revert
+audit run is the durable marker.
+
+ACCEPTED EXCEPTION (W-1): the exactly-once guarantee holds for revert runs that
+complete emission and persist their audit record. Because emission occurs
+before the audit run is saved, a `PatchMetrics` failure mid-loop returns before
+persistence, so a subsequent retry MAY re-emit `+1` for skills already
+incremented (at-least-once, not exactly-once, in this partial-failure window).
+This is intentionally accepted: both consumers gate on a threshold (demoter
+`rollback_count >= 1`, promoter `> 0`), so an inflated count never changes a
+decision. The save-first/emit-after alternative was rejected because it would
+under-count on the same failure and leave a reverted skill un-blocked — a
+false-negative on a safety signal.
 
 #### Scenario: First execution emits delta
 

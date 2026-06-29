@@ -397,6 +397,16 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 
 		// Emit RollbackDelta=1 for this reverted skill (attribution: only skills
 		// that were actually reverted, i.e. row.Reverted==true, receive the delta).
+		//
+		// KNOWN LIMITATION (W-1, accepted): emission happens inside the loop, before
+		// the audit run is saved below. If PatchMetrics fails mid-loop the function
+		// returns before Save, so a retry sees ExistsByRevertsRunID==false and
+		// re-emits for the already-incremented skills (double-count). This is
+		// intentionally accepted: both consumers gate on a threshold (demoter
+		// RollbackCount>=1, promoter >0), so an inflated count never changes a
+		// decision. The inverse (save-first/emit-after) was rejected because it
+		// would under-count on the same failure, leaving a reverted skill
+		// un-blocked — a worse, false-negative outcome for a safety signal.
 		if !skipMetrics && r.metricsPatcher != nil {
 			if pErr := r.metricsPatcher.PatchMetrics(ctx, item.SkillID,
 				inbound.MetricsDelta{RollbackDelta: 1}); pErr != nil {
