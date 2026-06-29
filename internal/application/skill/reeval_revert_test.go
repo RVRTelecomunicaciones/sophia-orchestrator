@@ -17,13 +17,18 @@ import (
 
 // fakeAuditRepo is an in-memory ReevalAuditRepository for unit tests.
 type fakeAuditRepo struct {
-	runs    map[string]outbound.ReevalRun
-	order   []string // insertion order, newest last
-	saveErr error
+	runs                    map[string]outbound.ReevalRun
+	order                   []string // insertion order, newest last
+	saveErr                 error
+	existsByRevertsRunID    map[string]bool // keyed by originalRunID
+	existsByRevertsRunIDErr error
 }
 
 func newFakeAuditRepo() *fakeAuditRepo {
-	return &fakeAuditRepo{runs: map[string]outbound.ReevalRun{}}
+	return &fakeAuditRepo{
+		runs:                 map[string]outbound.ReevalRun{},
+		existsByRevertsRunID: map[string]bool{},
+	}
 }
 
 func (f *fakeAuditRepo) Save(_ context.Context, run outbound.ReevalRun) error {
@@ -50,6 +55,13 @@ func (f *fakeAuditRepo) FindLatest(_ context.Context) (outbound.ReevalRun, error
 		return outbound.ReevalRun{}, outbound.ErrNotFound
 	}
 	return f.runs[f.order[len(f.order)-1]], nil
+}
+
+func (f *fakeAuditRepo) ExistsByRevertsRunID(_ context.Context, originalRunID string) (bool, error) {
+	if f.existsByRevertsRunIDErr != nil {
+		return false, f.existsByRevertsRunIDErr
+	}
+	return f.existsByRevertsRunID[originalRunID], nil
 }
 
 // chainPatcher tracks current status per skill and enforces the real
