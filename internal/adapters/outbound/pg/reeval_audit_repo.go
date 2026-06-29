@@ -117,6 +117,19 @@ ORDER  BY id ASC`
 	return run, wrapErr("ReevalAuditRepo.scanRun.rows", rows.Err())
 }
 
+// ExistsByRevertsRunID returns true when any revert run already names
+// originalRunID as its reverts_run_id. The query runs a single indexed lookup
+// on the reverts_run_id column (present since migration 013, no new migration
+// needed). Used by revertRun to enforce idempotency before emitting metrics.
+func (r *ReevalAuditRepo) ExistsByRevertsRunID(ctx context.Context, originalRunID string) (bool, error) {
+	const q = `SELECT EXISTS(SELECT 1 FROM reeval_run WHERE reverts_run_id = $1)`
+	var exists bool
+	if err := r.pool.QueryRow(ctx, q, originalRunID).Scan(&exists); err != nil {
+		return false, wrapErr("ReevalAuditRepo.ExistsByRevertsRunID", err)
+	}
+	return exists, nil
+}
+
 // nullableStr returns nil for an empty string so a NULL is stored, else the value.
 func nullableStr(s string) any {
 	if s == "" {

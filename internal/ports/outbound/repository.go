@@ -128,10 +128,15 @@ type ReevalRunItem struct {
 // (migration 013). Save writes a run plus its items in one transaction.
 // FindByID and FindLatest read a run back so the revert path can compute the
 // inverse transitions. Returns ErrNotFound when no run matches.
+// ExistsByRevertsRunID returns true when any revert run already names
+// originalRunID as its reverts_run_id. Used to enforce idempotency in
+// revertRun so repeated execution of the same revert run is a no-op for
+// metric emission (status walks are still idempotent via the from==to guard).
 type ReevalAuditRepository interface {
 	Save(ctx context.Context, run ReevalRun) error
 	FindByID(ctx context.Context, runID string) (ReevalRun, error)
 	FindLatest(ctx context.Context) (ReevalRun, error)
+	ExistsByRevertsRunID(ctx context.Context, originalRunID string) (bool, error)
 }
 
 // SkillRepository persists Skill aggregates with V4.1 §5.2 lifecycle fields.

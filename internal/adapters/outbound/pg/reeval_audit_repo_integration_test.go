@@ -79,3 +79,53 @@ func TestReevalAuditRepo_FindByID_NotFound(t *testing.T) {
 	_, err := repo.FindByID(ctx, "01ARZ3NDEKTSV4RRFFQ69G5XXX")
 	assert.ErrorIs(t, err, outbound.ErrNotFound)
 }
+
+// TestReevalAuditRepo_ExistsByRevertsRunID verifies the idempotency query.
+// When a revert run already records originalRunID as reverts_run_id, the method
+// returns true; for an unknown originalRunID it returns false.
+func TestReevalAuditRepo_ExistsByRevertsRunID(t *testing.T) {
+	pool := setupSkillPG(t)
+	ctx := context.Background()
+	repo := pg.NewReevalAuditRepo(pool)
+
+	applyRunID := "01ARZ3NDEKTSV4RRFFQ69G5RN3"
+	revertRunID := "01ARZ3NDEKTSV4RRFFQ69G5RN4"
+
+	// Save the original apply run.
+	applyRun := outbound.ReevalRun{
+		ID:        applyRunID,
+		Mode:      "apply",
+		CreatedAt: time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC),
+		Items: []outbound.ReevalRunItem{
+			{ID: "01ARZ3NDEKTSV4RRFFQ69G5IT3", SkillID: "01ARZ3NDEKTSV4RRFFQ69G5SK1", PriorStatus: "active", NewStatus: "deprecated"},
+		},
+	}
+	require.NoError(t, repo.Save(ctx, applyRun))
+
+	// Before the revert run is saved, ExistsByRevertsRunID must return false.
+	exists, err := repo.ExistsByRevertsRunID(ctx, applyRunID)
+	require.NoError(t, err)
+	assert.False(t, exists, "no revert run recorded yet — must return false")
+
+	// Save the revert run that references the apply run.
+	revertRun := outbound.ReevalRun{
+		ID:           revertRunID,
+		Mode:         "revert",
+		RevertsRunID: applyRunID,
+		CreatedAt:    time.Date(2026, 6, 16, 13, 0, 0, 0, time.UTC),
+		Items: []outbound.ReevalRunItem{
+			{ID: "01ARZ3NDEKTSV4RRFFQ69G5IT4", SkillID: "01ARZ3NDEKTSV4RRFFQ69G5SK1", PriorStatus: "deprecated", NewStatus: "active"},
+		},
+	}
+	require.NoError(t, repo.Save(ctx, revertRun))
+
+	// Now ExistsByRevertsRunID must return true for the apply run ID.
+	exists, err = repo.ExistsByRevertsRunID(ctx, applyRunID)
+	require.NoError(t, err)
+	assert.True(t, exists, "revert run recorded — must return true")
+
+	// For a completely unknown ID it must return false.
+	exists, err = repo.ExistsByRevertsRunID(ctx, "01ARZ3NDEKTSV4RRFFQ69G5XXX")
+	require.NoError(t, err)
+	assert.False(t, exists, "unknown originalRunID — must return false")
+}

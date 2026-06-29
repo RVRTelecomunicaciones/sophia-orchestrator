@@ -7,6 +7,7 @@ import (
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 	domainskill "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/skill"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/inbound"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/ports/outbound"
 )
 
@@ -57,6 +58,13 @@ type StatusPatcher interface {
 	PatchStatus(ctx context.Context, skillID, status, reason string) error
 }
 
+// MetricsPatcher increments a skill's additive metric counters.
+// Satisfied by *Service.PatchMetrics — no new type required.
+// Used by revertRun to emit RollbackDelta=1 per reverted skill.
+type MetricsPatcher interface {
+	PatchMetrics(ctx context.Context, skillID string, delta inbound.MetricsDelta) error
+}
+
 // StatusReader reads a skill's live current lifecycle status. Revert uses it to
 // compute the revert path from where the skill ACTUALLY sits now (idempotency and
 // drift-correctness), not from the status recorded at apply time. It is satisfied
@@ -99,12 +107,13 @@ type ReevalRow struct {
 // leaves them nil for the dry-run-only path (and the existing call sites), while
 // NewReevaluatorWithAudit wires them for the audited apply/revert path.
 type Reevaluator struct {
-	evidence EvidenceProvider
-	patcher  StatusPatcher
-	reader   StatusReader // optional; set when patcher also reads live status
-	audit    outbound.ReevalAuditRepository
-	clock    shared.Clock
-	idgen    shared.IDGenerator
+	evidence       EvidenceProvider
+	patcher        StatusPatcher
+	reader         StatusReader // optional; set when patcher also reads live status
+	audit          outbound.ReevalAuditRepository
+	metricsPatcher MetricsPatcher // optional; nil on the dry-run constructor path
+	clock          shared.Clock
+	idgen          shared.IDGenerator
 }
 
 // NewReevaluator constructs a Reevaluator without audit persistence. Apply still
@@ -117,21 +126,25 @@ func NewReevaluator(evidence EvidenceProvider, patcher StatusPatcher) *Reevaluat
 
 // NewReevaluatorWithAudit constructs a Reevaluator with audit persistence so
 // Apply records a revertible snapshot and Revert/RevertLast become available.
+// The metricsPatcher parameter is optional (pass nil on the dry-run-only path);
+// when non-nil, revertRun emits RollbackDelta=1 per reverted skill.
 func NewReevaluatorWithAudit(
 	evidence EvidenceProvider,
 	patcher StatusPatcher,
 	audit outbound.ReevalAuditRepository,
 	clock shared.Clock,
 	idgen shared.IDGenerator,
+	metricsPatcher MetricsPatcher,
 ) *Reevaluator {
 	reader, _ := patcher.(StatusReader)
 	return &Reevaluator{
-		evidence: evidence,
-		patcher:  patcher,
-		reader:   reader,
-		audit:    audit,
-		clock:    clock,
-		idgen:    idgen,
+		evidence:       evidence,
+		patcher:        patcher,
+		reader:         reader,
+		audit:          audit,
+		metricsPatcher: metricsPatcher,
+		clock:          clock,
+		idgen:          idgen,
 	}
 }
 
@@ -303,6 +316,20 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 	// Mint the revert run ID before any item ID (parent-first allocation).
 	revRunID := r.idgen.NewID()
 
+	// Idempotency guard: if a revert run already names run.ID as its
+	// reverts_run_id, this revert has already been processed. Skip all metric
+	// emission — status walks are still idempotent via the from==to no-op guard.
+	skipMetrics := false
+	if r.audit != nil && r.metricsPatcher != nil {
+		exists, err := r.audit.ExistsByRevertsRunID(ctx, run.ID)
+		if err != nil {
+			return result, fmt.Errorf("skill.Reevaluator.revertRun: idempotency check: %w", err)
+		}
+		if exists {
+			skipMetrics = true
+		}
+	}
+
 	for _, item := range run.Items {
 		to := domainskill.Status(item.PriorStatus) // where we want it back
 
@@ -367,6 +394,26 @@ func (r *Reevaluator) revertRun(ctx context.Context, run outbound.ReevalRun) ([]
 			PriorStatus: from.String(), // inverse: prior of the revert IS where it started
 			NewStatus:   to.String(),
 		})
+
+		// Emit RollbackDelta=1 for this reverted skill (attribution: only skills
+		// that were actually reverted, i.e. row.Reverted==true, receive the delta).
+		//
+		// KNOWN LIMITATION (W-1, accepted): emission happens inside the loop, before
+		// the audit run is saved below. If PatchMetrics fails mid-loop the function
+		// returns before Save, so a retry sees ExistsByRevertsRunID==false and
+		// re-emits for the already-incremented skills (double-count). This is
+		// intentionally accepted: both consumers gate on a threshold (demoter
+		// RollbackCount>=1, promoter >0), so an inflated count never changes a
+		// decision. The inverse (save-first/emit-after) was rejected because it
+		// would under-count on the same failure, leaving a reverted skill
+		// un-blocked — a worse, false-negative outcome for a safety signal.
+		if !skipMetrics && r.metricsPatcher != nil {
+			if pErr := r.metricsPatcher.PatchMetrics(ctx, item.SkillID,
+				inbound.MetricsDelta{RollbackDelta: 1}); pErr != nil {
+				return result, fmt.Errorf("skill.Reevaluator.revertRun: patch metrics %s: %w",
+					item.SkillID, pErr)
+			}
+		}
 	}
 
 	// Record the revert as its own immutable audit run.
