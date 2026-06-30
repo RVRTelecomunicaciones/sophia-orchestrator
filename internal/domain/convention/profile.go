@@ -107,6 +107,8 @@ type PatternEntry struct {
 // ConventionProfile lives in its own package because its lifecycle differs from
 // Skill: a profile is machine-extracted at INIT and refreshed on every repo
 // change, whereas a Skill is human-promoted through a formal review pipeline.
+//
+//nolint:revive // stutter accepted: ConventionProfile is the domain name; convention.Profile would lose semantic clarity.
 type ConventionProfile struct {
 	projectID     string
 	framework     string // canonical lowercase: "nestjs", "go", "angular"

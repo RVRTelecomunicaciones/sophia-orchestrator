@@ -24,7 +24,6 @@ var (
 	validVersion   = "11"
 
 	oneEvidence = []string{"src/motivo/motivo.service.ts"}
-	twoEvidence = []string{"src/motivo/motivo.service.ts", "src/cargo/cargo.service.ts"}
 )
 
 // validEntry returns a PatternEntry that passes all invariants.
