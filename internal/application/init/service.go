@@ -153,6 +153,19 @@ func (s *Service) Run(ctx context.Context, c *change.Change) (detector.Structura
 		}
 	}
 
+	// Step 5b: convention profile extraction + persistence (optional, non-fatal).
+	// If ProfileExtractor is nil, skip silently (graceful degradation).
+	if s.d.ProfileExtractor != nil {
+		profile, extErr := s.d.ProfileExtractor.Extract(ctx, ".", sc)
+		if extErr != nil {
+			s.d.Logger.Warn("initphase: profile extraction failed (non-fatal)", "error", extErr.Error())
+		} else if profile != nil && s.d.ProfilePersister != nil {
+			if ppErr := s.d.ProfilePersister.PersistProfile(ctx, *profile); ppErr != nil {
+				s.d.Logger.Warn("initphase: profile persist failed (non-fatal)", "error", ppErr.Error())
+			}
+		}
+	}
+
 	// Step 6: build envelope and return.
 	env := buildEnvelope(c, sc)
 	return sc, env, nil
