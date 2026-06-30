@@ -28,4 +28,12 @@ var (
 	// ErrInvalidSource is returned when a PatternEntry carries a Source value
 	// that is not one of the three closed enum values.
 	ErrInvalidSource = errors.New("convention: source must be one of curated-skill, detected-from-code, baseline-framework-docs")
+
+	// ErrEmptyPattern is returned when a PatternEntry has an empty or
+	// whitespace-only Pattern key.
+	ErrEmptyPattern = errors.New("convention: pattern key must not be empty")
+
+	// ErrEmptyRule is returned when a PatternEntry has an empty or
+	// whitespace-only Rule string.
+	ErrEmptyRule = errors.New("convention: rule must not be empty")
 )

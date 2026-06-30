@@ -1,6 +1,7 @@
 package convention
 
 import (
+	"strings"
 	"time"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
@@ -142,6 +143,12 @@ func NewConventionProfile(
 		if err := validatePatternEntry(pe); err != nil {
 			return nil, err
 		}
+		// Deep-copy nested []string fields so the stored profile is not aliased
+		// to the caller's slices.
+		pe.Evidence = copyStrings(pe.Evidence)
+		pe.SiblingExamples = copyStrings(pe.SiblingExamples)
+		pe.RejectedAssumptions = copyStrings(pe.RejectedAssumptions)
+		pe.Warnings = copyStrings(pe.Warnings)
 		entries = append(entries, pe)
 	}
 
@@ -174,18 +181,31 @@ func (p *ConventionProfile) DetectedAt() time.Time { return p.detectedAt }
 func (p *ConventionProfile) SchemaVersion() int { return p.schemaVersion }
 
 // Patterns returns a defensive copy of the pattern slice. Mutating the returned
-// slice does not affect the profile.
+// slice or any nested []string field does not affect the profile.
 func (p *ConventionProfile) Patterns() []PatternEntry {
 	out := make([]PatternEntry, len(p.patterns))
-	copy(out, p.patterns)
+	for i, pe := range p.patterns {
+		pe.Evidence = copyStrings(pe.Evidence)
+		pe.SiblingExamples = copyStrings(pe.SiblingExamples)
+		pe.RejectedAssumptions = copyStrings(pe.RejectedAssumptions)
+		pe.Warnings = copyStrings(pe.Warnings)
+		out[i] = pe
+	}
 	return out
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// validatePatternEntry enforces PatternEntry invariants: non-empty evidence,
-// valid source enum, and confidence in [0.0, 1.0].
+// validatePatternEntry enforces PatternEntry invariants: non-empty pattern key,
+// non-empty rule, non-empty evidence, valid source enum, and confidence in
+// [0.0, 1.0].
 func validatePatternEntry(pe PatternEntry) error {
+	if strings.TrimSpace(pe.Pattern) == "" {
+		return ErrEmptyPattern
+	}
+	if strings.TrimSpace(pe.Rule) == "" {
+		return ErrEmptyRule
+	}
 	if len(pe.Evidence) == 0 {
 		return ErrEmptyEvidence
 	}
@@ -198,6 +218,17 @@ func validatePatternEntry(pe PatternEntry) error {
 	return nil
 }
 
+// copyStrings returns a new slice containing the same string values as src.
+// Returns nil when src is nil so callers that test for nil are unaffected.
+func copyStrings(src []string) []string {
+	if src == nil {
+		return nil
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
 // ── Confidence formula ────────────────────────────────────────────────────────
 
 // ComputeConfidence derives the canonical confidence value for a pattern given
@@ -208,6 +239,9 @@ func validatePatternEntry(pe PatternEntry) error {
 //	curated-skill             → 1.0 (always)
 //	baseline-framework-docs   → 0.5 (always)
 //	detected-from-code        → min(0.6 + (evidenceCount-1)*0.05, 0.95)
+//
+// Any unknown or unspecified source value falls through to the
+// detected-from-code formula as the default branch.
 //
 // This function is exported so callers (extractors) can compute confidence
 // before constructing a PatternEntry. The ConventionProfile constructor then

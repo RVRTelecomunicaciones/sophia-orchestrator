@@ -413,3 +413,150 @@ func TestSource_String(t *testing.T) {
 	require.Equal(t, "detected-from-code", convention.SourceDetectedFromCode.String())
 	require.Equal(t, "baseline-framework-docs", convention.SourceBaselineFrameworkDocs.String())
 }
+
+// ── Fix 1: Deep-copy of nested []string fields ────────────────────────────────
+
+// Mutating a returned PatternEntry's Evidence must not affect the profile.
+func TestConventionProfile_Patterns_DeepCopyEvidence(t *testing.T) {
+	p, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{validEntry()},
+	)
+	require.NoError(t, err)
+
+	got := p.Patterns()
+	got[0].Evidence[0] = "mutated"
+	require.Equal(t, "src/motivo/motivo.service.ts", p.Patterns()[0].Evidence[0])
+}
+
+// Mutating a returned PatternEntry's Warnings must not affect the profile.
+func TestConventionProfile_Patterns_DeepCopyWarnings(t *testing.T) {
+	entry := validEntry()
+	entry.Warnings = []string{"prefer cotizacion as reference"}
+
+	p, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.NoError(t, err)
+
+	got := p.Patterns()
+	got[0].Warnings[0] = "mutated"
+	require.Equal(t, "prefer cotizacion as reference", p.Patterns()[0].Warnings[0])
+}
+
+// Mutating caller's input slice after construction must not affect the profile.
+func TestNewConventionProfile_DeepCopyCallerEvidence(t *testing.T) {
+	evidence := []string{"src/motivo/motivo.service.ts"}
+	entry := convention.PatternEntry{
+		Pattern:    "nestjs-extends-crudservice",
+		Source:     convention.SourceDetectedFromCode,
+		Confidence: 0.60,
+		Evidence:   evidence,
+		Rule:       "All services MUST extend CrudService.",
+	}
+
+	p, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.NoError(t, err)
+
+	evidence[0] = "mutated-by-caller"
+	require.Equal(t, "src/motivo/motivo.service.ts", p.Patterns()[0].Evidence[0])
+}
+
+// Mutating caller's SiblingExamples slice after construction must not affect the profile.
+func TestNewConventionProfile_DeepCopyCallerSiblingExamples(t *testing.T) {
+	siblings := []string{"src/cotizacion/cotizacion.service.ts"}
+	entry := convention.PatternEntry{
+		Pattern:         "nestjs-extends-crudservice",
+		Source:          convention.SourceDetectedFromCode,
+		Confidence:      0.60,
+		Evidence:        oneEvidence,
+		Rule:            "All services MUST extend CrudService.",
+		SiblingExamples: siblings,
+	}
+
+	p, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.NoError(t, err)
+
+	siblings[0] = "mutated-by-caller"
+	require.Equal(t, "src/cotizacion/cotizacion.service.ts", p.Patterns()[0].SiblingExamples[0])
+}
+
+// Mutating caller's RejectedAssumptions slice after construction must not affect the profile.
+func TestNewConventionProfile_DeepCopyCallerRejectedAssumptions(t *testing.T) {
+	rejected := []string{"assumed nestjs uses repositories directly"}
+	entry := convention.PatternEntry{
+		Pattern:             "nestjs-extends-crudservice",
+		Source:              convention.SourceDetectedFromCode,
+		Confidence:          0.60,
+		Evidence:            oneEvidence,
+		Rule:                "All services MUST extend CrudService.",
+		RejectedAssumptions: rejected,
+	}
+
+	p, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.NoError(t, err)
+
+	rejected[0] = "mutated-by-caller"
+	require.Equal(t, "assumed nestjs uses repositories directly", p.Patterns()[0].RejectedAssumptions[0])
+}
+
+// ── Fix 2: Validate Pattern and Rule are non-empty ────────────────────────────
+
+func TestNewConventionProfile_EmptyPatternKeyRejected(t *testing.T) {
+	entry := validEntry()
+	entry.Pattern = ""
+	_, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.ErrorIs(t, err, convention.ErrEmptyPattern)
+}
+
+func TestNewConventionProfile_WhitespacePatternKeyRejected(t *testing.T) {
+	entry := validEntry()
+	entry.Pattern = "   "
+	_, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.ErrorIs(t, err, convention.ErrEmptyPattern)
+}
+
+func TestNewConventionProfile_EmptyRuleRejected(t *testing.T) {
+	entry := validEntry()
+	entry.Rule = ""
+	_, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.ErrorIs(t, err, convention.ErrEmptyRule)
+}
+
+func TestNewConventionProfile_WhitespaceRuleRejected(t *testing.T) {
+	entry := validEntry()
+	entry.Rule = "   "
+	_, err := convention.NewConventionProfile(
+		validProjectID, validFramework, validVersion, fixedClock,
+		[]convention.PatternEntry{entry},
+	)
+	require.ErrorIs(t, err, convention.ErrEmptyRule)
+}
+
+// ── Fix 3: ComputeConfidence default-branch fallback ─────────────────────────
+
+// Unknown/unspecified sources fall through to the detected-from-code formula.
+func TestComputeConfidence_UnknownSource_FallsBackToDetectedFormula(t *testing.T) {
+	// 3 evidence files via detected-from-code formula: 0.6 + 2*0.05 = 0.70
+	got := convention.ComputeConfidence(convention.Source("invented"), 3)
+	require.InDelta(t, 0.70, got, 0.001)
+}
