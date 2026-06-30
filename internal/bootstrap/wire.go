@@ -42,6 +42,7 @@ import (
 	initphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init"
 	initcache "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/cache"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
+	initextractor "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/extractor"
 	initpersister "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/persister"
 	outboxapp "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/outbox"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/phase"
@@ -320,16 +321,23 @@ func Wire(ctx context.Context, cfg config.Config) (*App, error) {
 	initFileCacheDir := ".sophia/cache/structural" // relative to cwd (repo root at boot)
 	initFileCache := initcache.NewFileCache(initFileCacheDir, clock, 24*time.Hour)
 	initDualPersister := initpersister.New(memClient, initFileCache, logger, cfg.Memory.TenantID, cfg.Environment)
+	initProfilePersister := initpersister.NewProfileMemoryPersister(memClient, logger, cfg.Memory.TenantID, cfg.Environment)
+	// ProfileExtractor: wired unconditionally; nil-safe graceful degradation in
+	// Service.Run handles the case where no framework is detected. ProjectID is
+	// sourced from cfg.HTTP.APIKeyProject (the project the bootstrap key authorises).
+	initProfileExtractor := initextractor.New(cfg.HTTP.APIKeyProject, clock)
 	initSvc := initphase.NewService(initphase.Deps{
-		Detector:  initDetector,
-		Spawner:   initSpawner,
-		Persister: initDualPersister,
-		Cache:     initFileCache,
-		CacheKey:  initKeyBuilder,
-		Clock:     clock,
-		IDGen:     idGen,
-		Logger:    logger,
-		CacheTTL:  24 * time.Hour,
+		Detector:         initDetector,
+		Spawner:          initSpawner,
+		Persister:        initDualPersister,
+		ProfilePersister: initProfilePersister,
+		Cache:            initFileCache,
+		CacheKey:         initKeyBuilder,
+		Clock:            clock,
+		IDGen:            idGen,
+		Logger:           logger,
+		CacheTTL:         24 * time.Hour,
+		ProfileExtractor: initProfileExtractor,
 	})
 
 	// Bootstrap trigger service (PR3c-ii, DG-C7-5/6/8/10).

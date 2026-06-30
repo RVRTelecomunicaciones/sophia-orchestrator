@@ -25,15 +25,17 @@ import (
 
 // Deps bundles InitService dependencies.
 type Deps struct {
-	Detector  SophiaDetector
-	Spawner   GraphifySpawner
-	Persister StructuralPersister
-	Cache     CacheStore
-	CacheKey  CacheKeyBuilder
-	Clock     shared.Clock
-	IDGen     shared.IDGenerator
-	Logger    *slog.Logger
-	CacheTTL  time.Duration
+	Detector         SophiaDetector
+	Spawner          GraphifySpawner
+	Persister        StructuralPersister
+	ProfilePersister ProfilePersister
+	Cache            CacheStore
+	CacheKey         CacheKeyBuilder
+	Clock            shared.Clock
+	IDGen            shared.IDGenerator
+	Logger           *slog.Logger
+	CacheTTL         time.Duration
+	ProfileExtractor ProfileExtractor
 }
 
 // Service orchestrates the INIT phase: cache lookup → parallel detect+spawn →
@@ -148,6 +150,19 @@ func (s *Service) Run(ctx context.Context, c *change.Change) (detector.Structura
 	if cacheKey != "" {
 		if pErr := s.d.Persister.Persist(ctx, sc, cacheKey); pErr != nil {
 			s.d.Logger.Warn("initphase: persist failed (non-fatal)", "error", pErr.Error())
+		}
+	}
+
+	// Step 5b: convention profile extraction + persistence (optional, non-fatal).
+	// If ProfileExtractor is nil, skip silently (graceful degradation).
+	if s.d.ProfileExtractor != nil {
+		profile, extErr := s.d.ProfileExtractor.Extract(ctx, ".", sc)
+		if extErr != nil {
+			s.d.Logger.Warn("initphase: profile extraction failed (non-fatal)", "error", extErr.Error())
+		} else if profile != nil && s.d.ProfilePersister != nil {
+			if ppErr := s.d.ProfilePersister.PersistProfile(ctx, *profile); ppErr != nil {
+				s.d.Logger.Warn("initphase: profile persist failed (non-fatal)", "error", ppErr.Error())
+			}
 		}
 	}
 
