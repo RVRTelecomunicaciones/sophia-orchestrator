@@ -167,7 +167,7 @@ func collectSiblingExamples(repoRoot string) []string {
 
 	for _, lr := range layers {
 		_ = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || len(examples) >= cap(layers)+len(examples) {
+			if err != nil || d.IsDir() || len(examples) >= len(layers) {
 				return nil
 			}
 			matched, _ := filepath.Match(lr.glob, filepath.Base(path))

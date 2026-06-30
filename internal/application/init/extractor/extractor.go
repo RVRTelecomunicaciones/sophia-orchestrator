@@ -6,6 +6,11 @@
 // The never-invent invariant is enforced here (and again by the domain
 // constructor): any candidate PatternEntry with zero evidence is silently
 // dropped before ConventionProfile is constructed.
+//
+// OS boundary: file content is read through the single readFileBytes function
+// (which calls os.ReadFile). Directory listing uses os.ReadDir and os.Stat only
+// for existence checks. This scopes the OS surface to a single content-reading
+// boundary, making the package testable by stubbing readFileBytes alone.
 package extractor
 
 import (
@@ -53,10 +58,12 @@ func New(projectID string, clock shared.Clock) *Extractor {
 // Returns a degraded profile (empty Patterns) for unknown/unsupported frameworks
 // rather than an error. Only genuine FS failures surface as errors.
 func (e *Extractor) Extract(ctx context.Context, repoRoot string, sc detector.StructuralContext) (*convention.ConventionProfile, error) {
-	_ = ctx // reserved for future cancellation propagation
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	// Step 1: load curated skills.
-	curated := loadCuratedSkills(repoRoot)
+	// Step 1: load curated skills (raw form carries explicit-key flag).
+	curatedRaw := loadCuratedSkillsRaw(repoRoot)
 
 	// Step 2: framework-specific detection.
 	var detected []convention.PatternEntry
@@ -71,7 +78,7 @@ func (e *Extractor) Extract(ctx context.Context, repoRoot string, sc detector.St
 	}
 
 	// Step 3: merge via source ladder.
-	merged := applySourceLadder(curated, detected)
+	merged := applySourceLadder(curatedRaw, detected)
 
 	// Step 4: drop zero-evidence patterns (never-invent invariant).
 	var safe []convention.PatternEntry
@@ -108,27 +115,44 @@ func primaryFramework(sc detector.StructuralContext) (name, version string) {
 	return strings.ToLower(fw.Name), fw.Version
 }
 
-// applySourceLadder merges curated and detected patterns, ensuring that a
-// curated-skill entry takes precedence over a detected-from-code entry for
-// the same pattern key. The source-ladder order is:
+// applySourceLadder merges curated and detected patterns using the source-ladder
+// precedence rule:
 //
 //	curated-skill (1.0) > detected-from-code (0.6–0.95) > baseline-framework-docs (0.5)
 //
-// The function starts with all curated entries (highest precedence) and then
-// appends detected entries whose pattern key is NOT already covered by a
-// curated entry.
-func applySourceLadder(curated, detected []convention.PatternEntry) []convention.PatternEntry {
-	// Index curated keys for fast lookup.
+// Dedup behaviour depends on how the curated key was derived:
+//
+//   - Explicit-token key (e.g. "nestjs-extends-crudservice" found in file content):
+//     The detected entry whose canonical key equals the curated key is suppressed.
+//     The canonical key is the curated Pattern with any leading "curated-" prefix
+//     stripped, so a curated file that names "nestjs-extends-crudservice" suppresses
+//     a detected entry with Pattern="nestjs-extends-crudservice".
+//
+//   - Filename-fallback key (e.g. "curated-global", derived from the file stem):
+//     The curated entry is emitted as-is (with its inferred-key Warning already set
+//     by loadCuratedSkillsRaw). The detected entries are NOT suppressed — we cannot
+//     assert sameness without an explicit token match (never-invent-honest behavior).
+func applySourceLadder(curated []curatedEntry, detected []convention.PatternEntry) []convention.PatternEntry {
+	// Build the covered set from explicit-token curated keys only.
+	// We index by canonical key: strip a leading "curated-" prefix so that a
+	// curated token "nestjs-extends-crudservice" matches the detected key of the
+	// same name.
 	covered := make(map[string]bool, len(curated))
-	for _, pe := range curated {
-		covered[pe.Pattern] = true
+	for _, ce := range curated {
+		if ce.explicitKey {
+			canonical := strings.TrimPrefix(ce.entry.Pattern, "curated-")
+			covered[canonical] = true
+		}
 	}
 
 	out := make([]convention.PatternEntry, 0, len(curated)+len(detected))
-	out = append(out, curated...)
+	for _, ce := range curated {
+		out = append(out, ce.entry)
+	}
 
 	for _, pe := range detected {
-		if !covered[pe.Pattern] {
+		canonical := strings.TrimPrefix(pe.Pattern, "curated-")
+		if !covered[canonical] {
 			out = append(out, pe)
 		}
 	}

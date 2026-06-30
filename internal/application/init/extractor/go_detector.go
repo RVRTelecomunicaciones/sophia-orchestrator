@@ -9,6 +9,11 @@ package extractor
 //   - go-generics-for-envelopes-only  ([T any] in shared/; absent elsewhere)
 //
 // Never-invent invariant: patterns with zero evidence files are NOT included.
+//
+// OS boundary: os.ReadDir and os.Stat are called only for directory listing and
+// existence checks; all file content is read through the single readFileBytes
+// boundary in extractor.go. This keeps the package testable by stubbing that
+// one function.
 
 import (
 	"io/fs"
@@ -21,10 +26,16 @@ import (
 )
 
 var (
-	reGoInterface    = regexp.MustCompile(`\binterface\b`)
+	// reGoInterface matches only genuine "type X interface {" declarations.
+	// The (?m) flag makes ^ match at line start so comments and string literals
+	// containing the word "interface" are not matched.
+	reGoInterface    = regexp.MustCompile(`(?m)^\s*type\s+\w+\s+interface\s*\{`)
 	reGoServiceStruct = regexp.MustCompile(`\btype\s+\w+Service\s+struct\b`)
 	reGoNewService   = regexp.MustCompile(`\bfunc\s+New\w+Service\b`)
-	reGoGenerics     = regexp.MustCompile(`\[\s*[A-Z]\w*\s+any\b`)
+	// reGoGenerics matches "[T any]" only at the start of a non-comment line.
+	// The pattern anchors to the beginning of a non-slash, non-newline character
+	// sequence so occurrences inside // comments are not matched.
+	reGoGenerics     = regexp.MustCompile(`(?m)^[^/\n]*\[\s*[A-Z]\w*\s+any\b`)
 )
 
 // detectGo walks repoRoot and emits Go hexagonal-architecture convention patterns.
@@ -197,7 +208,7 @@ func detectGenericsOutsideShared(repoRoot string) []string {
 	return evidence
 }
 
-// scanFilesInDir scans a specific directory (non-recursive) for Go files matching re.
+// scanFilesInDir scans a specific directory (recursively via WalkDir) for Go files matching re.
 func scanFilesInDir(dir, repoRoot, glob string, re *regexp.Regexp) []string {
 	var matches []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {

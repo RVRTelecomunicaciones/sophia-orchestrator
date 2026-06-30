@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,7 +272,7 @@ func TestNestJSDetector_ExtendsCrudService_ConfidenceAtLeast085(t *testing.T) {
 		"5+ evidence files should yield confidence >= 0.85")
 }
 
-// N.6 — RejectedAssumptions contains standalone-CRUD entry.
+// N.6 — RejectedAssumptions is non-empty AND references the standalone-CRUD assumption.
 func TestNestJSDetector_RejectedAssumptions_ContainsStandaloneCRUD(t *testing.T) {
 	root := buildNestJSFixture(t)
 	ex := extractor.New("proj-x", fixedClock())
@@ -283,14 +284,19 @@ func TestNestJSDetector_RejectedAssumptions_ContainsStandaloneCRUD(t *testing.T)
 	found := findPattern(profile, "nestjs-extends-crudservice")
 	require.NotNil(t, found)
 
-	hasRejected := false
+	require.NotEmpty(t, found.RejectedAssumptions,
+		"RejectedAssumptions must be non-empty")
+	foundStandalone := false
 	for _, ra := range found.RejectedAssumptions {
-		if ra != "" {
-			hasRejected = true
+		if strings.Contains(strings.ToLower(ra), "standalone") &&
+			strings.Contains(strings.ToLower(ra), "crud") {
+			foundStandalone = true
 			break
 		}
 	}
-	assert.True(t, hasRejected, "RejectedAssumptions should contain standalone-CRUD rejection")
+	assert.True(t, foundStandalone,
+		"RejectedAssumptions must reference the standalone-CRUD assumption; got %v",
+		found.RejectedAssumptions)
 }
 
 // N.7 — SiblingExamples present in the extends-crudservice pattern.
@@ -530,6 +536,172 @@ func TestGoDetector_EmptyRepo_NoPatternsEmitted(t *testing.T) {
 	require.NotNil(t, profile)
 	assert.Empty(t, profile.Patterns(),
 		"empty repo with go framework should produce zero patterns")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR2 code-review fix tests (findings 1a, 1b, 2, 3, 6)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// F1a — Source-ladder dedup: curated file whose content names the token
+// "nestjs-extends-crudservice" → exactly ONE entry, source=curated-skill,
+// confidence=1.0; the detected entry is suppressed.
+func TestCuratedLoader_SourceLadder_TokenMatchSuppressesDetected(t *testing.T) {
+	root := buildNestJSFixture(t)
+	// Skill file explicitly names the token — same as the NestJS detector key.
+	writeFile(t, root, ".claude/skills/crud.md",
+		"# Conventions\n\nnestjs-extends-crudservice — every service MUST extend CrudService.\n")
+
+	ex := extractor.New("proj-x", fixedClock())
+	profile, err := ex.Extract(context.Background(), root, nestjsSC("11"))
+	require.NoError(t, err)
+
+	var matches []convention.PatternEntry
+	for _, p := range profile.Patterns() {
+		if p.Pattern == "nestjs-extends-crudservice" {
+			matches = append(matches, p)
+		}
+	}
+	require.Len(t, matches, 1, "source ladder must produce exactly ONE entry for nestjs-extends-crudservice")
+	assert.Equal(t, convention.SourceCuratedSkill, matches[0].Source,
+		"curated entry (confidence 1.0) must win; detected entry must be suppressed")
+	assert.InDelta(t, 1.0, matches[0].Confidence, 1e-9)
+}
+
+// F1b — Source-ladder fallback: curated file with MUST rules but NO explicit
+// lowercase-hyphen pattern token → curated entry present WITH an inferred-key
+// warning; detected entry also present (both, by design — we can't assert sameness).
+func TestCuratedLoader_SourceLadder_FallbackKeyEmitsWarning(t *testing.T) {
+	root := buildNestJSFixture(t)
+	// Skill file has MUST but no lowercase-hyphen token → filename fallback.
+	writeFile(t, root, ".claude/skills/GLOBAL.md",
+		"# Global Rules\n\nMUST always use dependency injection.\n")
+
+	ex := extractor.New("proj-x", fixedClock())
+	profile, err := ex.Extract(context.Background(), root, nestjsSC("11"))
+	require.NoError(t, err)
+
+	// Find the curated entry — it should carry the inferred-key warning.
+	var curatedEntry *convention.PatternEntry
+	for _, p := range profile.Patterns() {
+		if p.Source == convention.SourceCuratedSkill {
+			pp := p
+			curatedEntry = &pp
+			break
+		}
+	}
+	require.NotNil(t, curatedEntry, "curated entry must be present even for filename-fallback key")
+	hasWarning := false
+	for _, w := range curatedEntry.Warnings {
+		if strings.Contains(w, "inferred from filename") {
+			hasWarning = true
+			break
+		}
+	}
+	assert.True(t, hasWarning,
+		"curated entry with filename-fallback key must carry an inferred-key warning; Warnings=%v",
+		curatedEntry.Warnings)
+
+	// Detected patterns must still be present (not suppressed — we can't assert sameness).
+	var hasDetected bool
+	for _, p := range profile.Patterns() {
+		if p.Source == convention.SourceDetectedFromCode {
+			hasDetected = true
+			break
+		}
+	}
+	assert.True(t, hasDetected, "detected patterns must coexist with filename-fallback curated entry")
+}
+
+// F2 — Go interface regex must NOT match "interface" inside comments or strings;
+// only a genuine "type X interface {" declaration counts.
+func TestGoDetector_InterfaceRegex_IgnoresCommentsAndStrings(t *testing.T) {
+	root := t.TempDir()
+	// This file has "interface" in a comment and a string but no real declaration.
+	writeFile(t, root, "internal/billing/domain/noop.go", `package domain
+
+// This is a comment about the interface concept.
+var s = "interface{} is often used in Go"
+`)
+	// This file has a real declaration — should be matched.
+	writeFile(t, root, "internal/billing/domain/repo.go", `package domain
+
+type BillingRepository interface {
+	FindByID(id string) error
+}
+`)
+
+	// Run the Go detector directly via Extract.
+	ex := extractor.New("proj-go", fixedClock())
+	profile, err := ex.Extract(context.Background(), root, goSC())
+	require.NoError(t, err)
+
+	found := findPattern(profile, "go-repository-port-in-domain")
+	// Only repo.go should be evidence (noop.go must not match).
+	if found != nil {
+		for _, ev := range found.Evidence {
+			assert.NotContains(t, ev, "noop.go",
+				"noop.go has 'interface' only in comment/string — must NOT be evidence")
+		}
+	}
+}
+
+// F3 — Go generics regex must NOT match "[T any]" in a comment; only a real
+// generic declaration counts.
+func TestGoDetector_GenericsRegex_IgnoresComments(t *testing.T) {
+	root := t.TempDir()
+	// shared/ file: has [T any] ONLY in a comment — must not be detected.
+	writeFile(t, root, "internal/shared/notes.go", `package shared
+
+// Use [T any] for generic types (this is just a comment).
+func doNothing() {}
+`)
+	// shared/ file: real generic declaration — must be detected.
+	writeFile(t, root, "internal/shared/page.go", `package shared
+
+type Page[T any] struct {
+	Items []T
+}
+`)
+	ex := extractor.New("proj-go", fixedClock())
+	profile, err := ex.Extract(context.Background(), root, goSC())
+	require.NoError(t, err)
+
+	found := findPattern(profile, "go-generics-for-envelopes-only")
+	if found != nil {
+		for _, ev := range found.Evidence {
+			assert.NotContains(t, ev, "notes.go",
+				"notes.go has [T any] only in a comment — must NOT be evidence")
+		}
+	}
+	// page.go must be detected.
+	require.NotNil(t, found, "go-generics-for-envelopes-only must be emitted when real generic found in shared/")
+	hasPage := false
+	for _, ev := range found.Evidence {
+		if strings.Contains(ev, "page.go") {
+			hasPage = true
+		}
+	}
+	assert.True(t, hasPage, "page.go with real generic decl must appear in evidence")
+}
+
+// F6 — collectSiblingExamples dead-guard: the function must not loop forever
+// and must return at most len(layers) examples (one per layer).
+func TestNestJS_CollectSiblingExamples_CappedAtLayerCount(t *testing.T) {
+	root := buildNestJSFixture(t)
+	ex := extractor.New("proj-x", fixedClock())
+
+	profile, err := ex.Extract(context.Background(), root, nestjsSC("11"))
+	require.NoError(t, err)
+
+	found := findPattern(profile, "nestjs-extends-crudservice")
+	require.NotNil(t, found)
+
+	// 5 layers defined — must never exceed 5 examples.
+	const maxLayers = 5
+	assert.LessOrEqual(t, len(found.SiblingExamples), maxLayers,
+		"collectSiblingExamples must return at most one example per layer (cap=len(layers))")
+	// Must be non-empty (the fixture provides at least 1 of each layer).
+	assert.NotEmpty(t, found.SiblingExamples)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
