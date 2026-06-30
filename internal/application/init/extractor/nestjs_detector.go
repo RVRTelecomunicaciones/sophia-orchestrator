@@ -33,11 +33,6 @@ var (
 	reStandaloneMethod  = regexp.MustCompile(`(?m)^\s+(?:async\s+)?(?:findAll|findOne|create|update|remove)\s*\(`)
 )
 
-// nestjsResult carries all patterns emitted by detectNestJS.
-type nestjsResult struct {
-	patterns []convention.PatternEntry
-}
-
 // detectNestJS walks repoRoot and emits NestJS convention patterns. It returns
 // an empty slice (no patterns) when none of the detection heuristics find evidence.
 func detectNestJS(repoRoot string) []convention.PatternEntry {

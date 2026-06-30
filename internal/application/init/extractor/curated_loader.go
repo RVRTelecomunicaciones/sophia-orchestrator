@@ -44,81 +44,6 @@ type curatedEntry struct {
 	explicitKey bool // true → content-derived token; false → filename fallback
 }
 
-// loadCuratedSkills walks <repoRoot>/.claude/skills/ and emits a PatternEntry
-// for each file that contains a blocking (MUST/MUST NOT) rule. Returns an empty
-// (non-nil) slice when the directory is absent or contains no qualifying files.
-//
-// One PatternEntry is emitted per qualifying file. Multiple pattern-key
-// mentions in a single file still produce one entry (the first mentioned key).
-//
-// When the key is derived from the filename (fallback), the entry carries a
-// Warning: "pattern key inferred from filename; may overlap a detected pattern
-// — verify". Explicit-token entries carry no such warning.
-func loadCuratedSkills(repoRoot string) []convention.PatternEntry {
-	skillsDir := filepath.Join(repoRoot, ".claude", "skills")
-
-	var raw []curatedEntry
-
-	_ = filepath.WalkDir(skillsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Directory does not exist or is unreadable — silently skip.
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-
-		content, readErr := readFileBytes(path)
-		if readErr != nil {
-			return nil
-		}
-
-		if !reMustRule.Match(content) {
-			return nil
-		}
-
-		// Derive a stable pattern key, noting whether it came from content.
-		patternKey, explicit := derivePatternKey(path, content)
-
-		// Derive a human-readable rule from the file name.
-		base := filepath.Base(path)
-		rule := "Follow blocking conventions defined in " + base +
-			". All MUST/MUST NOT rules in this file are non-negotiable."
-
-		rel, _ := filepath.Rel(repoRoot, path)
-
-		var warnings []string
-		if !explicit {
-			warnings = []string{
-				"pattern key inferred from filename; may overlap a detected pattern — verify",
-			}
-		}
-
-		raw = append(raw, curatedEntry{
-			entry: convention.PatternEntry{
-				Pattern:    patternKey,
-				Source:     convention.SourceCuratedSkill,
-				Confidence: convention.ComputeConfidence(convention.SourceCuratedSkill, 1),
-				Evidence:   []string{rel},
-				Rule:       rule,
-				Warnings:   warnings,
-			},
-			explicitKey: explicit,
-		})
-		return nil
-	})
-
-	if raw == nil {
-		return []convention.PatternEntry{}
-	}
-
-	out := make([]convention.PatternEntry, len(raw))
-	for i, r := range raw {
-		out[i] = r.entry
-	}
-	return out
-}
-
 // loadCuratedSkillsRaw is the internal variant that returns curatedEntry records
 // so applySourceLadder can differentiate explicit-token keys from filename fallbacks.
 func loadCuratedSkillsRaw(repoRoot string) []curatedEntry {
@@ -202,7 +127,7 @@ func derivePatternKey(path string, content []byte) (key string, explicit bool) {
 // isLowercaseHyphen reports whether s consists only of [a-z0-9-].
 func isLowercaseHyphen(s string) bool {
 	for _, r := range s {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 			return false
 		}
 	}

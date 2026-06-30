@@ -15,6 +15,7 @@ package extractor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
@@ -163,5 +164,9 @@ func applySourceLadder(curated []curatedEntry, detected []convention.PatternEntr
 // This is the single os call boundary for file reading in this package — it
 // keeps the package testable by replacing os.ReadFile only at this boundary.
 func readFileBytes(path string) ([]byte, error) {
-	return os.ReadFile(path) // #nosec G304 -- path comes from WalkDir, never user input
+	b, err := os.ReadFile(path) // #nosec G304 -- path comes from WalkDir, never user input
+	if err != nil {
+		return nil, fmt.Errorf("convention: read file %s: %w", path, err)
+	}
+	return b, nil
 }
