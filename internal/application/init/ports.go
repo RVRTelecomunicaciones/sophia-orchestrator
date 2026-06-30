@@ -10,6 +10,7 @@ import (
 	"errors"
 
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/convention"
 )
 
 // --- Sentinel errors ---
@@ -121,4 +122,23 @@ type FileReader interface {
 	// ReadIfExists returns the file contents if the file exists, or nil if not.
 	// Returns an error only on unexpected FS failures.
 	ReadIfExists(path string) ([]byte, error)
+}
+
+// ProfileExtractor extracts an evidence-based ConventionProfile from a target
+// repository's source tree. It is an optional dependency in InitService.Deps —
+// when the field is nil the INIT phase continues normally without extracting a
+// profile (graceful degradation).
+//
+// The extractor MUST NOT re-detect framework or language independently of the
+// StructuralContext it receives (D11-analogue: detector is the single source of
+// framework truth).
+type ProfileExtractor interface {
+	// Extract walks repoRoot and produces a ConventionProfile. sc is the
+	// StructuralContext already produced by SophiaDetector; the extractor uses
+	// sc.Frameworks to pick the right detection strategy and MUST NOT re-detect
+	// framework or language.
+	//
+	// Returns a degraded profile (empty Patterns) on non-fatal detection errors.
+	// Returns a hard error only on genuine FS failures that prevent any detection.
+	Extract(ctx context.Context, repoRoot string, sc detector.StructuralContext) (*convention.ConventionProfile, error)
 }
