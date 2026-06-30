@@ -12,8 +12,16 @@ import (
 
 	initphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
+	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/convention"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeProfileExtractorB3 satisfies ProfileExtractor.
+type fakeProfileExtractorB3 struct{}
+
+func (f *fakeProfileExtractorB3) Extract(_ context.Context, _ string, _ detector.StructuralContext) (*convention.ConventionProfile, error) {
+	return nil, nil
+}
 
 // fakeDetectorB3 satisfies SophiaDetector.
 type fakeDetectorB3 struct{}
@@ -61,6 +69,9 @@ func TestPortInterfaces(t *testing.T) {
 	var _ initphase.StructuralPersister = &fakePersisterB3{}
 	var _ initphase.CacheStore = &fakeCacheB3{}
 	var _ initphase.CacheKeyBuilder = &fakeKeyBuilderB3{}
+
+	// ProfileExtractor interface is satisfied by fakeProfileExtractorB3.
+	var _ initphase.ProfileExtractor = &fakeProfileExtractorB3{}
 
 	// Sentinel errors exist.
 	require.NotNil(t, initphase.ErrGraphifyDegraded)
