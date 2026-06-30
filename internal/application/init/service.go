@@ -25,15 +25,17 @@ import (
 
 // Deps bundles InitService dependencies.
 type Deps struct {
-	Detector  SophiaDetector
-	Spawner   GraphifySpawner
-	Persister StructuralPersister
-	Cache     CacheStore
-	CacheKey  CacheKeyBuilder
-	Clock     shared.Clock
-	IDGen     shared.IDGenerator
-	Logger    *slog.Logger
-	CacheTTL  time.Duration
+	Detector         SophiaDetector
+	Spawner          GraphifySpawner
+	Persister        StructuralPersister
+	ProfilePersister ProfilePersister
+	Cache            CacheStore
+	CacheKey         CacheKeyBuilder
+	Clock            shared.Clock
+	IDGen            shared.IDGenerator
+	Logger           *slog.Logger
+	CacheTTL         time.Duration
+	ProfileExtractor ProfileExtractor
 }
 
 // Service orchestrates the INIT phase: cache lookup → parallel detect+spawn →

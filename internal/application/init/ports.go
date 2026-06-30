@@ -142,3 +142,17 @@ type ProfileExtractor interface {
 	// Returns a hard error only on genuine FS failures that prevent any detection.
 	Extract(ctx context.Context, repoRoot string, sc detector.StructuralContext) (*convention.ConventionProfile, error)
 }
+
+// ProfilePersister writes an evidence-based ConventionProfile to the memory
+// engine. It is an optional dependency in InitService.Deps — when the field is
+// nil the INIT phase silently skips profile persistence (graceful degradation).
+//
+// Errors returned by PersistProfile are NON-FATAL: the caller logs a WARN and
+// continues; the INIT envelope is always emitted regardless.
+type ProfilePersister interface {
+	// PersistProfile writes profile to durable storage (memory-engine) using
+	// Type="convention_profile" and a topic key derived from the profile's
+	// ProjectID and Framework. Soft-fail: callers log WARN on error and
+	// continue (never hard-fail the INIT phase).
+	PersistProfile(ctx context.Context, profile convention.ConventionProfile) error
+}
