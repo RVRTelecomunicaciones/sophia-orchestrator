@@ -13,10 +13,14 @@ import (
 	"os"
 	"strings"
 
+	initphase "github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/application/init/detector"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/convention"
 	"github.com/RVRTelecomunicaciones/sophia-orchestrator/internal/domain/shared"
 )
+
+// Compile-time assertion: Extractor must satisfy the initphase.ProfileExtractor port.
+var _ initphase.ProfileExtractor = (*Extractor)(nil)
 
 // Extractor implements the initphase.ProfileExtractor port interface.
 // Construct via New; all dependencies are injected at construction time.
